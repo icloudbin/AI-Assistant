@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "DeepSeek Assistant",
+  "name": "Brave AI Assistant",
   "version": "1.0.4",
   "description": "Answer questions using the current web page in the Brave side panel, with support for writing replies back into web page input fields.",
   "permissions": ["sidePanel", "storage", "tabs", "activeTab"],
@@ -16,7 +16,7 @@
     "open_in_tab": true
   },
   "action": {
-    "default_title": "Open DeepSeek Assistant"
+    "default_title": "Open Brave AI Assistant"
   },
   "content_scripts": [
     {
