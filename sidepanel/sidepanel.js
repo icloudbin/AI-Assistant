@@ -91,7 +91,7 @@ optionsBtn.addEventListener("click", async () => {
   try {
     await chrome.runtime.openOptionsPage();
   } catch (err) {
-    console.error("[DeepSeek Assistant] Unable to open settings page:", err);
+    console.error("[Brave AI Assistant] Unable to open settings page:", err);
     // Fallback for browsers/versions that do not implement openOptionsPage.
     await chrome.tabs.create({ url: chrome.runtime.getURL("options/options.html") });
   }
@@ -128,12 +128,12 @@ async function insertIntoPage(text, mode, btn) {
   }
   chrome.tabs.sendMessage(tab.id, { type: "INSERT_TEXT", text, mode }, (response) => {
     if (chrome.runtime.lastError) {
-      console.warn("[DeepSeek Assistant] Could not connect to the web page. Original error:", chrome.runtime.lastError.message);
+      console.warn("[Brave AI Assistant] Could not connect to the web page. Original error:", chrome.runtime.lastError.message);
       flashButton(btn, "Refresh the web page and try again", false);
       return;
     }
     if (!response?.ok) {
-      console.warn("[DeepSeek Assistant] Insert failed：", response?.error);
+      console.warn("[Brave AI Assistant] Insert failed：", response?.error);
       flashButton(btn, response?.error || "Insert failed", false);
       return;
     }
