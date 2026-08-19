@@ -105,23 +105,12 @@ body { display: flex; flex-direction: column; }
 .bubble.pending::after { content: "▍"; animation: blink 1s step-start infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
-.msg-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
-.mini-btn {
-  font-size: 11px;
-  padding: 3px 8px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-.mini-btn:hover { color: var(--text); border-color: var(--accent); }
-.mini-btn-ok { color: #4ade80; border-color: #4ade80; }
-.mini-btn-error { color: var(--danger); border-color: var(--danger); }
-
-.composer { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); background: var(--panel); }
+.composer { padding: 10px; border-top: 1px solid var(--border); background: var(--panel); }
+.composer-row { display: flex; gap: 8px; align-items: stretch; }
+.composer-main { flex: 1; min-width: 0; }
 textarea#questionInput {
-  flex: 1;
+  display: block;
+  width: 100%;
   resize: vertical;
   min-height: 38px;
   max-height: 240px;
@@ -135,7 +124,73 @@ textarea#questionInput {
   font-size: 13px;
 }
 textarea#questionInput:focus { outline: none; border-color: var(--accent); }
+.composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 7px;
+  min-width: 0;
+}
+.upload-btn {
+  flex: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 7px;
+  padding: 4px 9px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.upload-btn:hover { color: var(--text); border-color: var(--accent); }
+.upload-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.upload-hint {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 7px;
+  max-height: 110px;
+  overflow-y: auto;
+}
+.attachment {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 11px;
+}
+.attachment-name {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-state { color: var(--muted); }
+.attachment-state.error { color: var(--danger); }
+.remove-attachment {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 13px;
+}
+.remove-attachment:hover { color: var(--text); }
 button#sendBtn {
+  min-width: 64px;
   background: var(--accent);
   color: #fff;
   border: none;

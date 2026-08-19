@@ -37,8 +37,18 @@
   </main>
 
   <form class="composer" id="chatForm">
-    <textarea id="questionInput" rows="2" placeholder="Enter your question… (Enter to send, Shift+Enter for a new line)"></textarea>
-    <button id="sendBtn" type="submit">Send</button>
+    <div class="attachment-list" id="attachmentList" hidden aria-label="Attached files"></div>
+    <div class="composer-row">
+      <div class="composer-main">
+        <textarea id="questionInput" rows="2" placeholder="Enter your question… (Enter to send, Shift+Enter for a new line)"></textarea>
+        <div class="composer-tools">
+          <input id="fileInput" type="file" hidden multiple accept="image/*,.txt,.md,.csv,.json,.xml,.yaml,.yml,.html,.htm,.css,.js,.ts,.java,.py,.sql,.log,.properties,.zip,.winzip" />
+          <button id="uploadBtn" class="upload-btn" type="button" title="Attach images, text, HTML, or ZIP files">📎 Upload</button>
+          <span class="upload-hint">Images are attached for reference; text, HTML and ZIP contents are sent to DeepSeek.</span>
+        </div>
+      </div>
+      <button id="sendBtn" type="submit">Send</button>
+    </div>
   </form>
 
   <script type="module" src="sidepanel.js"></script>
