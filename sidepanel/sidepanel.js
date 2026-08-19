@@ -3,6 +3,10 @@ import { MODELS, findModelById } from "../models.js";
 
 const PORT_NAME = "deepseek-chat";
 const MAX_HISTORY_TURNS = 8;
+const HISTORY_STORAGE_KEY = "conversationHistory";
+const CURRENT_CONVERSATION_KEY = "currentConversationId";
+const NEW_TOPIC_VALUE = "__new__";
+const MAX_SAVED_CONVERSATIONS = 100;
 
 const chatLog = document.getElementById("chatLog");
 const emptyState = document.getElementById("emptyState");
@@ -18,6 +22,7 @@ const modelSelect = document.getElementById("modelSelect");
 const uploadBtn = document.getElementById("uploadBtn");
 const fileInput = document.getElementById("fileInput");
 const attachmentList = document.getElementById("attachmentList");
+const historySelect = document.getElementById("historySelect");
 
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const MAX_TOTAL_EXTRACTED_CHARS = 180000;
@@ -31,6 +36,8 @@ const TEXT_EXTENSIONS = new Set([
 let attachments = [];
 
 let history = [];
+let conversations = [];
+let currentConversationId = null;
 let port = null;
 let currentAssistantBubble = null;
 let currentAssistantText = "";
@@ -163,10 +170,10 @@ function handlePortMessage(msg) {
       if (currentAssistantBubble) {
         currentAssistantBubble.classList.remove("pending");
       }
-      history.push({ role: "assistant", content: currentAssistantText });
-      trimHistory();
+      history.push({ role: "assistant", content: currentAssistantText, displayContent: currentAssistantText, modelLabel: pendingModelLabel });
       currentAssistantBubble = null;
       setStreaming(false);
+      saveConversations().catch((err) => console.error("[Brave AI Assistant] Unable to save conversation:", err));
       break;
     }
     case "ERROR": {
@@ -181,10 +188,165 @@ function handlePortMessage(msg) {
   }
 }
 
-function trimHistory() {
-  if (history.length > MAX_HISTORY_TURNS * 2) {
-    history = history.slice(-MAX_HISTORY_TURNS * 2);
+function getApiHistory() {
+  return history.slice(-(MAX_HISTORY_TURNS * 2));
+}
+
+function createConversation() {
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    title: "",
+    messages: [],
+    updatedAt: Date.now(),
+  };
+}
+
+function cleanForTopic(text) {
+  return String(text || "")
+    .replace(/\[ATTACHMENTS\][\s\S]*?\[\/ATTACHMENTS\]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function makeTopicTitle(messages) {
+  const userTexts = (messages || [])
+    .filter((m) => m.role === "user")
+    .map((m) => cleanForTopic(m.displayContent || m.content))
+    .filter(Boolean);
+  if (!userTexts.length) return "";
+  const summarySource = userTexts.join(" ");
+  const words = summarySource.split(/\s+/).filter(Boolean);
+  return words.slice(0, 10).join(" ") || "New Topic";
+}
+
+function toStoredMessage(message) {
+  return {
+    role: message.role,
+    content: message.content,
+    displayContent: message.displayContent || message.content,
+    modelLabel: message.modelLabel || "",
+  };
+}
+
+function currentConversation() {
+  return conversations.find((c) => c.id === currentConversationId) || null;
+}
+
+function syncCurrentConversationFromHistory() {
+  let convo = currentConversation();
+  if (!convo && currentConversationId) {
+    convo = { id: currentConversationId, title: "", messages: [], updatedAt: Date.now() };
+    conversations.unshift(convo);
+    conversations = conversations.slice(0, MAX_SAVED_CONVERSATIONS);
   }
+  if (!convo) return;
+  convo.messages = history.map(toStoredMessage);
+  if (!convo.title) convo.title = makeTopicTitle(convo.messages);
+  convo.updatedAt = Date.now();
+}
+
+async function saveConversations() {
+  syncCurrentConversationFromHistory();
+  conversations = conversations
+    .filter((c) => c.messages?.length)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+    .slice(0, MAX_SAVED_CONVERSATIONS);
+  await chrome.storage.local.set({
+    [HISTORY_STORAGE_KEY]: conversations,
+    [CURRENT_CONVERSATION_KEY]: currentConversationId || "",
+  });
+  renderHistorySelect();
+}
+
+function renderHistorySelect() {
+  const previous = historySelect.value;
+  historySelect.innerHTML = "";
+  const newOpt = document.createElement("option");
+  newOpt.value = NEW_TOPIC_VALUE;
+  newOpt.textContent = "New Topic";
+  historySelect.appendChild(newOpt);
+
+  const items = [...conversations].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  for (const convo of items) {
+    if (!convo.messages?.length) continue;
+    const opt = document.createElement("option");
+    opt.value = convo.id;
+    opt.textContent = convo.title || makeTopicTitle(convo.messages) || "Untitled conversation";
+    historySelect.appendChild(opt);
+  }
+  if (currentConversationId && items.some((c) => c.id === currentConversationId && c.messages?.length)) {
+    historySelect.value = currentConversationId;
+  } else if (previous && [...historySelect.options].some((o) => o.value === previous)) {
+    historySelect.value = previous;
+  } else {
+    historySelect.value = NEW_TOPIC_VALUE;
+  }
+}
+
+function renderConversation(messages) {
+  chatLog.innerHTML = "";
+  if (!messages.length) {
+    chatLog.appendChild(emptyState);
+    emptyState.hidden = false;
+    return;
+  }
+  emptyState.hidden = true;
+  for (const message of messages) {
+    if (message.role !== "user" && message.role !== "assistant") continue;
+    addBubble(message.role, message.displayContent || message.content, message.role === "assistant" ? message.modelLabel : undefined);
+  }
+  scrollToBottom();
+}
+
+function startNewTopic() {
+  history = [];
+  attachments = [];
+  currentConversationId = null;
+  renderAttachments();
+  renderConversation([]);
+  questionInput.value = "";
+  historySelect.value = NEW_TOPIC_VALUE;
+  chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: "" });
+}
+
+async function loadConversations() {
+  const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY]);
+  conversations = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
+  currentConversationId = stored[CURRENT_CONVERSATION_KEY] || null;
+
+  if (currentConversationId) {
+    const convo = conversations.find((c) => c.id === currentConversationId);
+    if (convo?.messages?.length) {
+      history = convo.messages.map((m) => ({ ...m }));
+      renderConversation(history);
+      historySelect.value = currentConversationId;
+      return;
+    }
+  }
+  renderHistorySelect();
+}
+
+async function selectConversation(id) {
+  if (id === NEW_TOPIC_VALUE) {
+    await saveConversations();
+    startNewTopic();
+    renderHistorySelect();
+    return;
+  }
+  const convo = conversations.find((c) => c.id === id);
+  if (!convo) return;
+  if (isStreaming) {
+    historySelect.value = currentConversationId || NEW_TOPIC_VALUE;
+    return;
+  }
+  currentConversationId = convo.id;
+  history = (convo.messages || []).map((m) => ({ ...m }));
+  attachments = [];
+  renderAttachments();
+  questionInput.value = "";
+  renderConversation(history);
+  await chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: currentConversationId });
+  renderHistorySelect();
 }
 
 function attachmentContextText() {
@@ -400,10 +562,24 @@ async function handleSubmit(e) {
 
   questionInput.value = "";
   const displayQuestion = question || "Attached files";
-  addBubble("user", attachmentText ? `${displayQuestion}\n\n📎 ${attachments.filter((a) => a.status === "ready").map((a) => a.name).join(", ")}` : displayQuestion);
+  const readyAttachments = attachments.filter((a) => a.status === "ready");
+  const displayContent = attachmentText
+    ? `${displayQuestion}\n\n📎 ${readyAttachments.map((a) => a.name).join(", ")}`
+    : displayQuestion;
+  addBubble("user", displayContent);
   const questionForApi = `${question || "Please analyze the attached files."}${attachmentText}`;
-  history.push({ role: "user", content: questionForApi });
-  trimHistory();
+  history.push({ role: "user", content: questionForApi, displayContent, modelLabel: "" });
+  if (!currentConversationId) {
+    currentConversationId = createConversation().id;
+  }
+  let convo = currentConversation();
+  if (!convo) {
+    convo = { id: currentConversationId, title: "", messages: [], updatedAt: Date.now() };
+    conversations.unshift(convo);
+  }
+  convo.title = convo.title || makeTopicTitle(history);
+  renderHistorySelect();
+  await saveConversations();
   setStreaming(true);
 
   let pageContext = null;
@@ -417,7 +593,7 @@ async function handleSubmit(e) {
     payload: {
       question: questionForApi,
       pageContext,
-      history: history.slice(0, -1),
+      history: getApiHistory().slice(0, -1),
       modelId: selectedModel.id,
     },
   });
@@ -432,13 +608,14 @@ questionInput.addEventListener("keydown", (e) => {
   }
 });
 
-clearBtn.addEventListener("click", () => {
-  history = [];
-  attachments = [];
-  renderAttachments();
-  chatLog.innerHTML = "";
-  chatLog.appendChild(emptyState);
-  emptyState.hidden = false;
+clearBtn.addEventListener("click", async () => {
+  if (isStreaming) return;
+  startNewTopic();
+  renderHistorySelect();
+});
+
+historySelect.addEventListener("change", async () => {
+  await selectConversation(historySelect.value);
 });
 
 includeContextToggle.addEventListener("change", async () => {
@@ -453,6 +630,8 @@ includeContextToggle.addEventListener("change", async () => {
 (async function init() {
   populateModelSelect();
   await restoreSelectedModel();
+  await loadConversations();
+  renderHistorySelect();
   connectPort();
   if (includeContextToggle.checked) {
     const ctx = await getActivePageContext();

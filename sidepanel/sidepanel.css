@@ -143,15 +143,20 @@ textarea#questionInput:focus { outline: none; border-color: var(--accent); }
 }
 .upload-btn:hover { color: var(--text); border-color: var(--accent); }
 .upload-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.upload-hint {
+.history-select {
+  flex: 1 1 auto;
   min-width: 0;
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.35;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
 }
+.history-select:hover { border-color: var(--accent); }
+.history-select:focus { outline: none; border-color: var(--accent); }
+.history-select:disabled { opacity: 0.5; cursor: not-allowed; }
 .attachment-list {
   display: flex;
   flex-wrap: wrap;

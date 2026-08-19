@@ -44,7 +44,9 @@
         <div class="composer-tools">
           <input id="fileInput" type="file" hidden multiple accept="image/*,.txt,.md,.csv,.json,.xml,.yaml,.yml,.html,.htm,.css,.js,.ts,.java,.py,.sql,.log,.properties,.zip,.winzip" />
           <button id="uploadBtn" class="upload-btn" type="button" title="Attach images, text, HTML, or ZIP files">📎 Upload</button>
-          <span class="upload-hint">Images are attached for reference; text, HTML and ZIP contents are sent to DeepSeek.</span>
+          <select id="historySelect" class="history-select" aria-label="Conversation history" title="Conversation history">
+            <option value="__new__">New Topic</option>
+          </select>
         </div>
       </div>
       <button id="sendBtn" type="submit">Send</button>
