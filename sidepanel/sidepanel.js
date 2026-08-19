@@ -663,10 +663,54 @@ historySelect.addEventListener("change", async () => {
 
 includeContextToggle.addEventListener("change", async () => {
   if (includeContextToggle.checked) {
-    const ctx = await getActivePageContext();
-    updateContextBar(ctx);
+    await refreshActivePageContext();
   } else {
     updateContextBar(null);
+  }
+});
+
+// Keep the displayed page context synchronized with the browser tab the user
+// is currently viewing. This does not send anything to DeepSeek; the refreshed
+// context is used only when the next message is submitted.
+let pageContextRefreshToken = 0;
+let lastPageContextTabId = null;
+
+async function refreshActivePageContext() {
+  if (!includeContextToggle.checked) return;
+  const token = ++pageContextRefreshToken;
+  try {
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const tab = tabs?.[0];
+    if (!tab?.id) {
+      updateContextBar(null);
+      return;
+    }
+    lastPageContextTabId = tab.id;
+    const ctx = await getActivePageContext();
+    // Ignore a slower read if the user has already switched tabs again.
+    if (token !== pageContextRefreshToken) return;
+    updateContextBar(ctx);
+  } catch (err) {
+    console.debug("[Brave AI Assistant] Unable to refresh page context:", err);
+    if (token === pageContextRefreshToken) updateContextBar(null);
+  }
+}
+
+chrome.tabs.onActivated.addListener(() => {
+  refreshActivePageContext().catch(() => {});
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (!includeContextToggle.checked || tabId !== lastPageContextTabId) return;
+  // Refresh after navigation commits or when the document title changes.
+  if (changeInfo.status === "complete" || changeInfo.title) {
+    refreshActivePageContext().catch(() => {});
+  }
+});
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId !== chrome.windows.WINDOW_ID_NONE) {
+    refreshActivePageContext().catch(() => {});
   }
 });
 
@@ -677,8 +721,7 @@ includeContextToggle.addEventListener("change", async () => {
   renderHistorySelect();
   connectPort();
   if (includeContextToggle.checked) {
-    const ctx = await getActivePageContext();
-    updateContextBar(ctx);
+    await refreshActivePageContext();
   }
 })();
 
