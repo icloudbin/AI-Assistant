@@ -128,17 +128,50 @@ function setStreaming(streaming) {
 }
 
 async function getActivePageContext() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const tab = tabs?.[0];
   if (!tab?.id) return null;
-  return new Promise((resolve) => {
-    chrome.tabs.sendMessage(tab.id, { type: "EXTRACT_PAGE_CONTENT" }, (response) => {
-      if (chrome.runtime.lastError || !response?.ok) {
-        resolve(null);
-        return;
-      }
-      resolve(response.data);
+
+  try {
+    const response = await new Promise((resolve) => {
+      chrome.tabs.sendMessage(tab.id, { type: "EXTRACT_PAGE_CONTENT" }, (value) => {
+        if (chrome.runtime.lastError) { resolve(null); return; }
+        resolve(value || null);
+      });
     });
-  });
+    if (response?.ok && response.data?.text?.trim()) {
+      return {
+        title: String(response.data.title || tab.title || ""),
+        url: String(response.data.url || tab.url || ""),
+        text: String(response.data.text).slice(0, 20000),
+      };
+    }
+  } catch (err) {
+    console.debug("[Brave AI Assistant] Content script unavailable:", err);
+  }
+
+  try {
+    if (!/^https?:\/\//i.test(String(tab.url || ""))) return null;
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => ({
+        title: document.title,
+        url: location.href,
+        text: document.body?.innerText || document.documentElement?.innerText || "",
+      }),
+    });
+    const data = results?.[0]?.result;
+    const text = String(data?.text || "").trim();
+    if (!text) return null;
+    return {
+      title: String(data?.title || tab.title || ""),
+      url: String(data?.url || tab.url || ""),
+      text: text.slice(0, 20000),
+    };
+  } catch (err) {
+    console.warn("[Brave AI Assistant] Unable to read current page:", err);
+    return null;
+  }
 }
 
 function updateContextBar(pageContext) {
@@ -319,6 +352,7 @@ async function loadConversations() {
     if (convo?.messages?.length) {
       history = convo.messages.map((m) => ({ ...m }));
       renderConversation(history);
+      renderHistorySelect();
       historySelect.value = currentConversationId;
       return;
     }
@@ -328,9 +362,18 @@ async function loadConversations() {
 
 async function selectConversation(id) {
   if (id === NEW_TOPIC_VALUE) {
-    await saveConversations();
+    if (isStreaming) {
+      historySelect.value = currentConversationId || NEW_TOPIC_VALUE;
+      return;
+    }
+
+    // New Topic is a fresh DeepSeek conversation: discard the active
+    // conversation state, clear the composer, and leave the API ready for
+    // the user's first message. The new conversation is persisted only
+    // when that first message is actually sent.
     startNewTopic();
     renderHistorySelect();
+    questionInput.focus();
     return;
   }
   const convo = conversations.find((c) => c.id === id);
@@ -638,3 +681,11 @@ includeContextToggle.addEventListener("change", async () => {
     updateContextBar(ctx);
   }
 })();
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local" || !changes[HISTORY_STORAGE_KEY]) return;
+  // Settings > Restore History updates storage from a separate page. Refresh
+  // the dropdown and keep the user on the current conversation unless it no
+  // longer exists.
+  loadConversations().catch((err) => console.error("[Brave AI Assistant] Unable to refresh restored history:", err));
+});

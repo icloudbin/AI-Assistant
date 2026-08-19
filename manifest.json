@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Brave AI Assistant",
-  "version": "1.0.8",
-  "description": "Answer questions using the current web page, attached files, a user-configurable custom prompt, and locally saved conversation history in the Brave side panel.",
+  "version": "1.2.0",
+  "description": "Answer questions using the current web page, attached files, a user-configurable custom prompt, and locally saved conversation history in the Brave side panel, with local ZIP backup support.",
   "permissions": [
     "sidePanel",
     "storage",
     "tabs",
-    "activeTab"
+    "activeTab",
+    "scripting"
   ],
   "background": {
     "service_worker": "background.js",
@@ -33,5 +34,8 @@
       ],
       "run_at": "document_idle"
     }
+  ],
+  "host_permissions": [
+    "<all_urls>"
   ]
 }

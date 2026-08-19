@@ -28,3 +28,6 @@ sidepanel/sidepanel.css / sidepanel/sidepanel.js
 The side panel now has an Upload button below the question box. It accepts images, common text/code files, HTML, and ZIP/WinZip archives. Text and HTML files are read locally and included in the DeepSeek chat request. ZIP files are parsed locally and supported text/HTML entries are extracted and included.
 
 The current DeepSeek API Chat Completions interface is text-only, so image files can be attached and displayed in the extension but their binary image data is not sent to DeepSeek. The extension does not claim image understanding through DeepSeek.
+
+
+Version 1.0.9 adds a Settings > Backup History button that exports all locally saved conversations as a standard ZIP file. API keys and custom prompts are not included.
