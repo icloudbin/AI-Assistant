@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Brave AI Assistant",
-  "version": "1.0.6",
-  "description": "Answer questions using the current web page and attached text, HTML, and ZIP files in the Brave side panel.",
+  "version": "1.0.7",
+  "description": "Answer questions using the current web page, attached files, and a user-configurable custom prompt in the Brave side panel.",
   "permissions": [
     "sidePanel",
     "storage",

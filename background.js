@@ -10,7 +10,7 @@ chrome.runtime.onConnect.addListener((port) => {
     if (msg?.type !== "ASK") return;
     try {
       const { question, pageContext, history, modelId } = msg.payload;
-      const { apiKey } = await chrome.storage.local.get("apiKey");
+      const { apiKey, customPrompt } = await chrome.storage.local.get(["apiKey", "customPrompt"]);
       if (!apiKey) throw new Error("API Key is not configured: open the Settings page to configure and save it");
 
       const model = findModelById(modelId);
@@ -22,7 +22,7 @@ chrome.runtime.onConnect.addListener((port) => {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({ model: model.id, messages: buildMessages(question, pageContext, history), stream: true }),
+        body: JSON.stringify({ model: model.id, messages: buildMessages(question, pageContext, history, customPrompt), stream: true }),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
 
@@ -54,9 +54,10 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-function buildMessages(question, pageContext, history) {
+function buildMessages(question, pageContext, history, customPrompt) {
+  const basePrompt = "You are an assistant running in the browser side panel. If web page context is provided, use it to answer.";
   const messages = [
-    { role: "system", content: "You are an assistant running in the browser side panel. If web page context is provided, use it to answer." },
+    { role: "system", content: customPrompt ? `${basePrompt}\n\nUser-defined instructions:\n${customPrompt}` : basePrompt },
   ];
   if (pageContext) {
     messages.push({

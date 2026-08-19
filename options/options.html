@@ -10,9 +10,12 @@
   .card { background: #161922; border: 1px solid #262b38; border-radius: 12px; padding: 24px; width: 420px; }
   h2 { margin: 0 0 16px; font-size: 16px; }
   label { display: block; font-size: 12px; color: #8b91a3; margin-bottom: 6px; }
-  input { width: 100%; box-sizing: border-box; background: #0f1115; border: 1px solid #262b38;
+  input, textarea { width: 100%; box-sizing: border-box; background: #0f1115; border: 1px solid #262b38;
           border-radius: 8px; color: #e6e8ee; padding: 8px 10px; font-size: 13px; }
-  input:focus { outline: none; border-color: #3b6ff5; }
+  input:focus, textarea:focus { outline: none; border-color: #3b6ff5; }
+  textarea { min-height: 180px; resize: vertical; line-height: 1.5; font-family: inherit; }
+  .field { margin-bottom: 16px; }
+  .hint { margin-top: 6px; font-size: 11px; line-height: 1.4; color: #6f7688; }
   button { margin-top: 12px; background: #3b6ff5; color: #fff; border: none; border-radius: 8px;
            padding: 8px 18px; font-weight: 600; cursor: pointer; }
   #msg { margin-left: 10px; font-size: 12px; color: #4ade80; }
@@ -21,8 +24,15 @@
 <body>
   <div class="card">
     <h2>Brave AI Assistant Settings</h2>
-    <label for="apiKey">DeepSeek API Key</label>
-    <input id="apiKey" type="password" placeholder="sk-..." autocomplete="off" />
+    <div class="field">
+      <label for="apiKey">DeepSeek API Key</label>
+      <input id="apiKey" type="password" placeholder="sk-..." autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="customPrompt">Custom Prompt</label>
+      <textarea id="customPrompt" placeholder="Example: You are a concise technical assistant. Always answer in English, use bullet points when helpful, and clearly distinguish facts from assumptions."></textarea>
+      <div class="hint">This prompt is sent to DeepSeek as a system instruction and can customize how the assistant interprets requests and formats its responses.</div>
+    </div>
     <button id="save">Save</button>
     <span id="msg"></span>
   </div>
