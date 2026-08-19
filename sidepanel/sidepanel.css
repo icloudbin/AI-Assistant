@@ -93,7 +93,55 @@ body { display: flex; flex-direction: column; }
 .empty-state { color: var(--muted); text-align: center; margin-top: 40px; line-height: 1.6; }
 
 .bubble { max-width: 92%; padding: 8px 10px; border-radius: var(--radius); line-height: 1.5; }
-.bubble-text { white-space: pre-wrap; word-break: break-word; }
+.bubble-text { word-break: break-word; overflow-wrap: anywhere; user-select: text; }
+.bubble-text p { margin: 0 0 8px; }
+.bubble-text p:last-child { margin-bottom: 0; }
+.bubble-text h1, .bubble-text h2, .bubble-text h3, .bubble-text h4, .bubble-text h5, .bubble-text h6 {
+  margin: 12px 0 6px;
+  line-height: 1.25;
+}
+.bubble-text h1 { font-size: 1.35em; }
+.bubble-text h2 { font-size: 1.2em; }
+.bubble-text h3 { font-size: 1.08em; }
+.bubble-text ul, .bubble-text ol { margin: 6px 0 8px; padding-left: 22px; }
+.bubble-text li { margin: 3px 0; }
+.bubble-text blockquote {
+  margin: 8px 0;
+  padding: 4px 10px;
+  border-left: 3px solid var(--accent);
+  color: var(--muted);
+}
+.bubble-text hr { border: 0; border-top: 1px solid var(--border); margin: 10px 0; }
+.bubble-text code {
+  background: rgba(255,255,255,0.07);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.92em;
+}
+.bubble-text pre {
+  margin: 8px 0;
+  padding: 9px 10px;
+  background: #0b0d12;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow-x: auto;
+  white-space: pre;
+}
+.bubble-text pre code {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  white-space: pre;
+}
+.bubble-text a { color: #8db2ff; text-decoration: underline; }
+.bubble-text a:hover { color: #b5ccff; }
+.table-wrap { overflow-x: auto; margin: 8px 0; }
+.bubble-text table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.bubble-text th, .bubble-text td { border: 1px solid var(--border); padding: 5px 7px; text-align: left; vertical-align: top; }
+.bubble-text th { background: rgba(255,255,255,0.045); font-weight: 600; }
 .bubble.user { align-self: flex-end; background: var(--user-bubble); color: #fff; border-bottom-right-radius: 2px; }
 .bubble.assistant { align-self: flex-start; background: var(--assistant-bubble); border-bottom-left-radius: 2px; }
 .bubble.error {

@@ -59,6 +59,233 @@ function scrollToBottom() {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
+function escapeHtml(text) {
+  return String(text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function inlineMarkdownToHtml(text) {
+  let s = escapeHtml(text);
+  const codeSpans = [];
+  s = s.replace(/`([^`\n]+)`/g, (_, code) => {
+    const token = `@@INLINE_CODE_${codeSpans.length}@@`;
+    codeSpans.push(`<code>${code}</code>`);
+    return token;
+  });
+
+  // Markdown links: only permit safe navigable protocols.
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, label, href) => {
+    try {
+      const u = new URL(href, location.href);
+      if (!["http:", "https:", "mailto:"].includes(u.protocol)) return label;
+      const safeHref = escapeHtml(u.href);
+      return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    } catch {
+      return label;
+    }
+  });
+
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
+  s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+  s = s.replace(/_([^_\n]+)_/g, "<em>$1</em>");
+  s = s.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
+
+  for (let i = 0; i < codeSpans.length; i++) {
+    s = s.replace(`@@INLINE_CODE_${i}@@`, codeSpans[i]);
+  }
+  return s;
+}
+
+function isTableSeparator(line) {
+  const cells = line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|");
+  return cells.length >= 2 && cells.every((cell) => /^\s*:?-{3,}:?\s*$/.test(cell));
+}
+
+function splitTableRow(line) {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+}
+
+function markdownToHtml(markdown) {
+  const lines = String(markdown ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let i = 0;
+  let paragraph = [];
+  let listType = null;
+  let listItems = [];
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    const text = paragraph.join("\n").trim();
+    if (text) out.push(`<p>${inlineMarkdownToHtml(text).replace(/\n/g, "<br>")}</p>`);
+    paragraph = [];
+  };
+
+  const flushList = () => {
+    if (!listType || !listItems.length) return;
+    out.push(`<${listType}>${listItems.map((item) => `<li>${inlineMarkdownToHtml(item)}</li>`).join("")}</${listType}>`);
+    listType = null;
+    listItems = [];
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      i++;
+      continue;
+    }
+
+    if (/^```/.test(trimmed) || /^~~~/.test(trimmed)) {
+      flushParagraph();
+      flushList();
+      const fence = trimmed.slice(0, 3);
+      const language = trimmed.slice(3).trim().split(/\s+/)[0] || "";
+      const codeLines = [];
+      i++;
+      while (i < lines.length && !lines[i].trim().startsWith(fence)) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      if (i < lines.length) i++;
+      const langClass = language ? ` class="language-${escapeHtml(language.replace(/[^a-zA-Z0-9_-]/g, ""))}"` : "";
+      out.push(`<pre><code${langClass}>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+      continue;
+    }
+
+    const heading = trimmed.match(/^(#{1,6})\s+(.+?)\s*#*$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const level = heading[1].length;
+      out.push(`<h${level}>${inlineMarkdownToHtml(heading[2])}</h${level}>`);
+      i++;
+      continue;
+    }
+
+    if (/^(---+|\*\*\*+|___+)$/.test(trimmed)) {
+      flushParagraph();
+      flushList();
+      out.push("<hr>");
+      i++;
+      continue;
+    }
+
+    if (trimmed.startsWith(">")) {
+      flushParagraph();
+      flushList();
+      const quoteLines = [];
+      while (i < lines.length && lines[i].trim().startsWith(">")) {
+        quoteLines.push(lines[i].trim().replace(/^>\s?/, ""));
+        i++;
+      }
+      out.push(`<blockquote>${inlineMarkdownToHtml(quoteLines.join("\n")).replace(/\n/g, "<br>")}</blockquote>`);
+      continue;
+    }
+
+    // GFM-style tables.
+    if (i + 1 < lines.length && line.includes("|") && isTableSeparator(lines[i + 1])) {
+      flushParagraph();
+      flushList();
+      const headers = splitTableRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].trim() && lines[i].includes("|")) {
+        rows.push(splitTableRow(lines[i]));
+        i++;
+      }
+      const headHtml = headers.map((cell) => `<th>${inlineMarkdownToHtml(cell)}</th>`).join("");
+      const bodyHtml = rows.map((row) => `<tr>${headers.map((_, idx) => `<td>${inlineMarkdownToHtml(row[idx] || "")}</td>`).join("")}</tr>`).join("");
+      out.push(`<div class="table-wrap"><table><thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`);
+      continue;
+    }
+
+    const ordered = trimmed.match(/^\d+[.)]\s+(.+)$/);
+    const unordered = trimmed.match(/^[-+*]\s+(.+)$/);
+    if (ordered || unordered) {
+      flushParagraph();
+      const nextType = ordered ? "ol" : "ul";
+      if (listType && listType !== nextType) flushList();
+      listType = nextType;
+      listItems.push((ordered || unordered)[1]);
+      i++;
+      continue;
+    }
+
+    paragraph.push(trimmed);
+    i++;
+  }
+
+  flushParagraph();
+  flushList();
+  return out.join("");
+}
+
+const ALLOWED_TAGS = new Set([
+  "P", "BR", "STRONG", "EM", "DEL", "CODE", "PRE", "H1", "H2", "H3", "H4", "H5", "H6",
+  "UL", "OL", "LI", "BLOCKQUOTE", "HR", "A", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "DIV"
+]);
+const ALLOWED_ATTRS = new Set(["href", "target", "rel", "class"]);
+
+function sanitizeRenderedHtml(html) {
+  const doc = new DOMParser().parseFromString(`<div id="root">${html}</div>`, "text/html");
+  const root = doc.getElementById("root");
+  if (!root) return "";
+
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+  const elements = [];
+  while (walker.nextNode()) elements.push(walker.currentNode);
+
+  for (const el of elements.reverse()) {
+    if (!ALLOWED_TAGS.has(el.tagName)) {
+      const parent = el.parentNode;
+      if (!parent) continue;
+      while (el.firstChild) parent.insertBefore(el.firstChild, el);
+      parent.removeChild(el);
+      continue;
+    }
+
+    for (const attr of [...el.attributes]) {
+      if (!ALLOWED_ATTRS.has(attr.name.toLowerCase())) el.removeAttribute(attr.name);
+    }
+
+    if (el.tagName === "A") {
+      const href = el.getAttribute("href") || "";
+      try {
+        const u = new URL(href, location.href);
+        if (!["http:", "https:", "mailto:"].includes(u.protocol)) {
+          el.replaceWith(document.createTextNode(el.textContent || ""));
+          continue;
+        }
+        el.setAttribute("href", u.href);
+        el.setAttribute("target", "_blank");
+        el.setAttribute("rel", "noopener noreferrer");
+      } catch {
+        el.replaceWith(document.createTextNode(el.textContent || ""));
+      }
+    }
+  }
+
+  return root.innerHTML;
+}
+
+function setBubbleContent(bubbleEl, text, role) {
+  const textEl = getBubbleTextEl(bubbleEl);
+  if (!textEl) return;
+  if (role === "assistant") {
+    textEl.innerHTML = sanitizeRenderedHtml(markdownToHtml(text));
+  } else {
+    textEl.textContent = text;
+  }
+}
+
 function addBubble(role, text, modelLabel) {
   emptyState.hidden = true;
   const wrap = document.createElement("div");
@@ -69,10 +296,10 @@ function addBubble(role, text, modelLabel) {
     tag.textContent = modelLabel;
     wrap.appendChild(tag);
   }
-  const textEl = document.createElement("span");
+  const textEl = document.createElement("div");
   textEl.className = "bubble-text";
-  textEl.textContent = text;
   wrap.appendChild(textEl);
+  setBubbleContent(wrap, text, role);
   chatLog.appendChild(wrap);
   scrollToBottom();
   return wrap;
@@ -194,7 +421,7 @@ function handlePortMessage(msg) {
     case "CHUNK": {
       currentAssistantText += msg.delta;
       if (currentAssistantBubble) {
-        getBubbleTextEl(currentAssistantBubble).textContent = currentAssistantText;
+        setBubbleContent(currentAssistantBubble, currentAssistantText, "assistant");
         scrollToBottom();
       }
       break;
