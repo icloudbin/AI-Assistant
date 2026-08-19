@@ -5,6 +5,10 @@ const msgEl = document.getElementById("msg");
 const backupHistoryBtn = document.getElementById("backupHistory");
 const restoreHistoryBtn = document.getElementById("restoreHistory");
 const restoreHistoryFile = document.getElementById("restoreHistoryFile");
+const deleteHistoryBtn = document.getElementById("deleteHistory");
+const deleteConfirm = document.getElementById("deleteConfirm");
+const confirmYes = document.getElementById("confirmYes");
+const confirmNo = document.getElementById("confirmNo");
 
 chrome.storage.local.get(["apiKey", "customPrompt"], ({ apiKey, customPrompt }) => {
   if (apiKey) apiKeyInput.value = apiKey;
@@ -175,9 +179,9 @@ function createZip(entries) {
 }
 
 
-// Reads the dependency-free ZIP files created by Backup History.
-// The backup writer intentionally uses ZIP "stored" entries (method 0), so
-// restore can remain fully offline without adding a ZIP library.
+// Reads standard ZIP backups offline, including Deflate-compressed WinZip archives.
+// The exporter still writes uncompressed entries, while restore accepts both
+// ZIP methods 0 (stored) and 8 (Deflate).
 function readU16le(bytes, offset) {
   return bytes[offset] | (bytes[offset + 1] << 8);
 }
@@ -189,46 +193,80 @@ function readU32le(bytes, offset) {
     | (bytes[offset + 3] << 24)) >>> 0;
 }
 
-function extractStoredZipEntries(bytes) {
+async function extractZipEntries(bytes) {
   const decoder = new TextDecoder("utf-8", { fatal: false });
   const entries = new Map();
-  let offset = 0;
-  let count = 0;
 
-  while (offset + 4 <= bytes.length) {
-    const signature = readU32le(bytes, offset);
-    if (signature === 0x04034b50) {
-      if (++count > 200) throw new Error("Backup contains too many ZIP entries");
+  // Find the End of Central Directory record. This lets us correctly handle
+  // normal WinZip/Deflate archives, including archives that use data descriptors.
+  const EOCD = 0x06054b50;
+  let eocd = -1;
+  const min = Math.max(0, bytes.length - 0xffff - 22);
+  for (let i = bytes.length - 22; i >= min; i--) {
+    if (readU32le(bytes, i) === EOCD) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error("Invalid ZIP file: end of central directory not found");
 
-      if (offset + 30 > bytes.length) throw new Error("Invalid ZIP local header");
-      const flags = readU16le(bytes, offset + 6);
-      const method = readU16le(bytes, offset + 8);
-      const compressedSize = readU32le(bytes, offset + 18);
-      const uncompressedSize = readU32le(bytes, offset + 22);
-      const nameLength = readU16le(bytes, offset + 26);
-      const extraLength = readU16le(bytes, offset + 28);
-      const nameStart = offset + 30;
-      const dataStart = nameStart + nameLength + extraLength;
+  const entryCount = readU16le(bytes, eocd + 10);
+  const centralSize = readU32le(bytes, eocd + 12);
+  const centralOffset = readU32le(bytes, eocd + 16);
+  if (entryCount > 200) throw new Error("Backup contains too many ZIP entries");
+  if (centralOffset + centralSize > bytes.length) throw new Error("Invalid ZIP central directory");
 
-      // Bit 3 means sizes are in a data descriptor after the file data.
-      // Our backup writer does not use data descriptors.
-      if (flags & 0x0008) throw new Error("Unsupported ZIP data descriptor");
-      if (method !== 0) throw new Error("Unsupported ZIP compression method");
-      if (dataStart > bytes.length || compressedSize !== uncompressedSize) {
-        throw new Error("Invalid ZIP entry size");
-      }
-      const dataEnd = dataStart + compressedSize;
-      if (dataEnd > bytes.length) throw new Error("ZIP entry exceeds file size");
-
-      const name = decoder.decode(bytes.slice(nameStart, nameStart + nameLength));
-      entries.set(name, decoder.decode(bytes.slice(dataStart, dataEnd)));
-      offset = dataEnd;
-      continue;
+  let offset = centralOffset;
+  for (let i = 0; i < entryCount; i++) {
+    if (offset + 46 > bytes.length || readU32le(bytes, offset) !== 0x02014b50) {
+      throw new Error("Invalid ZIP central directory entry");
     }
 
-    // Central directory / end of central directory: local entries are done.
-    if (signature === 0x02014b50 || signature === 0x06054b50) break;
-    throw new Error("Invalid ZIP archive");
+    const flags = readU16le(bytes, offset + 8);
+    const method = readU16le(bytes, offset + 10);
+    const compressedSize = readU32le(bytes, offset + 20);
+    const uncompressedSize = readU32le(bytes, offset + 24);
+    const nameLength = readU16le(bytes, offset + 28);
+    const extraLength = readU16le(bytes, offset + 30);
+    const commentLength = readU16le(bytes, offset + 32);
+    const localOffset = readU32le(bytes, offset + 42);
+    const nameStart = offset + 46;
+    const name = decoder.decode(bytes.slice(nameStart, nameStart + nameLength));
+
+    // ZIP64 is intentionally rejected rather than silently misreading sizes.
+    if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localOffset === 0xffffffff) {
+      throw new Error("ZIP64 backups are not supported");
+    }
+
+    if (localOffset + 30 > bytes.length || readU32le(bytes, localOffset) !== 0x04034b50) {
+      throw new Error("Invalid ZIP local header");
+    }
+    const localNameLength = readU16le(bytes, localOffset + 26);
+    const localExtraLength = readU16le(bytes, localOffset + 28);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    const dataEnd = dataStart + compressedSize;
+    if (dataStart > bytes.length || dataEnd > bytes.length) throw new Error("ZIP entry exceeds file size");
+
+    const compressed = bytes.slice(dataStart, dataEnd);
+    let data;
+    if (method === 0) {
+      data = compressed;
+    } else if (method === 8) {
+      if (typeof DecompressionStream === "undefined") {
+        throw new Error("This browser does not support ZIP Deflate decompression");
+      }
+      try {
+        const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+        data = new Uint8Array(await new Response(stream).arrayBuffer());
+      } catch (err) {
+        throw new Error(`Unable to decompress ZIP entry "${name}": ${err?.message || "invalid Deflate data"}`);
+      }
+    } else {
+      throw new Error(`Unsupported ZIP compression method ${method}`);
+    }
+
+    if (data.length !== uncompressedSize) {
+      throw new Error(`Invalid ZIP entry size for "${name}"`);
+    }
+    entries.set(name, decoder.decode(data));
+    offset = nameStart + nameLength + extraLength + commentLength;
   }
 
   return entries;
@@ -239,7 +277,7 @@ async function readBackupFile(file) {
   if (file.size > 50 * 1024 * 1024) throw new Error("Backup file is too large");
 
   const bytes = new Uint8Array(await file.arrayBuffer());
-  const entries = extractStoredZipEntries(bytes);
+  const entries = await extractZipEntries(bytes);
   const jsonText = entries.get("conversation-history.json");
   if (!jsonText) throw new Error("This ZIP is not a Brave AI Assistant history backup");
 
@@ -439,3 +477,47 @@ backupHistoryBtn.addEventListener("click", backupHistory);
 
 restoreHistoryBtn.addEventListener("click", () => restoreHistoryFile.click());
 restoreHistoryFile.addEventListener("change", restoreHistory);
+
+
+function openDeleteConfirmation() {
+  deleteConfirm.classList.add("show");
+  confirmNo.focus();
+}
+
+function closeDeleteConfirmation() {
+  deleteConfirm.classList.remove("show");
+}
+
+async function deleteAllHistory() {
+  deleteHistoryBtn.disabled = true;
+  backupHistoryBtn.disabled = true;
+  restoreHistoryBtn.disabled = true;
+  closeDeleteConfirmation();
+  msgEl.style.color = "#8b91a3";
+  msgEl.textContent = "Deleting history…";
+
+  try {
+    await chrome.storage.local.remove(HISTORY_STORAGE_KEY);
+    msgEl.style.color = "#4ade80";
+    msgEl.textContent = "All history deleted";
+    setTimeout(() => (msgEl.textContent = ""), 2500);
+  } catch (err) {
+    console.error("[Brave AI Assistant] Unable to delete history:", err);
+    msgEl.style.color = "#f55b5b";
+    msgEl.textContent = `Delete failed: ${err?.message || "Unknown error"}`;
+  } finally {
+    deleteHistoryBtn.disabled = false;
+    backupHistoryBtn.disabled = false;
+    restoreHistoryBtn.disabled = false;
+  }
+}
+
+deleteHistoryBtn.addEventListener("click", openDeleteConfirmation);
+confirmNo.addEventListener("click", closeDeleteConfirmation);
+confirmYes.addEventListener("click", deleteAllHistory);
+deleteConfirm.addEventListener("click", (event) => {
+  if (event.target === deleteConfirm) closeDeleteConfirmation();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && deleteConfirm.classList.contains("show")) closeDeleteConfirmation();
+});

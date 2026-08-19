@@ -20,10 +20,24 @@
            padding: 8px 18px; font-weight: 600; cursor: pointer; }
   .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   #msg { font-size: 12px; color: #4ade80; }
-  #backupHistory { background: #2a2f3d; }
-  #backupHistory:hover { background: #343a4b; }
-  #backupHistory:disabled, #restoreHistory:disabled { opacity: 0.6; cursor: default; }
-  .backup-hint { margin-top: 12px; }
+  #backupHistory, #restoreHistory { background: #2a2f3d; }
+  #backupHistory:hover, #restoreHistory:hover { background: #343a4b; }
+  #deleteHistory { background: #b83a3a; }
+  #deleteHistory:hover { background: #d14a4a; }
+  #backupHistory:disabled, #restoreHistory:disabled, #deleteHistory:disabled { opacity: 0.6; cursor: default; }
+  .history-management { margin-top: 18px; padding-top: 14px; border-top: 1px solid #262b38; }
+  .history-management-title { font-size: 13px; font-weight: 700; margin-bottom: 2px; }
+  .history-management .actions { margin-top: 2px; }
+  .backup-hint { margin-top: 10px; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none; align-items: center; justify-content: center; z-index: 1000; }
+  .modal-backdrop.show { display: flex; }
+  .confirm-modal { width: 340px; background: #161922; border: 1px solid #303646; border-radius: 12px; padding: 20px; box-shadow: 0 18px 60px rgba(0,0,0,.45); }
+  .confirm-modal h3 { margin: 0 0 8px; font-size: 15px; }
+  .confirm-modal p { margin: 0; color: #aeb4c2; font-size: 12px; line-height: 1.5; }
+  .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  .confirm-actions button { margin-top: 0; }
+  #confirmNo { background: #2a2f3d; }
+  #confirmNo:hover { background: #343a4b; }
 </style>
 </head>
 <body>
@@ -40,12 +54,30 @@
     </div>
     <div class="actions">
       <button id="save">Save</button>
-      <button id="backupHistory" type="button">Backup History</button>
-      <button id="restoreHistory" type="button">Restore History</button>
-      <input id="restoreHistoryFile" type="file" hidden accept=".zip,.winzip,application/zip" />
       <span id="msg"></span>
     </div>
-    <div class="hint backup-hint">Backup History exports all locally saved conversations to a ZIP file. Restore History imports conversations from a backup ZIP and merges them with existing history. Your API key and custom prompt are not included.</div>
+
+    <div class="history-management">
+      <div class="history-management-title">History Management</div>
+      <div class="actions">
+        <button id="backupHistory" type="button">Backup</button>
+        <button id="restoreHistory" type="button">Restore</button>
+        <button id="deleteHistory" type="button">Delete</button>
+        <input id="restoreHistoryFile" type="file" hidden accept=".zip,.winzip,application/zip" />
+      </div>
+      <div class="hint backup-hint">Backup exports all locally saved conversations to a ZIP file. Restore imports conversations from a backup ZIP and merges them with existing history. Delete permanently removes all saved conversation history. Your API key and custom prompt are not included in backups.</div>
+    </div>
+  </div>
+
+  <div id="deleteConfirm" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+    <div class="confirm-modal">
+      <h3 id="confirmTitle">Delete all history?</h3>
+      <p>This will permanently delete all saved conversation history. This action cannot be undone.</p>
+      <div class="confirm-actions">
+        <button id="confirmNo" type="button">No</button>
+        <button id="confirmYes" type="button">Yes</button>
+      </div>
+    </div>
   </div>
   <script src="options.js"></script>
 </body>
