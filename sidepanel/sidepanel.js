@@ -1,6 +1,36 @@
 // sidepanel/sidepanel.js —— Fixed version: no trailing spaces; keeps import "../models.js"; API Key configuration moved to Settings
 import { MODELS, findModelById } from "../models.js";
 
+
+// ---------- Theme ----------
+const THEME_STORAGE_KEY = "themePreference";
+const deviceThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+function applyTheme(preference) {
+  const normalized = ["light", "dark", "device"].includes(preference) ? preference : "device";
+  const resolved = normalized === "device" ? (deviceThemeQuery.matches ? "dark" : "light") : normalized;
+  document.documentElement.dataset.theme = resolved;
+}
+
+async function loadTheme() {
+  const stored = await chrome.storage.local.get(THEME_STORAGE_KEY);
+  applyTheme(stored[THEME_STORAGE_KEY] || "device");
+}
+
+deviceThemeQuery.addEventListener?.("change", async () => {
+  const stored = await chrome.storage.local.get(THEME_STORAGE_KEY);
+  if ((stored[THEME_STORAGE_KEY] || "device") === "device") applyTheme("device");
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === "local" && changes[THEME_STORAGE_KEY]) {
+    applyTheme(changes[THEME_STORAGE_KEY].newValue || "device");
+  }
+});
+
+loadTheme();
+
+
 const PORT_NAME = "deepseek-chat";
 const MAX_HISTORY_TURNS = 8;
 const HISTORY_STORAGE_KEY = "conversationHistory";
