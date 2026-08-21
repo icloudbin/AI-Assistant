@@ -10,6 +10,7 @@
   --user-bubble: #3b6ff5;
   --assistant-bubble: #1f232e;
   --danger: #f55b5b;
+  --danger-glow: rgba(245, 91, 91, 0.55);
   --radius: 10px;
 }
 
@@ -24,6 +25,7 @@ html[data-theme="light"] {
   --user-bubble: #315fd6;
   --assistant-bubble: #eef1f7;
   --danger: #c93f3f;
+  --danger-glow: rgba(201, 63, 63, 0.45);
 }
 
 * { box-sizing: border-box; }
@@ -204,6 +206,61 @@ textarea#questionInput:focus { outline: none; border-color: var(--accent); }
 }
 .upload-btn:hover { color: var(--text); border-color: var(--accent); }
 .upload-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.mic-wrap { position: relative; flex: none; display: inline-flex; }
+.mic-btn {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 50%;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.mic-btn:hover { color: var(--text); border-color: var(--accent); }
+.mic-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.mic-btn.active {
+  color: #fff;
+  border-color: var(--danger);
+  background: var(--danger);
+  animation: mic-pulse 1.6s ease-out infinite;
+}
+@keyframes mic-pulse {
+  0% { box-shadow: 0 0 0 0 var(--danger-glow); }
+  100% { box-shadow: 0 0 0 8px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mic-btn.active { animation: none; }
+}
+.mic-lang-badge {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  min-width: 15px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 0 3px;
+  font-size: 9px;
+  line-height: 14px;
+  cursor: pointer;
+}
+.mic-lang-badge:hover { color: var(--text); border-color: var(--accent); }
+.mic-lang-badge:disabled { opacity: 0.5; cursor: not-allowed; }
+.mic-lang-badge[hidden] { display: none; }
+.mic-status {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.mic-status.error { color: var(--danger); }
 .history-select {
   flex: 1 1 auto;
   min-width: 0;

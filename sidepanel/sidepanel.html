@@ -44,10 +44,15 @@
         <div class="composer-tools">
           <input id="fileInput" type="file" hidden multiple accept="image/*,.txt,.md,.csv,.json,.xml,.yaml,.yml,.html,.htm,.css,.js,.ts,.java,.py,.sql,.log,.properties,.zip,.winzip" />
           <button id="uploadBtn" class="upload-btn" type="button" title="Attach images, text, HTML, or ZIP files">📎 Upload</button>
+          <span class="mic-wrap">
+            <button id="micBtn" class="mic-btn" type="button" title="Start voice input" aria-pressed="false">🎤</button>
+            <button id="micLangBtn" class="mic-lang-badge" type="button" title="Voice input language: English. Click to switch.">EN</button>
+          </span>
           <select id="historySelect" class="history-select" aria-label="Conversation history" title="Conversation history">
             <option value="__new__">New Topic</option>
           </select>
         </div>
+        <div class="mic-status" id="micStatus" hidden aria-live="polite"></div>
       </div>
       <button id="sendBtn" type="submit">Send</button>
     </div>

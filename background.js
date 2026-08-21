@@ -22,7 +22,12 @@ chrome.runtime.onConnect.addListener((port) => {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({ model: model.id, messages: buildMessages(question, pageContext, history, customPrompt), stream: true }),
+        body: JSON.stringify({
+          model: model.apiModel,
+          messages: buildMessages(question, pageContext, history, customPrompt),
+          stream: true,
+          thinking: { type: model.thinking },
+        }),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
 

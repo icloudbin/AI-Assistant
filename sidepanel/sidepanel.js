@@ -53,6 +53,9 @@ const uploadBtn = document.getElementById("uploadBtn");
 const fileInput = document.getElementById("fileInput");
 const attachmentList = document.getElementById("attachmentList");
 const historySelect = document.getElementById("historySelect");
+const micBtn = document.getElementById("micBtn");
+const micLangBtn = document.getElementById("micLangBtn");
+const micStatus = document.getElementById("micStatus");
 
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const MAX_TOTAL_EXTRACTED_CHARS = 180000;
@@ -382,6 +385,14 @@ function setStreaming(streaming) {
   questionInput.disabled = streaming;
   modelSelect.disabled = streaming;
   uploadBtn.disabled = streaming;
+  if (SpeechRecognitionCtor) {
+    micBtn.disabled = streaming;
+    micLangBtn.disabled = streaming;
+  }
+  if (streaming && isListening) {
+    userStoppedMic = true;
+    stopMic();
+  }
 }
 
 async function getActivePageContext() {
@@ -851,6 +862,243 @@ fileInput.addEventListener("change", async () => {
   for (const file of files) await processFile(file);
 });
 
+// ---------- Voice input (speech-to-text) ----------
+// Browser note: this uses the standard Web Speech API (SpeechRecognition).
+// Chrome supports it out of the box. Brave has a long-standing, documented
+// issue where its cloud speech backend returns a "network" error and its
+// newer on-device recognizer can fail to install, so voice input may not
+// work in Brave depending on the installed version - see the onerror
+// handling below, which surfaces this clearly instead of failing silently.
+const MIC_LANG_STORAGE_KEY = "micRecognitionLang";
+const MIC_LANG_OPTIONS = [
+  { code: "en-US", label: "EN", name: "English", joiner: " " },
+  { code: "zh-CN", label: "中", name: "Mandarin Chinese", joiner: "" },
+];
+const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+let recognition = null;
+let isListening = false;
+let userStoppedMic = false;
+let micLangIndex = 0;
+let micBaseText = "";
+let micFinalText = "";
+let micStatusTimer = null;
+
+function currentMicLang() {
+  return MIC_LANG_OPTIONS[micLangIndex];
+}
+
+function setMicStatus(message, isError = false, autoHideMs = 0) {
+  clearTimeout(micStatusTimer);
+  micStatus.classList.toggle("error", isError);
+  micStatus.textContent = message || "";
+  micStatus.hidden = !message;
+  if (message && autoHideMs > 0) {
+    micStatusTimer = setTimeout(() => setMicStatus(""), autoHideMs);
+  }
+}
+
+function updateMicLangUI() {
+  const lang = currentMicLang();
+  micLangBtn.textContent = lang.label;
+  micLangBtn.title = `Voice input language: ${lang.name}. Click to switch.`;
+  micBtn.title = isListening ? `Stop voice input (${lang.name})` : `Start voice input (${lang.name})`;
+}
+
+async function restoreMicLang() {
+  try {
+    const stored = await chrome.storage.local.get(MIC_LANG_STORAGE_KEY);
+    const idx = MIC_LANG_OPTIONS.findIndex((l) => l.code === stored[MIC_LANG_STORAGE_KEY]);
+    if (idx !== -1) {
+      micLangIndex = idx;
+      updateMicLangUI();
+      return;
+    }
+  } catch (err) {
+    console.debug("[Brave AI Assistant] Unable to restore voice input language:", err);
+  }
+  // First run: guess a sensible starting language from the system/browser locale.
+  micLangIndex = (navigator.language || "en-US").toLowerCase().startsWith("zh") ? 1 : 0;
+  updateMicLangUI();
+}
+
+function joinMicText(base, finalText, interim) {
+  const lang = currentMicLang();
+  const pieces = [base.trim(), finalText.trim(), interim.trim()].filter(Boolean);
+  return pieces.join(lang.joiner || " ");
+}
+
+function buildRecognition() {
+  const rec = new SpeechRecognitionCtor();
+  rec.lang = currentMicLang().code;
+  rec.continuous = true;
+  rec.interimResults = true;
+
+  rec.onresult = (event) => {
+    let interim = "";
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const transcript = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        const lang = currentMicLang();
+        micFinalText = micFinalText ? `${micFinalText}${lang.joiner || " "}${transcript.trim()}` : transcript.trim();
+      } else {
+        interim += transcript;
+      }
+    }
+    questionInput.value = joinMicText(micBaseText, micFinalText, interim);
+  };
+
+  rec.onerror = (event) => {
+    const err = event.error;
+    console.debug("[Brave AI Assistant] Voice input error:", err);
+    if (err === "no-speech" || err === "aborted") return; // benign; onend decides what happens next
+    userStoppedMic = true;
+    const messages = {
+      "not-allowed": "Microphone access is blocked. Click the mic again to grant permission.",
+      "service-not-allowed": "Microphone access is blocked. Click the mic again to grant permission.",
+      "audio-capture": "No microphone was found. Check that one is connected.",
+      network:
+        "Voice input needs an online recognition service that Brave currently blocks or breaks for most users. This usually works in Chrome; Brave support depends on your version.",
+    };
+    setMicStatus(messages[err] || `Voice input error: ${err}`, true, err === "network" ? 0 : 6000);
+  };
+
+  rec.onend = () => {
+    isListening = false;
+    micBtn.classList.remove("active");
+    micBtn.setAttribute("aria-pressed", "false");
+    if (userStoppedMic) {
+      setMicStatus("");
+      updateMicLangUI();
+      return;
+    }
+    // The engine stopped itself (e.g. a brief-silence timeout) but the user
+    // hasn't clicked off: pick dictation back up automatically.
+    micBaseText = questionInput.value;
+    micFinalText = "";
+    try {
+      rec.start();
+      isListening = true;
+      micBtn.classList.add("active");
+      micBtn.setAttribute("aria-pressed", "true");
+    } catch (err) {
+      console.debug("[Brave AI Assistant] Unable to auto-restart voice input:", err);
+    }
+    updateMicLangUI();
+  };
+
+  return rec;
+}
+
+async function ensureMicPermission() {
+  if (!navigator.permissions?.query) return "unknown";
+  try {
+    const status = await navigator.permissions.query({ name: "microphone" });
+    return status.state;
+  } catch {
+    return "unknown";
+  }
+}
+
+// Side panels have a known Chromium quirk where the getUserMedia permission
+// prompt can fail to appear ("permission dismissed"). Opening the request in
+// a full tab, where the prompt reliably shows, works around it.
+function openMicPermissionTab() {
+  return new Promise((resolve) => {
+    chrome.tabs.create({ url: chrome.runtime.getURL("sidepanel/mic-permission.html") }, (tab) => {
+      const tabId = tab?.id;
+      if (!tabId) { resolve(); return; }
+      chrome.tabs.onRemoved.addListener(function listener(closedId) {
+        if (closedId === tabId) {
+          chrome.tabs.onRemoved.removeListener(listener);
+          resolve();
+        }
+      });
+    });
+  });
+}
+
+let micStarting = false;
+
+async function startMic() {
+  if (!SpeechRecognitionCtor || isStreaming || micStarting) return;
+  micStarting = true;
+  userStoppedMic = false;
+  try {
+    const permState = await ensureMicPermission();
+    if (permState !== "granted") {
+      setMicStatus(
+        permState === "denied"
+          ? "Microphone is blocked for this extension. Allow it in the tab that just opened, then try again."
+          : "Requesting microphone permission in a new tab…"
+      );
+      await openMicPermissionTab();
+      const recheck = await ensureMicPermission();
+      if (recheck !== "granted") {
+        setMicStatus("Microphone permission was not granted, so voice input can't start.", true, 6000);
+        return;
+      }
+    }
+
+    micBaseText = questionInput.value;
+    micFinalText = "";
+    recognition = buildRecognition();
+    try {
+      recognition.start();
+      isListening = true;
+      micBtn.classList.add("active");
+      micBtn.setAttribute("aria-pressed", "true");
+      updateMicLangUI();
+      setMicStatus(`Listening… (${currentMicLang().name})`);
+    } catch (err) {
+      console.error("[Brave AI Assistant] Unable to start voice input:", err);
+      setMicStatus("Unable to start voice input.", true, 6000);
+    }
+  } finally {
+    micStarting = false;
+  }
+}
+
+function stopMic() {
+  isListening = false;
+  micBtn.classList.remove("active");
+  micBtn.setAttribute("aria-pressed", "false");
+  updateMicLangUI();
+  setMicStatus("");
+  if (recognition) {
+    try { recognition.stop(); } catch { /* already stopped */ }
+  }
+}
+
+if (!SpeechRecognitionCtor) {
+  micBtn.disabled = true;
+  micLangBtn.hidden = true;
+  micBtn.title = "Voice input is not supported in this browser";
+} else {
+  restoreMicLang();
+
+  micBtn.addEventListener("click", () => {
+    if (isListening) {
+      userStoppedMic = true;
+      stopMic();
+    } else {
+      startMic();
+    }
+  });
+
+  micLangBtn.addEventListener("click", async () => {
+    const wasListening = isListening;
+    if (isListening) {
+      userStoppedMic = true;
+      stopMic();
+    }
+    micLangIndex = (micLangIndex + 1) % MIC_LANG_OPTIONS.length;
+    updateMicLangUI();
+    chrome.storage.local.set({ [MIC_LANG_STORAGE_KEY]: currentMicLang().code });
+    if (wasListening) await startMic();
+  });
+}
+
 async function handleSubmit(e) {
   e.preventDefault();
   const question = questionInput.value.trim();
@@ -910,6 +1158,10 @@ questionInput.addEventListener("keydown", (e) => {
 
 clearBtn.addEventListener("click", async () => {
   if (isStreaming) return;
+  if (isListening) {
+    userStoppedMic = true;
+    stopMic();
+  }
   startNewTopic();
   renderHistorySelect();
 });

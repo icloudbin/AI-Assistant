@@ -32,6 +32,20 @@ The current DeepSeek API Chat Completions interface is text-only, so image files
 
 Version 1.0.9 adds a Settings > Backup History button that exports all locally saved conversations as a standard ZIP file. API keys and custom prompts are not included.
 
+## Voice input (v1.5.0)
+
+A microphone button sits between Upload and the history dropdown. Click it to start dictating into the question box; click it again to stop. It listens continuously (through normal pauses) until you click it off. A small language badge on the button (EN / 中) sets which language it expects — English or Mandarin — since the browser's speech engine needs to be told the language rather than detecting it automatically; it remembers your last choice. Recognized text is appended after anything already typed.
+
+This uses the browser's built-in Web Speech API, so it needs an internet connection and, the first time, a microphone permission grant (a small tab opens for that grant — Chromium side panels have a known bug where the in-panel permission prompt can fail to appear, so a normal tab is used instead and closes itself once you allow access).
+
+**Known Brave limitation:** Brave's speech-recognition backend is unreliable — the classic cloud engine returns a "network" error because Brave doesn't have access to Google's private recognition service, and Brave's newer on-device engine has an open bug where the required language model never finishes installing. Voice input reliably works in Chrome; in Brave it depends on your version, and the extension shows an on-screen error rather than failing silently if it's blocked. If Brave fixes this, no code changes should be needed.
+
+## DeepSeek model IDs updated to V4 (v1.6.0)
+
+`deepseek-chat` and `deepseek-reasoner` were DeepSeek's standard API model names for about two years (the model behind each name was upgraded repeatedly, but the names themselves stayed stable) — that's why they were the names used here. DeepSeek introduced explicit `deepseek-v4-flash` / `deepseek-v4-pro` names on 2026-04-24 and announced the legacy names would stop working on 2026-07-24; that date has now passed, so the old IDs can no longer be relied on.
+
+`models.js` now sends `deepseek-v4-flash` / `deepseek-v4-pro` as the actual API model, while keeping the internal `id` values (`deepseek-chat`, `deepseek-reasoner`) unchanged so anyone's already-saved model preference still matches. A new "DeepSeek V4 Pro" option was added. One behavior change worth knowing: thinking mode is enabled by default on the V4 models (it previously only ran under the `deepseek-reasoner` name), so `models.js` now explicitly passes `thinking: {type: "disabled"}` for the Chat option to keep it fast/non-thinking like before - without that, Chat would silently start reasoning on every request. See DeepSeek's [Thinking Mode guide](https://api-docs.deepseek.com/guides/thinking_mode) for the underlying parameters.
+
 
 ## Rich conversation rendering
 
