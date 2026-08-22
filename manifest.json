@@ -7,7 +7,6 @@
     "sidePanel",
     "storage",
     "tabs",
-    "activeTab",
     "scripting"
   ],
   "background": {

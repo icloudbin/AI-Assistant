@@ -105,7 +105,7 @@ function inlineMarkdownToHtml(text) {
   let s = escapeHtml(text);
   const codeSpans = [];
   s = s.replace(/`([^`\n]+)`/g, (_, code) => {
-    const token = `@@INLINE_CODE_${codeSpans.length}@@`;
+    const token = `@@INLINECODE${codeSpans.length}@@`;
     codeSpans.push(`<code>${code}</code>`);
     return token;
   });
@@ -129,14 +129,14 @@ function inlineMarkdownToHtml(text) {
   s = s.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
 
   for (let i = 0; i < codeSpans.length; i++) {
-    s = s.replace(`@@INLINE_CODE_${i}@@`, codeSpans[i]);
+    s = s.replace(`@@INLINECODE${i}@@`, codeSpans[i]);
   }
   return s;
 }
 
 function isTableSeparator(line) {
   const cells = line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|");
-  return cells.length >= 2 && cells.every((cell) => /^\s*:?-{3,}:?\s*$/.test(cell));
+  return cells.length >= 2 && cells.every((cell) => /^\s*:?-+:?\s*$/.test(cell));
 }
 
 function splitTableRow(line) {
@@ -1167,6 +1167,10 @@ clearBtn.addEventListener("click", async () => {
 });
 
 historySelect.addEventListener("change", async () => {
+  if (isListening) {
+    userStoppedMic = true;
+    stopMic();
+  }
   await selectConversation(historySelect.value);
 });
 
