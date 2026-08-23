@@ -1,5 +1,7 @@
 // options.js — Settings page for Brave AI Assistant
 const apiKeyInput = document.getElementById("apiKey");
+const geminiApiKeyInput = document.getElementById("geminiApiKey");
+const claudeApiKeyInput = document.getElementById("claudeApiKey");
 const customPromptInput = document.getElementById("customPrompt");
 const msgEl = document.getElementById("msg");
 const backupHistoryBtn = document.getElementById("backupHistory");
@@ -10,20 +12,27 @@ const deleteConfirm = document.getElementById("deleteConfirm");
 const confirmYes = document.getElementById("confirmYes");
 const confirmNo = document.getElementById("confirmNo");
 
-chrome.storage.local.get(["apiKey", "customPrompt"], ({ apiKey, customPrompt }) => {
-  if (apiKey) apiKeyInput.value = apiKey;
-  if (customPrompt) customPromptInput.value = customPrompt;
-});
+chrome.storage.local.get(
+  ["apiKey", "geminiApiKey", "claudeApiKey", "customPrompt"],
+  ({ apiKey, geminiApiKey, claudeApiKey, customPrompt }) => {
+    if (apiKey) apiKeyInput.value = apiKey;
+    if (geminiApiKey) geminiApiKeyInput.value = geminiApiKey;
+    if (claudeApiKey) claudeApiKeyInput.value = claudeApiKey;
+    if (customPrompt) customPromptInput.value = customPrompt;
+  }
+);
 
 document.getElementById("save").addEventListener("click", async () => {
   const key = apiKeyInput.value.trim();
+  const geminiKey = geminiApiKeyInput.value.trim();
+  const claudeKey = claudeApiKeyInput.value.trim();
   const customPrompt = customPromptInput.value.trim();
-  if (!key) {
+  if (!key && !geminiKey && !claudeKey) {
     msgEl.style.color = "#f55b5b";
-    msgEl.textContent = "Key cannot be empty";
+    msgEl.textContent = "Enter at least one API key (DeepSeek, Gemini, or Claude)";
     return;
   }
-  await chrome.storage.local.set({ apiKey: key, customPrompt });
+  await chrome.storage.local.set({ apiKey: key, geminiApiKey: geminiKey, claudeApiKey: claudeKey, customPrompt });
   msgEl.style.color = "#4ade80";
   msgEl.textContent = "Saved ✓";
   setTimeout(() => (msgEl.textContent = ""), 1500);
@@ -309,6 +318,7 @@ function normalizeRestoredConversation(conversation, index) {
           content: String(m.content || ""),
           displayContent: String(m.displayContent || m.content || ""),
           modelLabel: String(m.modelLabel || ""),
+          modelId: String(m.modelId || ""),
         }))
     : [];
 

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Brave AI Assistant",
-  "version": "1.6.0",
-  "description": "Answer questions using the current web page, attached files, a user-configurable custom prompt, and locally saved conversation history in the Brave side panel, with local ZIP backup/restore support, automatic page-context refresh on tab changes, sanitized Markdown-to-HTML conversation rendering, bilingual (English/Mandarin) voice input, and current DeepSeek V4 model IDs.",
+  "version": "1.8.1",
+  "description": "Answer questions using the current web page, attached files, a user-configurable custom prompt, and locally saved conversation history in the Brave side panel, with local ZIP backup/restore support, automatic page-context refresh on tab changes, sanitized Markdown-to-HTML conversation rendering, bilingual (English/Mandarin) voice input, and a choice of DeepSeek V4, Gemini, or Claude models with independently configured API keys and per-conversation model memory.",
   "permissions": [
     "sidePanel",
     "storage",

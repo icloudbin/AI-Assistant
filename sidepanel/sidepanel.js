@@ -31,7 +31,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 loadTheme();
 
 
-const PORT_NAME = "deepseek-chat";
+const PORT_NAME = "ai-chat";
 const MAX_HISTORY_TURNS = 8;
 const HISTORY_STORAGE_KEY = "conversationHistory";
 const CURRENT_CONVERSATION_KEY = "currentConversationId";
@@ -76,6 +76,7 @@ let currentAssistantBubble = null;
 let currentAssistantText = "";
 let isStreaming = false;
 let pendingModelLabel = "";
+let pendingModelId = "";
 
 function connectPort() {
   port = chrome.runtime.connect({ name: PORT_NAME });
@@ -367,6 +368,37 @@ function getSelectedModel() {
   return findModelById(modelSelect.value);
 }
 
+// Finds which model actually answered a conversation, searching from the
+// most recent message backward so a conversation where the user switched
+// models mid-way restores the latest one used. Only assistant turns carry
+// model info. Messages saved before per-message modelId tracking only have
+// a modelLabel string, so those are matched by label against the current
+// MODELS list as a fallback; if neither matches anything in the current
+// list (e.g. a model was removed from models.js since), null is returned
+// and the model dropdown is left untouched.
+function findConversationModelId(messages) {
+  for (let i = (messages || []).length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== "assistant") continue;
+    if (m.modelId && MODELS.some((model) => model.id === m.modelId)) return m.modelId;
+    if (m.modelLabel) {
+      const byLabel = MODELS.find((model) => model.label === m.modelLabel);
+      if (byLabel) return byLabel.id;
+    }
+  }
+  return null;
+}
+
+// Syncs the model dropdown (and the globally-remembered last-used model) to
+// match a conversation that was just loaded. No-ops on an unknown/missing
+// id so loading a conversation with no recoverable model info leaves
+// whatever was already selected in place instead of resetting it.
+function applyModelSelection(modelId) {
+  if (!modelId || !MODELS.some((m) => m.id === modelId) || modelSelect.value === modelId) return;
+  modelSelect.value = modelId;
+  chrome.storage.local.set({ selectedModelId: modelId });
+}
+
 // ---------- Open settings page ----------
 optionsBtn.addEventListener("click", async () => {
   try {
@@ -471,7 +503,7 @@ function handlePortMessage(msg) {
       if (currentAssistantBubble) {
         currentAssistantBubble.classList.remove("pending");
       }
-      history.push({ role: "assistant", content: currentAssistantText, displayContent: currentAssistantText, modelLabel: pendingModelLabel });
+      history.push({ role: "assistant", content: currentAssistantText, displayContent: currentAssistantText, modelLabel: pendingModelLabel, modelId: pendingModelId });
       currentAssistantBubble = null;
       setStreaming(false);
       saveConversations().catch((err) => console.error("[Brave AI Assistant] Unable to save conversation:", err));
@@ -526,6 +558,7 @@ function toStoredMessage(message) {
     content: message.content,
     displayContent: message.displayContent || message.content,
     modelLabel: message.modelLabel || "",
+    modelId: message.modelId || "",
   };
 }
 
@@ -610,7 +643,7 @@ function startNewTopic() {
   chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: "" });
 }
 
-async function loadConversations() {
+async function loadConversations({ syncModel = true } = {}) {
   const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY]);
   conversations = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
   currentConversationId = stored[CURRENT_CONVERSATION_KEY] || null;
@@ -620,6 +653,7 @@ async function loadConversations() {
     if (convo?.messages?.length) {
       history = convo.messages.map((m) => ({ ...m }));
       renderConversation(history);
+      if (syncModel) applyModelSelection(findConversationModelId(history));
       renderHistorySelect();
       historySelect.value = currentConversationId;
       return;
@@ -635,10 +669,11 @@ async function selectConversation(id) {
       return;
     }
 
-    // New Topic is a fresh DeepSeek conversation: discard the active
-    // conversation state, clear the composer, and leave the API ready for
-    // the user's first message. The new conversation is persisted only
-    // when that first message is actually sent.
+    // New Topic is a fresh conversation (DeepSeek, Gemini, or Claude,
+    // depending on the selected model): discard the active conversation
+    // state, clear the composer, and leave the API ready for the user's
+    // first message. The new conversation is persisted only when that
+    // first message is actually sent.
     startNewTopic();
     renderHistorySelect();
     questionInput.focus();
@@ -656,6 +691,7 @@ async function selectConversation(id) {
   renderAttachments();
   questionInput.value = "";
   renderConversation(history);
+  applyModelSelection(findConversationModelId(history));
   await chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: currentConversationId });
   renderHistorySelect();
 }
@@ -667,7 +703,7 @@ function attachmentContextText() {
   const imageParts = [];
   for (const a of usable) {
     if (a.kind === "image") {
-      imageParts.push(`- ${a.name} (image attachment; current DeepSeek API does not accept image input directly)`);
+      imageParts.push(`- ${a.name} (image attachment; this extension does not send image data to the AI model)`);
     } else if (a.text) {
       textParts.push(`\n===== FILE: ${a.name} =====\n${a.text}`);
     }
@@ -1107,6 +1143,7 @@ async function handleSubmit(e) {
 
   const selectedModel = getSelectedModel();
   pendingModelLabel = selectedModel.label;
+  pendingModelId = selectedModel.id;
 
   questionInput.value = "";
   const displayQuestion = question || "Attached files";
@@ -1142,7 +1179,11 @@ async function handleSubmit(e) {
       question: questionForApi,
       pageContext,
       history: getApiHistory().slice(0, -1),
+      // Send the exact model selected at submit time.
       modelId: selectedModel.id,
+      provider: selectedModel.provider,
+      apiModel: selectedModel.apiModel,
+      thinking: selectedModel.thinking,
     },
   });
 }
@@ -1183,8 +1224,8 @@ includeContextToggle.addEventListener("change", async () => {
 });
 
 // Keep the displayed page context synchronized with the browser tab the user
-// is currently viewing. This does not send anything to DeepSeek; the refreshed
-// context is used only when the next message is submitted.
+// is currently viewing. This does not send anything to the AI provider; the
+// refreshed context is used only when the next message is submitted.
 let pageContextRefreshToken = 0;
 let lastPageContextTabId = null;
 
@@ -1240,8 +1281,20 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local" || !changes[HISTORY_STORAGE_KEY]) return;
-  // Settings > Restore History updates storage from a separate page. Refresh
-  // the dropdown and keep the user on the current conversation unless it no
-  // longer exists.
-  loadConversations().catch((err) => console.error("[Brave AI Assistant] Unable to refresh restored history:", err));
+  // chrome.storage.onChanged fires for every write to this key, including
+  // this same panel's own writes - not just Settings > Restore History.
+  // handleSubmit() itself calls saveConversations() before the reply comes
+  // back, so this listener fires mid-request with the conversation's most
+  // recent *assistant* turn still the model used BEFORE the user's latest
+  // dropdown change (the new reply isn't pushed until DONE). Two guards:
+  // 1. Skip entirely while a request from this panel is in flight: besides
+  //    the stale-model problem above, reloading `history` and re-rendering
+  //    the chat log here would also fight the live streaming bubble, which
+  //    only exists in memory (currentAssistantBubble) until DONE saves it.
+  // 2. Even outside a live request, never let this reactive refresh touch
+  //    the model dropdown (syncModel:false) - it should only follow
+  //    explicit navigation (selecting a conversation, or the initial
+  //    restore in init()), not an incidental background sync.
+  if (isStreaming) return;
+  loadConversations({ syncModel: false }).catch((err) => console.error("[Brave AI Assistant] Unable to refresh restored history:", err));
 });

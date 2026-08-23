@@ -18,12 +18,93 @@ Brave-AI-assistant/
 3. Click the toolbar icon to open the side panel; click "Settings" to paste and save the API Key
 4. After changing code: reload the extension card; reopen the side panel; refresh existing web pages
 
-#Here is the list of the features:
-1. Chat with DeepSeek directly from the Brave side panel.
-2. Current-page context with automatic updates — Reads and uses the content of the active web page as AI context; when enabled, the page context automatically refreshes when switching tabs or navigating.
-3. Custom Prompt — Configure a custom system prompt from the Settings page.
-4. Conversation History & Local Storage — Save and reopen previous conversations locally in the browser, with options to export, restore, or permanently delete the history (settings are also stored locally).
-5. Rich HTML Responses — AI Markdown responses are converted into sanitized, formatted HTML.
-6. Model Selection — Supports selecting the available DeepSeek models.
+# Validation checklist (file names must match exactly, UTF-8, no .txt suffix)
+manifest.json / models.js / background.js / content.js /
+options.html / options.js / sidepanel/sidepanel.html /
+sidepanel/sidepanel.css / sidepanel/sidepanel.js
+
+## File Uploads (v1.0.6)
+
+The side panel now has an Upload button below the question box. It accepts images, common text/code files, HTML, and ZIP/WinZip archives. Text and HTML files are read locally and included in the DeepSeek chat request. ZIP files are parsed locally and supported text/HTML entries are extracted and included.
+
+The current DeepSeek API Chat Completions interface is text-only, so image files can be attached and displayed in the extension but their binary image data is not sent to DeepSeek. The extension does not claim image understanding through DeepSeek.
 
 
+Version 1.0.9 adds a Settings > Backup History button that exports all locally saved conversations as a standard ZIP file. API keys and custom prompts are not included.
+
+## Voice input (v1.5.0)
+
+A microphone button sits between Upload and the history dropdown. Click it to start dictating into the question box; click it again to stop. It listens continuously (through normal pauses) until you click it off. A small language badge on the button (EN / 中) sets which language it expects — English or Mandarin — since the browser's speech engine needs to be told the language rather than detecting it automatically; it remembers your last choice. Recognized text is appended after anything already typed.
+
+This uses the browser's built-in Web Speech API, so it needs an internet connection and, the first time, a microphone permission grant (a small tab opens for that grant — Chromium side panels have a known bug where the in-panel permission prompt can fail to appear, so a normal tab is used instead and closes itself once you allow access).
+
+**Known Brave limitation:** Brave's speech-recognition backend is unreliable — the classic cloud engine returns a "network" error because Brave doesn't have access to Google's private recognition service, and Brave's newer on-device engine has an open bug where the required language model never finishes installing. Voice input reliably works in Chrome; in Brave it depends on your version, and the extension shows an on-screen error rather than failing silently if it's blocked. If Brave fixes this, no code changes should be needed.
+
+## DeepSeek model IDs updated to V4 (v1.6.0)
+
+`deepseek-chat` and `deepseek-reasoner` were DeepSeek's standard API model names for about two years (the model behind each name was upgraded repeatedly, but the names themselves stayed stable) — that's why they were the names used here. DeepSeek introduced explicit `deepseek-v4-flash` / `deepseek-v4-pro` names on 2026-04-24 and announced the legacy names would stop working on 2026-07-24; that date has now passed, so the old IDs can no longer be relied on.
+
+`models.js` now sends `deepseek-v4-flash` / `deepseek-v4-pro` as the actual API model, while keeping the internal `id` values (`deepseek-chat`, `deepseek-reasoner`) unchanged so anyone's already-saved model preference still matches. A new "DeepSeek V4 Pro" option was added. One behavior change worth knowing: thinking mode is enabled by default on the V4 models (it previously only ran under the `deepseek-reasoner` name), so `models.js` now explicitly passes `thinking: {type: "disabled"}` for the Chat option to keep it fast/non-thinking like before - without that, Chat would silently start reasoning on every request. See DeepSeek's [Thinking Mode guide](https://api-docs.deepseek.com/guides/thinking_mode) for the underlying parameters.
+
+
+## Gemini support alongside DeepSeek (v1.7.0)
+
+The model dropdown now lists Google Gemini models next to the DeepSeek ones, and Settings has a second, independent "Gemini API Key" field below the DeepSeek one. Either key can be left blank, but Save now requires at least one of the two to be filled in (previously the DeepSeek key alone was required). Picking a Gemini entry from the dropdown and asking a question sends the request to Gemini using the Gemini key; picking a DeepSeek entry still uses the DeepSeek key exactly as before.
+
+Model list as of this version (`models.js`):
+- DeepSeek Chat, DeepSeek Reasoner, DeepSeek V4 Pro — unchanged.
+- Gemini 3.7 Flash — latest stable Flash model, general-purpose default.
+- Gemini 3.1 Pro — Google's flagship Gemini 3 reasoning model, for harder reasoning/agentic tasks.
+- Gemini 2.5 Pro — Google's most capable stable (non-preview) model, for harder reasoning tasks.
+
+**v1.7.1:** Gemini 3.5 Flash-Lite was dropped (redundant with Gemini 3.7 Flash) and Gemini 3.1 Pro was added in its place, at explicit user request. Gemini 3.1 Pro's apiModel is `gemini-3.1-pro-preview` and it is currently Preview-tier per https://ai.google.dev/gemini-api/docs/models, not Stable like the other two Gemini entries — Google can change preview model IDs on two weeks' notice, so this ID is more likely to need updating later than the Stable ones.
+
+Implementation notes:
+- `background.js` now branches on a `provider` field in each `models.js` entry ("deepseek" or "gemini") and calls one of two request functions, `streamDeepSeek` or `streamGemini`, both of which feed the same SSE-line reader. DeepSeek's request/response shape (OpenAI-style `messages`/`choices[0].delta`) is unchanged; Gemini uses its native `streamGenerateContent?alt=sse` endpoint with `contents`/`candidates[0].content.parts`, authenticated via an `x-goog-api-key` header rather than a bearer token.
+- The internal message-passing port between the side panel and the background script was renamed from `"deepseek-chat"` to `"ai-chat"`, since it now carries requests for either provider. This is an internal channel name only and has no effect on stored data or on either provider's API.
+- The Gemini API key field's placeholder intentionally does not show a fixed prefix like "AIza...": Google has been transitioning newly issued Google AI Studio keys to a different "AQ." prefix since mid-2026 alongside the older "AIza" format, and both are accepted as-is by the raw `generativelanguage.googleapis.com` endpoint used here.
+- Gemini's "thinking" (extended reasoning before answering) is left at each model's own default, and thought summaries are not requested, so only the final answer streams into the chat — no chain-of-thought text should appear.
+- Image attachments are still not sent as image data to either provider (only a filename placeholder is included in the prompt text); this was previously described in one spot as a DeepSeek-specific limitation, which was inaccurate now that Gemini is an option, and has been reworded.
+
+## Claude support alongside DeepSeek and Gemini (v1.8.0)
+
+The model dropdown now also lists Anthropic Claude models, and Settings has a third, independent "Claude API Key" field below the Gemini one. Any of the three keys can be left blank, but Save now requires at least one of the three to be filled in. Picking a Claude entry from the dropdown and asking a question sends the request to Anthropic's Messages API using the Claude key; picking a DeepSeek or Gemini entry still behaves exactly as before.
+
+Model list as of this version (`models.js`):
+- DeepSeek Chat, DeepSeek Reasoner, DeepSeek V4 Pro — unchanged.
+- Gemini 3.7 Flash, Gemini 3.1 Pro — unchanged.
+- Claude Fable 5 — Anthropic's most capable widely released model, for the hardest tasks.
+- Claude Opus 5 — the current Opus-line flagship (supersedes Opus 4.8), for complex agentic/enterprise work.
+- Claude Sonnet 5 — Anthropic's recommended default: the best balance of speed and intelligence.
+- Claude Haiku 4.5 — the fastest Claude model, for quick/cheap answers.
+
+Claude Mythos 5 was deliberately left out: it's invitation-only under Anthropic's Project Glasswing program and isn't reachable with a normal self-serve API key, so it wouldn't work for extension users even if listed.
+
+Implementation notes:
+- `background.js` gained a third branch, `streamClaude`, alongside `streamDeepSeek`/`streamGemini`, feeding the same shared SSE-line reader. Claude's endpoint is Anthropic's native Messages API (`https://api.anthropic.com/v1/messages`), authenticated with an `x-api-key` header plus a required `anthropic-version: 2023-06-01` header — different from both DeepSeek's bearer token and Gemini's `x-goog-api-key`.
+- Calling the Claude API directly from the extension's background service worker (rather than through a server-side proxy) requires an extra `anthropic-dangerous-direct-browser-access: true` request header; without it, Anthropic's CORS policy blocks the request outright. This is Anthropic-documented behavior, not a workaround.
+- Like Gemini's `system_instruction`, Claude takes the system prompt as a single top-level field (`system`) instead of a `role: "system"` message — Claude actually rejects a `"system"` role inside its `messages` array. `background.js` reuses the same `buildSystemInstruction` helper Gemini already used, and adds a new `buildClaudeMessages` helper (parallel to `buildGeminiContents`) for the user/assistant turns.
+- Unlike DeepSeek and Gemini, Anthropic's Messages API requires `max_tokens` on every request; it's set to `4096` here.
+- Claude's SSE stream uses named events (`message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`, plus periodic pings) rather than DeepSeek/Gemini's unnamed `alt=sse` chunks. The shared reader in `background.js` only ever inspects lines starting with `"data:"` and ignores the preceding `"event:"` line, so no changes to the reader itself were needed — `streamClaude` just extracts text from `content_block_delta` events whose `delta.type` is `"text_delta"` and ignores everything else (tool-use deltas, thinking deltas, pings, etc. don't apply here since this extension doesn't request tools or thinking).
+- As with Gemini, no `thinking` field is sent for Claude models. Fable 5/Opus 5/Sonnet 5 use Anthropic's "adaptive thinking," which isn't a simple request-time on/off flag the way DeepSeek's `thinking` field is, so each model's own default is used and only the final answer text streams into the chat.
+- Image attachments are still not sent as image data to any of the three providers (only a filename placeholder is included in the prompt text).
+
+## Conversation history now restores the model used (v1.8.0)
+
+Previously, reopening a saved conversation from the history dropdown (or reopening the side panel to the last-active conversation) left whatever model happened to already be selected — it did not switch back to whichever model actually answered that conversation. The model dropdown now follows the conversation: selecting an older conversation, or reopening the panel, re-selects the model that produced its most recent reply.
+
+How it works: each assistant reply already tagged its message with a display `modelLabel`; it's now also tagged with the model's internal `id` (`modelId`). Loading a conversation scans its messages from most recent to oldest, looking for the last assistant turn's `modelId`, and applies it to the dropdown (and to the remembered "last used model" in storage) if that id still exists in `models.js`. This means a conversation where the model was switched mid-way (the app has always allowed changing the dropdown between messages) restores whichever model answered last, not the first one used. Conversations saved before this version only have the older `modelLabel` string, so those fall back to matching that label against the current model list; if nothing matches (for example the model was since removed from `models.js`), the currently-selected model is simply left alone rather than being reset. This restore logic is provider-agnostic — it applies equally to DeepSeek, Gemini, and Claude conversations, not just the new Claude ones. `options.js`'s history restore/backup path was updated to carry `modelId` through as well, so a Backup → Restore round trip doesn't silently drop it.
+
+## Fixed: switching models mid-conversation could revert the dropdown (v1.8.1)
+
+Reported behavior: after switching the model dropdown to a different model inside an existing conversation and sending a new message, the dropdown appeared to jump back to the previous model right after Send was clicked.
+
+Root cause: `chrome.storage.onChanged` fires for every write to `conversationHistory`, including this panel's own writes to itself — not just Settings > Restore History, which is the only case it was originally written to handle. `handleSubmit()` saves the conversation (with the user's new question appended) *before* the reply comes back, which triggers this listener. The v1.8.0 fix in `loadConversations()` (see the entry below) then re-derived "the model used by this conversation" from the saved messages, found the conversation's most recent *assistant* turn (which still reflects whichever model was used before the user's latest switch, since the new reply isn't appended until the response finishes), and reset the dropdown to it — even though the request already in flight was correctly using the newly selected model.
+
+Confirmed with an executable test (jsdom-driven, loading the real `sidepanel.html`/`sidepanel.js`/`models.js`, mocked `chrome.*` APIs) that reproduced the dropdown reverting immediately after submit, while also confirming the actual `ASK` message sent to `background.js` already carried the correct, newly selected model the entire time — `selectedModel` is captured once into a local variable at the top of `handleSubmit()`, before this reactive listener has a chance to run, and that captured value (not a fresh read of the dropdown) is what's sent, so **no request was ever actually routed to the wrong provider/model**; this was a misleading-UI bug, not a wrong-backend-call bug.
+
+Fix: `loadConversations()` now takes an optional `{ syncModel }` option (default `true`, unchanged for the initial restore in `init()` and for `selectConversation()`'s later call path). The reactive `chrome.storage.onChanged` listener now (1) skips entirely while `isStreaming` is true — a request from this panel is what triggered the write, so reloading `history`/re-rendering the chat log here would also risk fighting the live streaming bubble, which only exists in memory until the reply is saved — and (2) always calls `loadConversations({ syncModel: false })` otherwise, so this reactive path never touches the model dropdown; only explicit navigation (picking a conversation from history, or the initial panel-open restore) does.
+
+## Rich conversation rendering
+
+Assistant responses are stored as their original Markdown/plain text, but rendered in the side panel as sanitized HTML. Supported formatting includes headings, paragraphs, bold/italic text, links, lists, blockquotes, tables, horizontal rules, inline code, and fenced code blocks. Raw HTML from the model is escaped rather than executed. Normal browser selection/copy operates on the rendered DOM, so copying selected content copies readable text/rich text rather than HTML tags.

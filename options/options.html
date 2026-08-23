@@ -80,9 +80,17 @@
       <input id="apiKey" type="password" placeholder="sk-..." autocomplete="off" />
     </div>
     <div class="field">
+      <label for="geminiApiKey">Gemini API Key</label>
+      <input id="geminiApiKey" type="password" placeholder="Gemini API key" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="claudeApiKey">Claude API Key</label>
+      <input id="claudeApiKey" type="password" placeholder="sk-ant-..." autocomplete="off" />
+    </div>
+    <div class="field">
       <label for="customPrompt">Custom Prompt</label>
       <textarea id="customPrompt" placeholder="Example: You are a concise technical assistant. Always answer in English, use bullet points when helpful, and clearly distinguish facts from assumptions."></textarea>
-      <div class="hint">This prompt is sent to DeepSeek as a system instruction and can customize how the assistant interprets requests and formats its responses.</div>
+      <div class="hint">This prompt is sent to the selected model (DeepSeek, Gemini, or Claude) as a system instruction and can customize how the assistant interprets requests and formats its responses.</div>
     </div>
     <div class="actions">
       <button id="save">Save</button>
@@ -97,7 +105,7 @@
         <button id="deleteHistory" type="button">Delete</button>
         <input id="restoreHistoryFile" type="file" hidden accept=".zip,.winzip,application/zip" />
       </div>
-      <div class="hint backup-hint">Backup exports all locally saved conversations to a ZIP file. Restore imports conversations from a backup ZIP and merges them with existing history. Delete permanently removes all saved conversation history. Your API key and custom prompt are not included in backups.</div>
+      <div class="hint backup-hint">Backup exports all locally saved conversations to a ZIP file. Restore imports conversations from a backup ZIP and merges them with existing history. Delete permanently removes all saved conversation history. Your API keys and custom prompt are not included in backups.</div>
     </div>
   </div>
 
