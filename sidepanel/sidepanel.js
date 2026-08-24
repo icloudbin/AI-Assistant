@@ -172,7 +172,22 @@ function markdownToHtml(markdown) {
 
     if (!trimmed) {
       flushParagraph();
-      flushList();
+      // A blank line ends the list UNLESS the list continues right after it.
+      // Markdown (and real LLM output especially) commonly writes "loose"
+      // lists with a blank line between items, particularly once an item's
+      // text gets long - that's still one list, not a new one for every
+      // item. Skip past any run of blank lines to the next real line; only
+      // flush if that line isn't another item of the SAME list type
+      // (switching from ordered to unordered, or ending the list entirely,
+      // still correctly flushes).
+      if (listType) {
+        let j = i + 1;
+        while (j < lines.length && !lines[j].trim()) j++;
+        const nextTrimmed = j < lines.length ? lines[j].trim() : "";
+        const continuesSameList =
+          (listType === "ol" && /^\d+[.)]\s+/.test(nextTrimmed)) || (listType === "ul" && /^[-+*]\s+/.test(nextTrimmed));
+        if (!continuesSameList) flushList();
+      }
       i++;
       continue;
     }
@@ -643,20 +658,22 @@ function startNewTopic() {
   chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: "" });
 }
 
-async function loadConversations({ syncModel = true } = {}) {
+async function loadConversations({ activate = true, syncModel = true } = {}) {
   const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY]);
   conversations = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
-  currentConversationId = stored[CURRENT_CONVERSATION_KEY] || null;
 
-  if (currentConversationId) {
-    const convo = conversations.find((c) => c.id === currentConversationId);
-    if (convo?.messages?.length) {
-      history = convo.messages.map((m) => ({ ...m }));
-      renderConversation(history);
-      if (syncModel) applyModelSelection(findConversationModelId(history));
-      renderHistorySelect();
-      historySelect.value = currentConversationId;
-      return;
+  if (activate) {
+    currentConversationId = stored[CURRENT_CONVERSATION_KEY] || null;
+    if (currentConversationId) {
+      const convo = conversations.find((c) => c.id === currentConversationId);
+      if (convo?.messages?.length) {
+        history = convo.messages.map((m) => ({ ...m }));
+        renderConversation(history);
+        if (syncModel) applyModelSelection(findConversationModelId(history));
+        renderHistorySelect();
+        historySelect.value = currentConversationId;
+        return;
+      }
     }
   }
   renderHistorySelect();
@@ -1271,7 +1288,16 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 (async function init() {
   populateModelSelect();
   await restoreSelectedModel();
-  await loadConversations();
+  // Load the saved conversation list (so the history dropdown is populated
+  // and past conversations stay one click away), but do not activate/display
+  // whichever one happened to be open last time (activate:false) - every
+  // fresh open of the side panel (after it was closed, or after a browser
+  // restart) should start on a blank New Topic instead of silently resuming
+  // the previous session. Explicitly clears the persisted "current
+  // conversation" pointer too, so it doesn't linger and get picked up by a
+  // later reactive refresh (see the chrome.storage.onChanged listener below).
+  await loadConversations({ activate: false });
+  startNewTopic();
   renderHistorySelect();
   connectPort();
   if (includeContextToggle.checked) {
