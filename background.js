@@ -1,10 +1,35 @@
 // background.js (root directory)
 import { findModelById } from "./models.js";
+import { CURRENT_CONVERSATION_KEY } from "./storage-keys.js";
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.warn);
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "ai-chat") return;
+
+  // sidepanel.js opens this port once per document lifetime (connectPort(),
+  // called from its init()) and never itself calls port.disconnect(), so on
+  // this (background) side, onDisconnect firing means the side panel's page
+  // was actually torn down - either the user closed the panel (Chrome does
+  // not expose a dedicated close event; a dropped long-lived port is the
+  // documented way extensions detect it - see
+  // https://developer.chrome.com/docs/extensions/reference/api/sidePanel
+  // and the related community pattern at
+  // https://github.com/GoogleChrome/chrome-extensions-samples/issues/998),
+  // or this service worker itself restarted (normal MV3 behavior after ~30s
+  // idle) and dropped every port it held. Either way, clearing the
+  // "current conversation" pointer here is safe: if the panel is still
+  // genuinely open with an active conversation, sidepanel.js's own
+  // saveConversations() rewrites this same key on the very next message
+  // send, so a spurious clear from a service-worker restart self-heals
+  // without losing anything. This is a second, independent layer behind
+  // sidepanel.js's own init() (which already resets to a blank New Topic on
+  // every fresh load) - if the panel's document is somehow reused instead
+  // of freshly reloaded on close/reopen, this still guarantees the pointer
+  // it would restore from is already empty.
+  port.onDisconnect.addListener(() => {
+    chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: "" }).catch(() => {});
+  });
 
   port.onMessage.addListener(async (msg) => {
     if (msg?.type !== "ASK") return;
@@ -25,7 +50,7 @@ chrome.runtime.onConnect.addListener((port) => {
         thinking: thinking ?? storedModel.thinking,
       };
 
-      if (model.provider !== "gemini" && model.provider !== "deepseek" && model.provider !== "claude") {
+      if (model.provider !== "gemini" && model.provider !== "deepseek" && model.provider !== "claude" && model.provider !== "openai") {
         throw new Error(`Unsupported model provider: ${model.provider}`);
       }
 
@@ -37,6 +62,8 @@ chrome.runtime.onConnect.addListener((port) => {
         await streamDeepSeek(model, question, pageContext, history, port);
       } else if (model.provider === "claude") {
         await streamClaude(model, question, pageContext, history, port);
+      } else if (model.provider === "openai") {
+        await streamOpenAI(model, question, pageContext, history, port);
       }
 
       port.postMessage({ type: "DONE" });
@@ -145,7 +172,61 @@ async function streamClaude(model, question, pageContext, history, port) {
   );
 }
 
-// Shared SSE reader: DeepSeek, Gemini, and Claude all send "data: {...}\n\n"
+// OpenAI's current recommended endpoint is the Responses API
+// (https://api.openai.com/v1/responses), not the older
+// /v1/chat/completions - see
+// https://platform.openai.com/docs/guides/migrate-to-responses (checked
+// 2026-08-24). Like Claude/Gemini, the system prompt is a single top-level
+// field (`instructions`, a plain string) rather than a message with role
+// "system" - unlike Claude, OpenAI's `input` array does technically also
+// accept a "system"/"developer" role turn, but `instructions` is used here
+// to stay consistent with how the other three providers are wired, reusing
+// the same buildSystemInstruction helper. `store: false` is set because
+// this extension is stateless per request (it always resends the full
+// history itself, like the other three providers) and never uses OpenAI's
+// previous_response_id continuation feature, so there's no reason for
+// OpenAI to retain the response server-side by default.
+//
+// CORS CAVEAT: multiple OpenAI community threads confirm api.openai.com
+// does not return CORS-permissive headers for a plain webpage origin, and
+// OpenAI's own guidance is to proxy through a backend rather than call the
+// API directly from client-side code. That guidance is written for
+// ordinary web pages; a Chrome/Brave extension's background service worker
+// with host_permissions (this extension already has "<all_urls>") is a
+// different, more privileged fetch() context that is not normally subject
+// to the same CORS enforcement - which is exactly what already lets this
+// same file call api.deepseek.com, generativelanguage.googleapis.com, and
+// api.anthropic.com directly. This could not be verified against a live
+// api.openai.com endpoint from the sandbox this was written in (network
+// access there is allow-listed to a small set of domains that doesn't
+// include it), so it needs a real test with a live key; unlike Claude,
+// OpenAI does not document an equivalent explicit opt-in header to add if
+// a direct request does turn out to be blocked.
+async function streamOpenAI(model, question, pageContext, history, port) {
+  const { openaiApiKey, customPrompt } = await chrome.storage.local.get(["openaiApiKey", "customPrompt"]);
+  if (!openaiApiKey) throw new Error("ChatGPT API Key is not configured: open the Settings page to configure and save it");
+
+  const resp = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${openaiApiKey}`,
+    },
+    body: JSON.stringify({
+      model: model.apiModel,
+      instructions: buildSystemInstruction(pageContext, customPrompt),
+      input: buildOpenAIInput(question, history),
+      store: false,
+      stream: true,
+    }),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
+
+  await readSse(resp, (json) => (json?.type === "response.output_text.delta" ? json.delta || "" : ""), port);
+}
+
+// Shared SSE reader: DeepSeek, Gemini, Claude, and OpenAI all send
+// "data: {...}\n\n"
 // lines (Claude's are additionally preceded by a named "event:" line, which
 // this reader ignores since it only inspects lines starting with "data:");
 // only the JSON shape differs, so `extractDelta` picks the provider-specific
@@ -226,4 +307,17 @@ function buildClaudeMessages(question, history) {
     .map((h) => ({ role: h.role, content: h.content }));
   messages.push({ role: "user", content: question });
   return messages;
+}
+
+// OpenAI's Responses API `input` array takes the same {role, content} turn
+// shape as Claude's `messages` (and, like Claude, only "user"/"assistant"
+// roles are sent here - the system prompt goes through the top-level
+// `instructions` field above instead, even though OpenAI's `input` array
+// would technically also accept a "system"/"developer" role turn).
+function buildOpenAIInput(question, history) {
+  const input = (history || [])
+    .filter((h) => h.role === "user" || h.role === "assistant")
+    .map((h) => ({ role: h.role, content: h.content }));
+  input.push({ role: "user", content: question });
+  return input;
 }

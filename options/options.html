@@ -88,9 +88,13 @@
       <input id="claudeApiKey" type="password" placeholder="sk-ant-..." autocomplete="off" />
     </div>
     <div class="field">
+      <label for="openaiApiKey">ChatGPT API Key</label>
+      <input id="openaiApiKey" type="password" placeholder="sk-..." autocomplete="off" />
+    </div>
+    <div class="field">
       <label for="customPrompt">Custom Prompt</label>
       <textarea id="customPrompt" placeholder="Example: You are a concise technical assistant. Always answer in English, use bullet points when helpful, and clearly distinguish facts from assumptions."></textarea>
-      <div class="hint">This prompt is sent to the selected model (DeepSeek, Gemini, or Claude) as a system instruction and can customize how the assistant interprets requests and formats its responses.</div>
+      <div class="hint">This prompt is sent to the selected model (DeepSeek, Gemini, Claude, or ChatGPT) as a system instruction and can customize how the assistant interprets requests and formats its responses.</div>
     </div>
     <div class="actions">
       <button id="save">Save</button>

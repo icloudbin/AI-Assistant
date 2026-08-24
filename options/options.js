@@ -2,6 +2,7 @@
 const apiKeyInput = document.getElementById("apiKey");
 const geminiApiKeyInput = document.getElementById("geminiApiKey");
 const claudeApiKeyInput = document.getElementById("claudeApiKey");
+const openaiApiKeyInput = document.getElementById("openaiApiKey");
 const customPromptInput = document.getElementById("customPrompt");
 const msgEl = document.getElementById("msg");
 const backupHistoryBtn = document.getElementById("backupHistory");
@@ -13,11 +14,12 @@ const confirmYes = document.getElementById("confirmYes");
 const confirmNo = document.getElementById("confirmNo");
 
 chrome.storage.local.get(
-  ["apiKey", "geminiApiKey", "claudeApiKey", "customPrompt"],
-  ({ apiKey, geminiApiKey, claudeApiKey, customPrompt }) => {
+  ["apiKey", "geminiApiKey", "claudeApiKey", "openaiApiKey", "customPrompt"],
+  ({ apiKey, geminiApiKey, claudeApiKey, openaiApiKey, customPrompt }) => {
     if (apiKey) apiKeyInput.value = apiKey;
     if (geminiApiKey) geminiApiKeyInput.value = geminiApiKey;
     if (claudeApiKey) claudeApiKeyInput.value = claudeApiKey;
+    if (openaiApiKey) openaiApiKeyInput.value = openaiApiKey;
     if (customPrompt) customPromptInput.value = customPrompt;
   }
 );
@@ -26,13 +28,14 @@ document.getElementById("save").addEventListener("click", async () => {
   const key = apiKeyInput.value.trim();
   const geminiKey = geminiApiKeyInput.value.trim();
   const claudeKey = claudeApiKeyInput.value.trim();
+  const openaiKey = openaiApiKeyInput.value.trim();
   const customPrompt = customPromptInput.value.trim();
-  if (!key && !geminiKey && !claudeKey) {
+  if (!key && !geminiKey && !claudeKey && !openaiKey) {
     msgEl.style.color = "#f55b5b";
-    msgEl.textContent = "Enter at least one API key (DeepSeek, Gemini, or Claude)";
+    msgEl.textContent = "Enter at least one API key (DeepSeek, Gemini, Claude, or ChatGPT)";
     return;
   }
-  await chrome.storage.local.set({ apiKey: key, geminiApiKey: geminiKey, claudeApiKey: claudeKey, customPrompt });
+  await chrome.storage.local.set({ apiKey: key, geminiApiKey: geminiKey, claudeApiKey: claudeKey, openaiApiKey: openaiKey, customPrompt });
   msgEl.style.color = "#4ade80";
   msgEl.textContent = "Saved ✓";
   setTimeout(() => (msgEl.textContent = ""), 1500);

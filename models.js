@@ -49,6 +49,27 @@
 // "adaptive thinking" on Fable 5 / Opus 5 / Sonnet 5 is not a simple on/off
 // request parameter, so - as with Gemini - no `thinking` field is set here
 // and each model's default is used.
+// OpenAI (ChatGPT) entries added 2026-08. apiModel values per
+// https://developers.openai.com/api/docs/models and
+// https://developers.openai.com/api/docs/guides/latest-model (checked
+// 2026-08-24): GPT-5.6 is the current flagship generation and introduced an
+// explicit three-tier naming scheme - gpt-5.6-sol (flagship, complex
+// reasoning/coding), gpt-5.6-terra (balances intelligence and cost), and
+// gpt-5.6-luna (cost-sensitive, high-volume) - superseding the GPT-5.2/5.3/
+// 5.4/5.5 line the same way Claude Opus 5 superseded Opus 4.8 above. A bare
+// "gpt-5.6" alias also exists and currently resolves to gpt-5.6-sol, but the
+// explicit tier id is used as apiModel for the same reason Claude Haiku 4.5
+// uses its dated snapshot above: an alias can be silently repointed later.
+// provider "openai" is handled by background.js via the Responses API
+// (https://api.openai.com/v1/responses, NOT the older /v1/chat/completions
+// endpoint), which takes an `input` array instead of `messages` and a
+// top-level `instructions` string instead of a system-role message - see
+// the comment on streamOpenAI in background.js for the streaming-format and
+// CORS notes, including one point (whether OpenAI's API accepts a direct
+// call from this extension's background service worker) that could not be
+// verified from this sandbox and needs a live check. As with Gemini and
+// Claude, no reasoning/thinking field is set here and each model's default
+// effort is used.
 export const MODELS = [
   { id: "deepseek-chat", label: "DeepSeek Chat", provider: "deepseek", apiModel: "deepseek-v4-flash", thinking: "disabled" },
   { id: "deepseek-reasoner", label: "DeepSeek Reasoner", provider: "deepseek", apiModel: "deepseek-v4-flash", thinking: "enabled" },
@@ -59,6 +80,9 @@ export const MODELS = [
   { id: "claude-opus-5", label: "Claude Opus 5", provider: "claude", apiModel: "claude-opus-5" },
   { id: "claude-sonnet-5", label: "Claude Sonnet 5", provider: "claude", apiModel: "claude-sonnet-5" },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", provider: "claude", apiModel: "claude-haiku-4-5-20251001" },
+  { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", provider: "openai", apiModel: "gpt-5.6-sol" },
+  { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", provider: "openai", apiModel: "gpt-5.6-terra" },
+  { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", provider: "openai", apiModel: "gpt-5.6-luna" },
 ];
 
 export function findModelById(id) {

@@ -1,6 +1,6 @@
 // sidepanel/sidepanel.js —— Fixed version: no trailing spaces; keeps import "../models.js"; API Key configuration moved to Settings
 import { MODELS, findModelById } from "../models.js";
-
+import { HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY } from "../storage-keys.js";
 
 // ---------- Theme ----------
 const THEME_STORAGE_KEY = "themePreference";
@@ -33,8 +33,6 @@ loadTheme();
 
 const PORT_NAME = "ai-chat";
 const MAX_HISTORY_TURNS = 8;
-const HISTORY_STORAGE_KEY = "conversationHistory";
-const CURRENT_CONVERSATION_KEY = "currentConversationId";
 const NEW_TOPIC_VALUE = "__new__";
 const MAX_SAVED_CONVERSATIONS = 100;
 
@@ -686,8 +684,8 @@ async function selectConversation(id) {
       return;
     }
 
-    // New Topic is a fresh conversation (DeepSeek, Gemini, or Claude,
-    // depending on the selected model): discard the active conversation
+    // New Topic is a fresh conversation (DeepSeek, Gemini, Claude, or
+    // ChatGPT, depending on the selected model): discard the active conversation
     // state, clear the composer, and leave the API ready for the user's
     // first message. The new conversation is persisted only when that
     // first message is actually sent.
