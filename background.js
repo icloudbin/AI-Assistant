@@ -50,7 +50,13 @@ chrome.runtime.onConnect.addListener((port) => {
         thinking: thinking ?? storedModel.thinking,
       };
 
-      if (model.provider !== "gemini" && model.provider !== "deepseek" && model.provider !== "claude" && model.provider !== "openai") {
+      if (
+        model.provider !== "gemini" &&
+        model.provider !== "deepseek" &&
+        model.provider !== "claude" &&
+        model.provider !== "openai" &&
+        model.provider !== "openrouter"
+      ) {
         throw new Error(`Unsupported model provider: ${model.provider}`);
       }
 
@@ -64,6 +70,8 @@ chrome.runtime.onConnect.addListener((port) => {
         await streamClaude(model, question, pageContext, history, port);
       } else if (model.provider === "openai") {
         await streamOpenAI(model, question, pageContext, history, port);
+      } else if (model.provider === "openrouter") {
+        await streamOpenRouter(model, question, pageContext, history, port);
       }
 
       port.postMessage({ type: "DONE" });
@@ -88,6 +96,52 @@ async function streamDeepSeek(model, question, pageContext, history, port) {
       messages: buildMessages(question, pageContext, history, customPrompt),
       stream: true,
       thinking: { type: model.thinking },
+    }),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
+
+  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", port);
+}
+
+// OpenRouter (https://openrouter.ai) is a third-party router, not a model's
+// own native API: it forwards requests to whichever underlying
+// provider/model the `model` slug names (here, "stealth/ox-alpha" - the
+// anonymous stealth model OpenRouter itself listed on 2026-08-20; see the
+// comment above the MODELS array in models.js for what that means in
+// practice). Its endpoint is OpenAI-Chat-Completions-COMPATIBLE - same
+// {messages: [{role, content}]} shape, system role sent inline, same
+// choices[0].delta.content while streaming - confirmed against OpenRouter's
+// own docs at https://openrouter.ai/docs/quickstart (checked 2026-08-24),
+// so this reuses buildMessages() and the exact same extractDelta shape as
+// streamDeepSeek above, just pointed at a different host/key/model slug.
+// HTTP-Referer/X-OpenRouter-Title are optional attribution headers (used
+// for OpenRouter's own leaderboard, not required for the request to work)
+// per that same quickstart page.
+//
+// CORS: as with OpenAI above, this could not be verified against a live
+// openrouter.ai request from the sandbox this was written in (not on its
+// network allow-list). OpenRouter's whole product is built around being
+// called directly from client apps (its own docs show plain fetch()/
+// requests examples with no backend-proxy caveat, unlike OpenAI's
+// direct-browser-access guidance), so a CORS block is less likely here a
+// priori than it was for OpenAI - but that is a reasonable inference, not
+// a confirmed fact, so this still needs a real test with a live key.
+async function streamOpenRouter(model, question, pageContext, history, port) {
+  const { openrouterApiKey, customPrompt } = await chrome.storage.local.get(["openrouterApiKey", "customPrompt"]);
+  if (!openrouterApiKey) throw new Error("OpenRouter API Key is not configured: open the Settings page to configure and save it");
+
+  const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${openrouterApiKey}`,
+      "HTTP-Referer": chrome.runtime.getURL(""),
+      "X-OpenRouter-Title": "Brave AI Assistant",
+    },
+    body: JSON.stringify({
+      model: model.apiModel,
+      messages: buildMessages(question, pageContext, history, customPrompt),
+      stream: true,
     }),
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
@@ -225,7 +279,8 @@ async function streamOpenAI(model, question, pageContext, history, port) {
   await readSse(resp, (json) => (json?.type === "response.output_text.delta" ? json.delta || "" : ""), port);
 }
 
-// Shared SSE reader: DeepSeek, Gemini, Claude, and OpenAI all send
+// Shared SSE reader: DeepSeek, Gemini, Claude, OpenAI, and OpenRouter all
+// send
 // "data: {...}\n\n"
 // lines (Claude's are additionally preceded by a named "event:" line, which
 // this reader ignores since it only inspects lines starting with "data:");
