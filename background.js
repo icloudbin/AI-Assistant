@@ -7,6 +7,17 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(consol
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "ai-chat") return;
 
+  // Per-connection in-flight-request state (fresh for each side panel
+  // session/reconnect, since these are declared inside this listener's
+  // closure). At most one request is ever active at a time - the side
+  // panel's own UI disables the composer while streaming - but a STOP can
+  // legitimately race a fresh ASK sent immediately after (e.g. the user
+  // clicks "Clear" to escape a hung request, then immediately asks a new
+  // question), so both the abort controller AND the request id it belongs
+  // to are tracked together and only ever overwritten as a pair.
+  let activeRequestId = null;
+  let activeAbortController = null;
+
   // sidepanel.js opens this port once per document lifetime (connectPort(),
   // called from its init()) and never itself calls port.disconnect(), so on
   // this (background) side, onDisconnect firing means the side panel's page
@@ -26,13 +37,34 @@ chrome.runtime.onConnect.addListener((port) => {
   // sidepanel.js's own init() (which already resets to a blank New Topic on
   // every fresh load) - if the panel's document is somehow reused instead
   // of freshly reloaded on close/reopen, this still guarantees the pointer
-  // it would restore from is already empty.
+  // it would restore from is already empty. Also abort whatever request is
+  // still in flight, so a closed/reloaded panel doesn't leave a fetch
+  // running for no listener.
   port.onDisconnect.addListener(() => {
     chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: "" }).catch(() => {});
+    activeAbortController?.abort();
   });
 
   port.onMessage.addListener(async (msg) => {
+    // STOP: sent when the user escapes a hung/unwanted request via "Clear"
+    // or by picking a conversation (including "New Topic") from the history
+    // dropdown while a request is still in flight - see stopActiveRequest()
+    // in sidepanel.js. Aborting the controller propagates to whichever
+    // fetch()/reader.read() is currently pending in the matching streamXxx
+    // call below, which rejects with a DOMException named "AbortError" that
+    // the catch block downstream recognizes and does NOT report as an
+    // error (the user asked for this, it isn't a failure).
+    if (msg?.type === "STOP") {
+      if (msg.requestId === activeRequestId) activeAbortController?.abort();
+      return;
+    }
     if (msg?.type !== "ASK") return;
+
+    const requestId = msg.payload?.requestId ?? null;
+    const abortController = new AbortController();
+    activeRequestId = requestId;
+    activeAbortController = abortController;
+
     try {
       const { question, pageContext, history, modelId, provider, apiModel, thinking } = msg.payload;
       const storedModel = findModelById(modelId);
@@ -60,28 +92,42 @@ chrome.runtime.onConnect.addListener((port) => {
         throw new Error(`Unsupported model provider: ${model.provider}`);
       }
 
-      port.postMessage({ type: "START" });
+      port.postMessage({ type: "START", requestId });
+
+      const ctx = { port, requestId, signal: abortController.signal };
 
       if (model.provider === "gemini") {
-        await streamGemini(model, question, pageContext, history, port);
+        await streamGemini(model, question, pageContext, history, ctx);
       } else if (model.provider === "deepseek") {
-        await streamDeepSeek(model, question, pageContext, history, port);
+        await streamDeepSeek(model, question, pageContext, history, ctx);
       } else if (model.provider === "claude") {
-        await streamClaude(model, question, pageContext, history, port);
+        await streamClaude(model, question, pageContext, history, ctx);
       } else if (model.provider === "openai") {
-        await streamOpenAI(model, question, pageContext, history, port);
+        await streamOpenAI(model, question, pageContext, history, ctx);
       } else if (model.provider === "openrouter") {
-        await streamOpenRouter(model, question, pageContext, history, port);
+        await streamOpenRouter(model, question, pageContext, history, ctx);
       }
 
-      port.postMessage({ type: "DONE" });
+      port.postMessage({ type: "DONE", requestId });
     } catch (err) {
-      port.postMessage({ type: "ERROR", error: err?.message || String(err) });
+      // A deliberate STOP surfaces here as an AbortError (either from the
+      // fetch() call itself being aborted, or from the stream reader's
+      // pending read() rejecting once the same signal fires) - this is the
+      // user cancelling on purpose, not a failure, so nothing is reported
+      // back for it. sidepanel.js already reset its own UI state the moment
+      // it sent STOP, without waiting for background.js to confirm.
+      if (err?.name === "AbortError") return;
+      port.postMessage({ type: "ERROR", error: err?.message || String(err), requestId });
+    } finally {
+      if (activeRequestId === requestId) {
+        activeRequestId = null;
+        activeAbortController = null;
+      }
     }
   });
 });
 
-async function streamDeepSeek(model, question, pageContext, history, port) {
+async function streamDeepSeek(model, question, pageContext, history, ctx) {
   const { apiKey, customPrompt } = await chrome.storage.local.get(["apiKey", "customPrompt"]);
   if (!apiKey) throw new Error("DeepSeek API Key is not configured: open the Settings page to configure and save it");
 
@@ -97,10 +143,11 @@ async function streamDeepSeek(model, question, pageContext, history, port) {
       stream: true,
       thinking: { type: model.thinking },
     }),
+    signal: ctx.signal,
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
 
-  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", port);
+  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx);
 }
 
 // OpenRouter (https://openrouter.ai) is a third-party router, not a model's
@@ -126,7 +173,7 @@ async function streamDeepSeek(model, question, pageContext, history, port) {
 // direct-browser-access guidance), so a CORS block is less likely here a
 // priori than it was for OpenAI - but that is a reasonable inference, not
 // a confirmed fact, so this still needs a real test with a live key.
-async function streamOpenRouter(model, question, pageContext, history, port) {
+async function streamOpenRouter(model, question, pageContext, history, ctx) {
   const { openrouterApiKey, customPrompt } = await chrome.storage.local.get(["openrouterApiKey", "customPrompt"]);
   if (!openrouterApiKey) throw new Error("OpenRouter API Key is not configured: open the Settings page to configure and save it");
 
@@ -143,10 +190,11 @@ async function streamOpenRouter(model, question, pageContext, history, port) {
       messages: buildMessages(question, pageContext, history, customPrompt),
       stream: true,
     }),
+    signal: ctx.signal,
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
 
-  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", port);
+  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx);
 }
 
 // Gemini uses a different host, auth header, request shape ({contents/parts}
@@ -156,7 +204,7 @@ async function streamOpenRouter(model, question, pageContext, history, port) {
 // alt=sse Server-Sent-Events streaming mechanics as DeepSeek - see
 // https://ai.google.dev/gemini-api/docs/text-generation and
 // https://ai.google.dev/gemini-api/docs/streaming (checked 2026-08-22).
-async function streamGemini(model, question, pageContext, history, port) {
+async function streamGemini(model, question, pageContext, history, ctx) {
   const { geminiApiKey, customPrompt } = await chrome.storage.local.get(["geminiApiKey", "customPrompt"]);
   if (!geminiApiKey) throw new Error("Gemini API Key is not configured: open the Settings page to configure and save it");
 
@@ -171,10 +219,11 @@ async function streamGemini(model, question, pageContext, history, port) {
       system_instruction: { parts: [{ text: buildSystemInstruction(pageContext, customPrompt) }] },
       contents: buildGeminiContents(question, history),
     }),
+    signal: ctx.signal,
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
 
-  await readSse(resp, (json) => (json.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join(""), port);
+  await readSse(resp, (json) => (json.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join(""), ctx);
 }
 
 // Claude uses api.anthropic.com, authenticated with x-api-key + an
@@ -197,7 +246,7 @@ async function streamGemini(model, question, pageContext, history, port) {
 // "text_delta" carry answer text, everything else is ignored - see
 // https://platform.claude.com/docs/en/build-with-claude/streaming (checked
 // 2026-08-23).
-async function streamClaude(model, question, pageContext, history, port) {
+async function streamClaude(model, question, pageContext, history, ctx) {
   const { claudeApiKey, customPrompt } = await chrome.storage.local.get(["claudeApiKey", "customPrompt"]);
   if (!claudeApiKey) throw new Error("Claude API Key is not configured: open the Settings page to configure and save it");
 
@@ -216,13 +265,14 @@ async function streamClaude(model, question, pageContext, history, port) {
       messages: buildClaudeMessages(question, history),
       stream: true,
     }),
+    signal: ctx.signal,
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
 
   await readSse(
     resp,
     (json) => (json?.type === "content_block_delta" && json.delta?.type === "text_delta" ? json.delta.text || "" : ""),
-    port
+    ctx
   );
 }
 
@@ -256,7 +306,7 @@ async function streamClaude(model, question, pageContext, history, port) {
 // include it), so it needs a real test with a live key; unlike Claude,
 // OpenAI does not document an equivalent explicit opt-in header to add if
 // a direct request does turn out to be blocked.
-async function streamOpenAI(model, question, pageContext, history, port) {
+async function streamOpenAI(model, question, pageContext, history, ctx) {
   const { openaiApiKey, customPrompt } = await chrome.storage.local.get(["openaiApiKey", "customPrompt"]);
   if (!openaiApiKey) throw new Error("ChatGPT API Key is not configured: open the Settings page to configure and save it");
 
@@ -273,10 +323,11 @@ async function streamOpenAI(model, question, pageContext, history, port) {
       store: false,
       stream: true,
     }),
+    signal: ctx.signal,
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
 
-  await readSse(resp, (json) => (json?.type === "response.output_text.delta" ? json.delta || "" : ""), port);
+  await readSse(resp, (json) => (json?.type === "response.output_text.delta" ? json.delta || "" : ""), ctx);
 }
 
 // Shared SSE reader: DeepSeek, Gemini, Claude, OpenAI, and OpenRouter all
@@ -285,8 +336,14 @@ async function streamOpenAI(model, question, pageContext, history, port) {
 // lines (Claude's are additionally preceded by a named "event:" line, which
 // this reader ignores since it only inspects lines starting with "data:");
 // only the JSON shape differs, so `extractDelta` picks the provider-specific
-// text out of each parsed chunk.
-async function readSse(resp, extractDelta, port) {
+// text out of each parsed chunk. `ctx` (added alongside the STOP/abort
+// mechanism) carries the port to post CHUNKs to and the requestId to tag
+// them with, so sidepanel.js can tell a chunk belonging to a since-aborted
+// request apart from the current one if any are still in flight when a STOP
+// lands (see stopActiveRequest() in sidepanel.js) - reader.read() itself
+// also naturally rejects once ctx.signal aborts, ending this loop via the
+// same AbortError path the initial fetch() would take.
+async function readSse(resp, extractDelta, ctx) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -304,7 +361,7 @@ async function readSse(resp, extractDelta, port) {
       try {
         const json = JSON.parse(data);
         const delta = extractDelta(json);
-        if (delta) port.postMessage({ type: "CHUNK", delta });
+        if (delta) ctx.port.postMessage({ type: "CHUNK", delta, requestId: ctx.requestId });
       } catch {}
     }
   }

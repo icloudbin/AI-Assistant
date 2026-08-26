@@ -3,6 +3,7 @@ const apiKeyInput = document.getElementById("apiKey");
 const geminiApiKeyInput = document.getElementById("geminiApiKey");
 const claudeApiKeyInput = document.getElementById("claudeApiKey");
 const openaiApiKeyInput = document.getElementById("openaiApiKey");
+const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
 const customPromptInput = document.getElementById("customPrompt");
 const msgEl = document.getElementById("msg");
 const backupHistoryBtn = document.getElementById("backupHistory");
@@ -14,12 +15,13 @@ const confirmYes = document.getElementById("confirmYes");
 const confirmNo = document.getElementById("confirmNo");
 
 chrome.storage.local.get(
-  ["apiKey", "geminiApiKey", "claudeApiKey", "openaiApiKey", "customPrompt"],
-  ({ apiKey, geminiApiKey, claudeApiKey, openaiApiKey, customPrompt }) => {
+  ["apiKey", "geminiApiKey", "claudeApiKey", "openaiApiKey", "openrouterApiKey", "customPrompt"],
+  ({ apiKey, geminiApiKey, claudeApiKey, openaiApiKey, openrouterApiKey, customPrompt }) => {
     if (apiKey) apiKeyInput.value = apiKey;
     if (geminiApiKey) geminiApiKeyInput.value = geminiApiKey;
     if (claudeApiKey) claudeApiKeyInput.value = claudeApiKey;
     if (openaiApiKey) openaiApiKeyInput.value = openaiApiKey;
+    if (openrouterApiKey) openrouterApiKeyInput.value = openrouterApiKey;
     if (customPrompt) customPromptInput.value = customPrompt;
   }
 );
@@ -29,13 +31,21 @@ document.getElementById("save").addEventListener("click", async () => {
   const geminiKey = geminiApiKeyInput.value.trim();
   const claudeKey = claudeApiKeyInput.value.trim();
   const openaiKey = openaiApiKeyInput.value.trim();
+  const openrouterKey = openrouterApiKeyInput.value.trim();
   const customPrompt = customPromptInput.value.trim();
-  if (!key && !geminiKey && !claudeKey && !openaiKey) {
+  if (!key && !geminiKey && !claudeKey && !openaiKey && !openrouterKey) {
     msgEl.style.color = "#f55b5b";
-    msgEl.textContent = "Enter at least one API key (DeepSeek, Gemini, Claude, or ChatGPT)";
+    msgEl.textContent = "Enter at least one API key (DeepSeek, Gemini, Claude, ChatGPT, or OpenRouter)";
     return;
   }
-  await chrome.storage.local.set({ apiKey: key, geminiApiKey: geminiKey, claudeApiKey: claudeKey, openaiApiKey: openaiKey, customPrompt });
+  await chrome.storage.local.set({
+    apiKey: key,
+    geminiApiKey: geminiKey,
+    claudeApiKey: claudeKey,
+    openaiApiKey: openaiKey,
+    openrouterApiKey: openrouterKey,
+    customPrompt,
+  });
   msgEl.style.color = "#4ade80";
   msgEl.textContent = "Saved ✓";
   setTimeout(() => (msgEl.textContent = ""), 1500);

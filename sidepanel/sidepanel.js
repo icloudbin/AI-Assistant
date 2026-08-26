@@ -75,6 +75,13 @@ let currentAssistantText = "";
 let isStreaming = false;
 let pendingModelLabel = "";
 let pendingModelId = "";
+// Identifies the currently in-flight ASK, echoed back by background.js on
+// every START/CHUNK/DONE/ERROR for that request. Cleared the moment a STOP
+// is sent (see stopActiveRequest below), so handlePortMessage can recognize
+// and ignore any message that still arrives for a request this side has
+// already abandoned (e.g. a CHUNK already queued on the port before the
+// abort signal reached the fetch on the other end).
+let currentRequestId = null;
 
 function connectPort() {
   port = chrome.runtime.connect({ name: PORT_NAME });
@@ -440,6 +447,36 @@ function setStreaming(streaming) {
   }
 }
 
+// Escapes a hung or unwanted in-flight request: tells background.js to
+// abort the underlying fetch (best-effort - see the STOP handling in
+// background.js), then immediately resets this side's UI regardless of
+// whether that abort actually lands in time, since the request being
+// unresponsive is exactly the situation this exists to recover from.
+// Called from the "Clear" button and from picking anything in the history
+// dropdown (including "New Topic") while isStreaming is true, so neither of
+// those - previously the only two ways to leave a conversation - stayed
+// blocked for the whole duration of a request that never completes.
+function stopActiveRequest() {
+  if (!isStreaming) return;
+  const stoppedRequestId = currentRequestId;
+  // Cleared before anything else so handlePortMessage ignores any
+  // START/CHUNK/DONE/ERROR that might still arrive for this request (e.g.
+  // a chunk already queued on the port before the abort signal reaches the
+  // fetch on the other end).
+  currentRequestId = null;
+  if (port) {
+    try {
+      port.postMessage({ type: "STOP", requestId: stoppedRequestId });
+    } catch {}
+  }
+  if (currentAssistantBubble) {
+    currentAssistantBubble.remove();
+    currentAssistantBubble = null;
+  }
+  currentAssistantText = "";
+  setStreaming(false);
+}
+
 async function getActivePageContext() {
   const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   const tab = tabs?.[0];
@@ -497,6 +534,12 @@ function updateContextBar(pageContext) {
 }
 
 function handlePortMessage(msg) {
+  // Ignore anything that isn't for the request this side is currently
+  // tracking - either a stray message for a request already stopped via
+  // stopActiveRequest() (see the clearBtn/history-dropdown handlers below),
+  // or, in principle, a message that arrived after a newer ASK was already
+  // sent on the same port.
+  if (msg.requestId !== currentRequestId) return;
   switch (msg.type) {
     case "START": {
       currentAssistantText = "";
@@ -679,13 +722,13 @@ async function loadConversations({ activate = true, syncModel = true } = {}) {
 
 async function selectConversation(id) {
   if (id === NEW_TOPIC_VALUE) {
-    if (isStreaming) {
-      historySelect.value = currentConversationId || NEW_TOPIC_VALUE;
-      return;
-    }
+    // Picking "New Topic" while a request is in flight stops it rather than
+    // being blocked (see stopActiveRequest) - this, and "Clear" below, are
+    // the user's way out of a hung/unresponsive request.
+    stopActiveRequest();
 
-    // New Topic is a fresh conversation (DeepSeek, Gemini, Claude, or
-    // ChatGPT, depending on the selected model): discard the active conversation
+    // New Topic is a fresh conversation (DeepSeek, Gemini, Claude, ChatGPT,
+    // or OpenRouter, depending on the selected model): discard the active conversation
     // state, clear the composer, and leave the API ready for the user's
     // first message. The new conversation is persisted only when that
     // first message is actually sent.
@@ -696,10 +739,11 @@ async function selectConversation(id) {
   }
   const convo = conversations.find((c) => c.id === id);
   if (!convo) return;
-  if (isStreaming) {
-    historySelect.value = currentConversationId || NEW_TOPIC_VALUE;
-    return;
-  }
+  // Same reasoning as the New Topic branch above: switching to a different
+  // past conversation while a request is in flight stops it instead of
+  // being blocked, for consistency (there's no good reason New Topic would
+  // escape a hang but switching to an older conversation wouldn't).
+  stopActiveRequest();
   currentConversationId = convo.id;
   history = (convo.messages || []).map((m) => ({ ...m }));
   attachments = [];
@@ -1159,6 +1203,8 @@ async function handleSubmit(e) {
   const selectedModel = getSelectedModel();
   pendingModelLabel = selectedModel.label;
   pendingModelId = selectedModel.id;
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  currentRequestId = requestId;
 
   questionInput.value = "";
   const displayQuestion = question || "Attached files";
@@ -1191,6 +1237,7 @@ async function handleSubmit(e) {
   ensurePort().postMessage({
     type: "ASK",
     payload: {
+      requestId,
       question: questionForApi,
       pageContext,
       history: getApiHistory().slice(0, -1),
@@ -1213,11 +1260,14 @@ questionInput.addEventListener("keydown", (e) => {
 });
 
 clearBtn.addEventListener("click", async () => {
-  if (isStreaming) return;
   if (isListening) {
     userStoppedMic = true;
     stopMic();
   }
+  // Stops a hung/unwanted in-flight request instead of silently ignoring
+  // the click (see stopActiveRequest) - a no-op here previously left no way
+  // out of a request that never completes.
+  stopActiveRequest();
   startNewTopic();
   renderHistorySelect();
 });
