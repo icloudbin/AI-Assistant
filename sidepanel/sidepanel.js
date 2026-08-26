@@ -34,7 +34,7 @@ loadTheme();
 const PORT_NAME = "ai-chat";
 const MAX_HISTORY_TURNS = 8;
 const NEW_TOPIC_VALUE = "__new__";
-const MAX_SAVED_CONVERSATIONS = 100;
+const MAX_SAVED_CONVERSATIONS = 20;
 
 const chatLog = document.getElementById("chatLog");
 const emptyState = document.getElementById("emptyState");
@@ -754,6 +754,12 @@ function startNewTopic() {
 async function loadConversations({ activate = true, syncModel = true } = {}) {
   const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY]);
   conversations = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
+  // Keep at most 20 saved conversations. Conversations are ordered newest-first
+  // whenever they are saved, so entries beyond the limit are the oldest ones.
+  conversations = conversations
+    .filter((c) => c && c.messages?.length)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+    .slice(0, MAX_SAVED_CONVERSATIONS);
 
   if (activate) {
     currentConversationId = stored[CURRENT_CONVERSATION_KEY] || null;
