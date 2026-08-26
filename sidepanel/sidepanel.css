@@ -153,6 +153,13 @@ body { display: flex; flex-direction: column; }
 }
 .bubble-text a { color: var(--accent); text-decoration: underline; }
 .bubble-text a:hover { color: var(--accent); }
+.bubble-text img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 8px 0;
+  border-radius: 6px;
+}
 .table-wrap { overflow-x: auto; margin: 8px 0; }
 .bubble-text table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .bubble-text th, .bubble-text td { border: 1px solid var(--border); padding: 5px 7px; text-align: left; vertical-align: top; }

@@ -116,10 +116,42 @@ function inlineMarkdownToHtml(text) {
     return token;
   });
 
+  // Some models return image Markdown in a nested/escaped form such as:
+  // ![image]([https://example.com/image.png](https://example.com/image.png))
+  // or ![image]\(https://example.com/image.png\).
+  // Normalize these common variants before parsing standard Markdown images.
+  s = s.replace(
+    /!\[([^\]]*)\]\(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)\)/gi,
+    (_, alt, _displayUrl, realUrl) => `![${alt}](${realUrl})`
+  );
+  s = s.replace(
+    /!\[([^\]]*)\]\\\((https?:\/\/[^\s)]+)\\\)/gi,
+    (_, alt, src) => `![${alt}](${src})`
+  );
+
+  // Markdown images. Process images before normal Markdown links so that
+  // ![alt](url) is not accidentally consumed as [alt](url). Only allow
+  // remote HTTP(S) images and image data URLs.
+  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, alt, src) => {
+    const rawSrc = src.replace(/&amp;/g, "&");
+    try {
+      const u = new URL(rawSrc, location.href);
+      const isHttpImage = ["http:", "https:"].includes(u.protocol);
+      const isDataImage = u.protocol === "data:" && /^data:image\/(?:png|jpeg|jpg|gif|webp);/i.test(rawSrc);
+      if (!isHttpImage && !isDataImage) return `![${alt}](${src})`;
+      const safeSrc = escapeHtml(isDataImage ? rawSrc : u.href);
+      const safeAlt = escapeHtml(alt);
+      return `<img src="${safeSrc}" alt="${safeAlt}" loading="lazy" decoding="async">`;
+    } catch {
+      return `![${alt}](${src})`;
+    }
+  });
+
   // Markdown links: only permit safe navigable protocols.
   s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, label, href) => {
+    const rawHref = href.replace(/&amp;/g, "&");
     try {
-      const u = new URL(href, location.href);
+      const u = new URL(rawHref, location.href);
       if (!["http:", "https:", "mailto:"].includes(u.protocol)) return label;
       const safeHref = escapeHtml(u.href);
       return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${label}</a>`;
@@ -284,9 +316,9 @@ function markdownToHtml(markdown) {
 
 const ALLOWED_TAGS = new Set([
   "P", "BR", "STRONG", "EM", "DEL", "CODE", "PRE", "H1", "H2", "H3", "H4", "H5", "H6",
-  "UL", "OL", "LI", "BLOCKQUOTE", "HR", "A", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "DIV"
+  "UL", "OL", "LI", "BLOCKQUOTE", "HR", "A", "IMG", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "DIV"
 ]);
-const ALLOWED_ATTRS = new Set(["href", "target", "rel", "class"]);
+const ALLOWED_ATTRS = new Set(["href", "target", "rel", "class", "src", "alt", "loading", "decoding"]);
 
 function sanitizeRenderedHtml(html) {
   const doc = new DOMParser().parseFromString(`<div id="root">${html}</div>`, "text/html");
@@ -308,6 +340,26 @@ function sanitizeRenderedHtml(html) {
 
     for (const attr of [...el.attributes]) {
       if (!ALLOWED_ATTRS.has(attr.name.toLowerCase())) el.removeAttribute(attr.name);
+    }
+
+    if (el.tagName === "IMG") {
+      const src = el.getAttribute("src") || "";
+      try {
+        const u = new URL(src, location.href);
+        const isHttpImage = ["http:", "https:"].includes(u.protocol);
+        const isDataImage = u.protocol === "data:" && /^data:image\/(?:png|jpeg|jpg|gif|webp);/i.test(src);
+        if (!isHttpImage && !isDataImage) {
+          el.remove();
+          continue;
+        }
+        el.setAttribute("src", isDataImage ? src : u.href);
+        el.setAttribute("loading", "lazy");
+        el.setAttribute("decoding", "async");
+        el.setAttribute("alt", el.getAttribute("alt") || "");
+      } catch {
+        el.remove();
+      }
+      continue;
     }
 
     if (el.tagName === "A") {

@@ -169,6 +169,10 @@ Implementation notes:
 
 Verified with a background.js-only test (mocked `fetch`): confirms the exact request URL/headers/body (`model: "stealth/ox-alpha"`, `messages` array with the system prompt sent inline, `stream: true`, and explicitly confirms the body does NOT contain the Responses-API-specific `store`/`instructions`/`input` fields ChatGPT's integration uses, i.e. the two aren't accidentally sharing logic that doesn't apply), feeds back a realistic multi-chunk Chat-Completions SSE stream terminated by `data: [DONE]` and confirms the assembled text is correct, and confirms a missing key produces the right error without a network call. Also verified end-to-end in the side panel UI that the new entry renders in the dropdown and that selecting it produces an `ASK` payload correctly identifying `provider: "openrouter"` / `apiModel: "stealth/ox-alpha"`. Re-ran all prior tests to confirm no regressions.
 
+## Added: Markdown image rendering (v1.10.2)
+
+Assistant Markdown image syntax such as `![diagram](https://example.com/diagram.png)` is rendered as a sanitized `<img>` element. HTTP(S) images and safe raster `data:image/*` URLs are supported. Images are constrained to the conversation width and lazy-loaded.
+
 ## Fixed: a hung request left no way out - "Clear" and the history dropdown now actually stop it (v1.10.1)
 
 Reported behavior: if a request to a model hangs (network stall, an unresponsive provider, etc.), the whole panel gets stuck - the composer is disabled while streaming (by design), and both of the other two ways to leave the conversation were *also* silently blocked the entire time a request was in flight: `clearBtn`'s click handler returned immediately if `isStreaming`, and `selectConversation()` (used by the history dropdown, including its "New Topic" entry) reverted the dropdown and returned immediately too. There was no cancel/abort mechanism at all - a hung request had no way to end short of closing and reopening the whole side panel.
