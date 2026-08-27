@@ -151,28 +151,10 @@ async function streamDeepSeek(model, question, pageContext, history, ctx) {
 }
 
 // OpenRouter (https://openrouter.ai) is a third-party router, not a model's
-// own native API: it forwards requests to whichever underlying
-// provider/model the `model` slug names (here, "stealth/ox-alpha" - the
-// anonymous stealth model OpenRouter itself listed on 2026-08-20; see the
-// comment above the MODELS array in models.js for what that means in
-// practice). Its endpoint is OpenAI-Chat-Completions-COMPATIBLE - same
-// {messages: [{role, content}]} shape, system role sent inline, same
-// choices[0].delta.content while streaming - confirmed against OpenRouter's
-// own docs at https://openrouter.ai/docs/quickstart (checked 2026-08-24),
-// so this reuses buildMessages() and the exact same extractDelta shape as
-// streamDeepSeek above, just pointed at a different host/key/model slug.
-// HTTP-Referer/X-OpenRouter-Title are optional attribution headers (used
-// for OpenRouter's own leaderboard, not required for the request to work)
-// per that same quickstart page.
-//
-// CORS: as with OpenAI above, this could not be verified against a live
-// openrouter.ai request from the sandbox this was written in (not on its
-// network allow-list). OpenRouter's whole product is built around being
-// called directly from client apps (its own docs show plain fetch()/
-// requests examples with no backend-proxy caveat, unlike OpenAI's
-// direct-browser-access guidance), so a CORS block is less likely here a
-// priori than it was for OpenAI - but that is a reasonable inference, not
-// a confirmed fact, so this still needs a real test with a live key.
+// own native API. The extension uses OpenRouter's Free Models Router via
+// `openrouter/free`, which automatically selects an available free model.
+// The endpoint is OpenAI-Chat-Completions-compatible, so the request shape
+// and SSE response handling below stay unchanged.
 async function streamOpenRouter(model, question, pageContext, history, ctx) {
   const { openrouterApiKey, customPrompt } = await chrome.storage.local.get(["openrouterApiKey", "customPrompt"]);
   if (!openrouterApiKey) throw new Error("OpenRouter API Key is not configured: open the Settings page to configure and save it");

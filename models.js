@@ -70,27 +70,12 @@
 // verified from this sandbox and needs a live check. As with Gemini and
 // Claude, no reasoning/thinking field is set here and each model's default
 // effort is used.
-// OpenRouter entry added 2026-08. OpenRouter (https://openrouter.ai) is a
-// third-party router/aggregator, not a model's own native API - it exposes
-// an OpenAI-Chat-Completions-compatible endpoint
-// (https://openrouter.ai/api/v1/chat/completions, confirmed against
-// OpenRouter's own docs at https://openrouter.ai/docs/quickstart, checked
-// 2026-08-24) that forwards to whichever underlying provider/model the
-// `model` slug names. "Ox Alpha" (stealth/ox-alpha) is a stealth/anonymous
-// model OpenRouter itself listed on 2026-08-20
-// (https://openrouter.ai/stealth/ox-alpha): the underlying provider has
-// chosen to stay anonymous during this preview, OpenRouter is only routing
-// to it, pricing is currently $0/$0 but explicitly preview-only and could
-// change or disappear, and - per OpenRouter's own stealth-model terms -
-// prompts/completions are retained by that anonymous provider (not used
-// for training, but not the same data-handling posture as calling
-// Anthropic/OpenAI/Google directly). provider "openai" is handled by
-// background.js via api.openai.com and its own hard cutover to the
-// Responses API; OpenRouter's endpoint uses the OLDER, still-current
-// Chat-Completions request/response shape (messages array, system role
-// sent inline, choices[0].delta.content while streaming) - the exact same
-// shape DeepSeek's API already uses - so streamOpenRouter in background.js
-// reuses buildMessages() rather than needing its own turn-builder.
+// OpenRouter support. OpenRouter (https://openrouter.ai) is a
+// third-party router/aggregator that exposes an OpenAI-Chat-Completions-compatible
+// endpoint. The extension uses OpenRouter's Free Models Router, `openrouter/free`,
+// which automatically selects an available free model. The endpoint uses the
+// same Chat-Completions request/response shape as DeepSeek (messages array and
+// choices[0].delta.content while streaming).
 export const MODELS = [
   { id: "deepseek-chat", label: "DeepSeek Chat", provider: "deepseek", apiModel: "deepseek-v4-flash", thinking: "disabled" },
   { id: "deepseek-reasoner", label: "DeepSeek Reasoner", provider: "deepseek", apiModel: "deepseek-v4-flash", thinking: "enabled" },
@@ -104,7 +89,7 @@ export const MODELS = [
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", provider: "openai", apiModel: "gpt-5.6-sol" },
   { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", provider: "openai", apiModel: "gpt-5.6-terra" },
   { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", provider: "openai", apiModel: "gpt-5.6-luna" },
-  { id: "openrouter-ox-alpha", label: "OpenRouter: Ox Alpha", provider: "openrouter", apiModel: "stealth/ox-alpha" },
+  { id: "openrouter-free-auto", label: "OpenRouter: Free Model (Auto)", provider: "openrouter", apiModel: "openrouter/free" },
 ];
 
 export function findModelById(id) {
