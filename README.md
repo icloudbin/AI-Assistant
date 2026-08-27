@@ -1,6 +1,6 @@
 <!-- README.md —— For this update, replace the entire package, especially manifest.json -->
 # Structure (three sidepanel files in the subdirectory, all other files in the root; matches import "../models.js")
-Brave-AI-assistant/
+AI-Assistant/
 ├── manifest.json      ← v1.0.2：options_ui removed; this avoids the "Could not load options page" error
 ├── models.js
 ├── background.js

@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Brave AI Assistant",
+  "name": "AI Assistant",
   "version": "1.10.7",
   "description": "Answer questions using the current web page, attached files, a user-configurable custom prompt, and locally saved conversation history in the Brave side panel, with local ZIP backup/restore support, automatic page-context refresh on tab changes, sanitized Markdown-to-HTML conversation rendering, bilingual (English/Mandarin) voice input, and a choice of DeepSeek V4, Gemini, Claude, ChatGPT, or OpenRouter models with independently configured API keys and per-conversation model memory.",
   "permissions": [
@@ -21,7 +21,7 @@
     "open_in_tab": true
   },
   "action": {
-    "default_title": "Open Brave AI Assistant"
+    "default_title": "Open AI Assistant"
   },
   "content_scripts": [
     {
@@ -36,5 +36,8 @@
   ],
   "host_permissions": [
     "<all_urls>"
-  ]
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' data: https:;"
+  }
 }

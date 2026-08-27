@@ -4,6 +4,49 @@ import { CURRENT_CONVERSATION_KEY } from "./storage-keys.js";
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.warn);
 
+// Remote images embedded in model Markdown can be rejected when loaded directly
+// from an extension page (for example, because the image host applies hotlink
+// or referrer rules). Fetch them from the extension service worker, which has
+// <all_urls> host permission, and return a data URL for the side panel.
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type !== "FETCH_IMAGE" || typeof msg.url !== "string") return;
+
+  (async () => {
+    try {
+      const url = new URL(msg.url);
+      if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Unsupported image URL');
+
+      const resp = await fetch(url.href, {
+        method: 'GET',
+        credentials: 'omit',
+        cache: 'force-cache',
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+      const contentType = (resp.headers.get('content-type') || '').split(';', 1)[0].toLowerCase();
+      if (!/^image\/(png|jpeg|gif|webp|bmp|svg\+xml)$/.test(contentType)) {
+        throw new Error(`Not an image (${contentType || 'unknown content type'})`);
+      }
+
+      const buffer = await resp.arrayBuffer();
+      // Avoid sending unexpectedly large resources through extension messaging.
+      if (buffer.byteLength > 10 * 1024 * 1024) throw new Error('Image is larger than 10 MB');
+
+      let binary = '';
+      const bytes = new Uint8Array(buffer);
+      const chunkSize = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunkSize, bytes.length)));
+      }
+      sendResponse({ ok: true, dataUrl: `data:${contentType};base64,${btoa(binary)}` });
+    } catch (err) {
+      sendResponse({ ok: false, error: err?.message || String(err) });
+    }
+  })();
+
+  return true;
+});
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "ai-chat") return;
 
@@ -165,7 +208,7 @@ async function streamOpenRouter(model, question, pageContext, history, ctx) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${openrouterApiKey}`,
       "HTTP-Referer": chrome.runtime.getURL(""),
-      "X-OpenRouter-Title": "Brave AI Assistant",
+      "X-OpenRouter-Title": "AI Assistant",
     },
     body: JSON.stringify({
       model: model.apiModel,
