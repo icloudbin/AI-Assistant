@@ -4,14 +4,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Brave AI Assistant</title>
+  <title>AI Assistant</title>
   <link rel="stylesheet" href="sidepanel.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="title">
       <span class="dot"></span>
-      <span class="title-text">Brave AI Assistant</span>
+      <span class="title-text">AI Assistant</span>
       <select id="modelSelect" aria-label="Model" title="Select model"></select>
     </div>
     <div class="controls">
@@ -35,6 +35,8 @@
   <div class="context-bar" id="pageContextBar" hidden>
     <span class="context-title" id="pageContextTitle"></span>
   </div>
+
+  <div class="panel-resize-handle" id="panelResizeHandle" role="separator" aria-orientation="horizontal" aria-label="Resize conversation and question areas" tabindex="0" title="Drag to resize conversation and question areas"></div>
 
   <form class="composer" id="chatForm">
     <div class="attachment-list" id="attachmentList" hidden aria-label="Attached files"></div>

@@ -140,3 +140,12 @@ button.secondary {
 
 .status.ok { color: #4ade80; }
 .status.error { color: #f55b5b; }
+
+.version {
+  margin-top: 20px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  text-align: center;
+  color: var(--muted);
+  font-size: 11px;
+}

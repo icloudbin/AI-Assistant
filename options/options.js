@@ -1,4 +1,4 @@
-// options.js — Settings page for Brave AI Assistant
+// options.js — Settings page for AI Assistant
 const apiKeyInput = document.getElementById("apiKey");
 const geminiApiKeyInput = document.getElementById("geminiApiKey");
 const claudeApiKeyInput = document.getElementById("claudeApiKey");
@@ -301,7 +301,7 @@ async function readBackupFile(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const entries = await extractZipEntries(bytes);
   const jsonText = entries.get("conversation-history.json");
-  if (!jsonText) throw new Error("This ZIP is not a Brave AI Assistant history backup");
+  if (!jsonText) throw new Error("This ZIP is not an AI Assistant history backup");
 
   let backup;
   try {
@@ -315,7 +315,7 @@ async function readBackupFile(file) {
     backup.format !== "Brave AI Assistant Conversation History Backup" ||
     !Array.isArray(backup.conversations)
   ) {
-    throw new Error("Unsupported Brave AI Assistant backup format");
+    throw new Error("Unsupported AI Assistant backup format");
   }
 
   return backup.conversations;
@@ -447,7 +447,7 @@ async function restoreHistory() {
     restoreHistoryFile.value = "";
     setTimeout(() => (msgEl.textContent = ""), 3000);
   } catch (err) {
-    console.error("[Brave AI Assistant] Unable to restore history:", err);
+    console.error("[AI Assistant] Unable to restore history:", err);
     msgEl.style.color = "#f55b5b";
     msgEl.textContent = `Restore failed: ${err?.message || "Unknown error"}`;
     restoreHistoryFile.value = "";
@@ -487,7 +487,7 @@ async function backupHistory() {
     msgEl.textContent = `Backup created (${conversations.length} conversation${conversations.length === 1 ? "" : "s"})`;
     setTimeout(() => (msgEl.textContent = ""), 2500);
   } catch (err) {
-    console.error("[Brave AI Assistant] Unable to back up history:", err);
+    console.error("[AI Assistant] Unable to back up history:", err);
     msgEl.style.color = "#f55b5b";
     msgEl.textContent = `Backup failed: ${err?.message || "Unknown error"}`;
   } finally {
@@ -525,7 +525,7 @@ async function deleteAllHistory() {
     msgEl.textContent = "All history deleted";
     setTimeout(() => (msgEl.textContent = ""), 2500);
   } catch (err) {
-    console.error("[Brave AI Assistant] Unable to delete history:", err);
+    console.error("[AI Assistant] Unable to delete history:", err);
     msgEl.style.color = "#f55b5b";
     msgEl.textContent = `Delete failed: ${err?.message || "Unknown error"}`;
   } finally {

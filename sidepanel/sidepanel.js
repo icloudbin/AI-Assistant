@@ -54,6 +54,84 @@ const historySelect = document.getElementById("historySelect");
 const micBtn = document.getElementById("micBtn");
 const micLangBtn = document.getElementById("micLangBtn");
 const micStatus = document.getElementById("micStatus");
+const panelResizeHandle = document.getElementById("panelResizeHandle");
+const composer = document.getElementById("chatForm");
+
+const COMPOSER_HEIGHT_STORAGE_KEY = "composerHeight";
+const MIN_COMPOSER_HEIGHT = 92;
+const MAX_COMPOSER_HEIGHT_RATIO = 0.70;
+
+function clampComposerHeight(height) {
+  const viewportHeight = Math.max(document.documentElement.clientHeight || window.innerHeight || 600, 300);
+  const maxHeight = Math.max(MIN_COMPOSER_HEIGHT, Math.floor(viewportHeight * MAX_COMPOSER_HEIGHT_RATIO));
+  return Math.max(MIN_COMPOSER_HEIGHT, Math.min(maxHeight, Math.round(height)));
+}
+
+function setComposerHeight(height, persist = true) {
+  const nextHeight = clampComposerHeight(height);
+  document.documentElement.style.setProperty("--composer-height", `${nextHeight}px`);
+  if (persist) chrome.storage.local.set({ [COMPOSER_HEIGHT_STORAGE_KEY]: nextHeight }).catch(() => {});
+}
+
+async function restoreComposerHeight() {
+  try {
+    const stored = await chrome.storage.local.get(COMPOSER_HEIGHT_STORAGE_KEY);
+    const saved = Number(stored[COMPOSER_HEIGHT_STORAGE_KEY]);
+    if (Number.isFinite(saved) && saved > 0) setComposerHeight(saved, false);
+    else setComposerHeight(132, false);
+  } catch {
+    setComposerHeight(132, false);
+  }
+}
+
+let resizePointerId = null;
+let resizeStartY = 0;
+let resizeStartHeight = 132;
+
+function beginPanelResize(e) {
+  if (e.button !== undefined && e.button !== 0) return;
+  resizePointerId = e.pointerId ?? "mouse";
+  resizeStartY = e.clientY;
+  resizeStartHeight = composer.getBoundingClientRect().height;
+  panelResizeHandle.setPointerCapture?.(e.pointerId);
+  document.body.classList.add("panel-resizing");
+  e.preventDefault();
+}
+
+function updatePanelResize(e) {
+  if (resizePointerId === null) return;
+  // Moving the divider upward gives the question box more room; moving it
+  // downward gives the conversation box more room.
+  setComposerHeight(resizeStartHeight - (e.clientY - resizeStartY), false);
+  e.preventDefault();
+}
+
+function endPanelResize(e) {
+  if (resizePointerId === null) return;
+  if (e.pointerId !== undefined && e.pointerId !== resizePointerId) return;
+  resizePointerId = null;
+  document.body.classList.remove("panel-resizing");
+  const finalHeight = composer.getBoundingClientRect().height;
+  setComposerHeight(finalHeight, true);
+}
+
+panelResizeHandle?.addEventListener("pointerdown", beginPanelResize);
+panelResizeHandle?.addEventListener("pointermove", updatePanelResize);
+panelResizeHandle?.addEventListener("pointerup", endPanelResize);
+panelResizeHandle?.addEventListener("pointercancel", endPanelResize);
+panelResizeHandle?.addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+  const delta = e.key === "ArrowUp" ? 20 : -20;
+  setComposerHeight(composer.getBoundingClientRect().height + delta);
+  e.preventDefault();
+});
+
+window.addEventListener("resize", () => {
+  const current = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--composer-height"));
+  if (Number.isFinite(current)) setComposerHeight(current, false);
+});
+
+restoreComposerHeight();
 
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const MAX_TOTAL_EXTRACTED_CHARS = 180000;
@@ -153,6 +231,20 @@ function inlineMarkdownToHtml(text) {
     try {
       const u = new URL(rawHref, location.href);
       if (!["http:", "https:", "mailto:"].includes(u.protocol)) return label;
+
+      // Some models ignore the requested Markdown-image syntax and return
+      // [image](https://host/path/file.webp) instead. Treat links whose URL
+      // clearly points to an image as images, so the conversation UI still
+      // renders the requested image rather than showing a clickable "image"
+      // link.
+      const imagePath = u.pathname.toLowerCase();
+      const isImageUrl = /\.(?:png|jpe?g|gif|webp|bmp|svg)$/i.test(imagePath);
+      if (isImageUrl && (u.protocol === "http:" || u.protocol === "https:")) {
+        const safeSrc = escapeHtml(u.href);
+        const safeAlt = escapeHtml(label);
+        return `<img src="${safeSrc}" alt="${safeAlt}" loading="lazy" decoding="async">`;
+      }
+
       const safeHref = escapeHtml(u.href);
       return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${label}</a>`;
     } catch {
@@ -370,6 +462,21 @@ function sanitizeRenderedHtml(html) {
           el.replaceWith(document.createTextNode(el.textContent || ""));
           continue;
         }
+
+        // Also handle model/provider output that arrives as an HTML anchor
+        // after an earlier Markdown conversion step. If the href has an
+        // image filename extension, render it as an IMG instead of a link.
+        const isImageUrl = /\.(?:png|jpe?g|gif|webp|bmp|svg)$/i.test(u.pathname);
+        if (isImageUrl && (u.protocol === "http:" || u.protocol === "https:")) {
+          const img = document.createElement("img");
+          img.setAttribute("src", u.href);
+          img.setAttribute("alt", el.textContent || "image");
+          img.setAttribute("loading", "lazy");
+          img.setAttribute("decoding", "async");
+          el.replaceWith(img);
+          continue;
+        }
+
         el.setAttribute("href", u.href);
         el.setAttribute("target", "_blank");
         el.setAttribute("rel", "noopener noreferrer");
@@ -381,6 +488,28 @@ function sanitizeRenderedHtml(html) {
 
   return root.innerHTML;
 }
+
+async function fallbackRemoteImage(img) {
+  if (!(img instanceof HTMLImageElement) || img.dataset.remoteFallbackAttempted === "1") return;
+  const src = img.getAttribute("src") || "";
+  if (!/^https?:\/\//i.test(src)) return;
+
+  img.dataset.remoteFallbackAttempted = "1";
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src });
+    if (result?.ok && result.dataUrl) {
+      img.src = result.dataUrl;
+    }
+  } catch (_) {
+    // Keep the browser's normal broken-image state if the fallback fails.
+  }
+}
+
+// Direct cross-origin image loading is preferred. If the remote host blocks
+// extension-origin requests, retry through the extension service worker.
+chatLog.addEventListener("error", (event) => {
+  if (event.target?.tagName === "IMG") fallbackRemoteImage(event.target);
+}, true);
 
 function setBubbleContent(bubbleEl, text, role) {
   const textEl = getBubbleTextEl(bubbleEl);
@@ -476,7 +605,7 @@ optionsBtn.addEventListener("click", async () => {
   try {
     await chrome.runtime.openOptionsPage();
   } catch (err) {
-    console.error("[Brave AI Assistant] Unable to open settings page:", err);
+    console.error("[AI Assistant] Unable to open settings page:", err);
     // Fallback for browsers/versions that do not implement openOptionsPage.
     await chrome.tabs.create({ url: chrome.runtime.getURL("options/options.html") });
   }
@@ -529,33 +658,56 @@ function stopActiveRequest() {
   setStreaming(false);
 }
 
+async function getCurrentActiveTab() {
+  // The side panel is an extension page. Use the browser window containing
+  // this side panel rather than lastFocusedWindow, which can refer to a
+  // different window when focus briefly moves between the panel and browser.
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tabs?.[0] || null;
+}
+
 async function getActivePageContext() {
-  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  const tab = tabs?.[0];
+  const tab = await getCurrentActiveTab();
   if (!tab?.id) return null;
+  const initialTabId = tab.id;
+  const initialUrl = String(tab.url || "");
+
+  const makeContext = (data) => {
+    const text = String(data?.text || "").trim();
+    if (!text) return null;
+    return {
+      tabId: initialTabId,
+      title: String(data?.title || tab.title || ""),
+      url: String(data?.url || initialUrl || ""),
+      text: text.slice(0, 20000),
+    };
+  };
 
   try {
     const response = await new Promise((resolve) => {
-      chrome.tabs.sendMessage(tab.id, { type: "EXTRACT_PAGE_CONTENT" }, (value) => {
+      chrome.tabs.sendMessage(initialTabId, { type: "EXTRACT_PAGE_CONTENT" }, (value) => {
         if (chrome.runtime.lastError) { resolve(null); return; }
         resolve(value || null);
       });
     });
     if (response?.ok && response.data?.text?.trim()) {
-      return {
-        title: String(response.data.title || tab.title || ""),
-        url: String(response.data.url || tab.url || ""),
-        text: String(response.data.text).slice(0, 20000),
-      };
+      const currentTab = await getCurrentActiveTab();
+      // Never return context captured from a page that is no longer the
+      // active page. This prevents a slow content-script response from a
+      // previous tab/navigation being attached to the next request.
+      if (currentTab?.id !== initialTabId || String(currentTab.url || "") !== initialUrl) {
+        return getActivePageContext();
+      }
+      return makeContext(response.data);
     }
   } catch (err) {
-    console.debug("[Brave AI Assistant] Content script unavailable:", err);
+    console.debug("[AI Assistant] Content script unavailable:", err);
   }
 
   try {
-    if (!/^https?:\/\//i.test(String(tab.url || ""))) return null;
+    if (!/^https?:\/\//i.test(initialUrl)) return null;
     const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
+      target: { tabId: initialTabId },
       func: () => ({
         title: document.title,
         url: location.href,
@@ -563,19 +715,16 @@ async function getActivePageContext() {
       }),
     });
     const data = results?.[0]?.result;
-    const text = String(data?.text || "").trim();
-    if (!text) return null;
-    return {
-      title: String(data?.title || tab.title || ""),
-      url: String(data?.url || tab.url || ""),
-      text: text.slice(0, 20000),
-    };
+    const currentTab = await getCurrentActiveTab();
+    if (currentTab?.id !== initialTabId || String(currentTab.url || "") !== initialUrl) {
+      return getActivePageContext();
+    }
+    return makeContext(data);
   } catch (err) {
-    console.warn("[Brave AI Assistant] Unable to read current page:", err);
+    console.warn("[AI Assistant] Unable to read current page:", err);
     return null;
   }
 }
-
 function updateContextBar(pageContext) {
   if (!pageContext) {
     pageContextBar.hidden = true;
@@ -614,7 +763,7 @@ function handlePortMessage(msg) {
       history.push({ role: "assistant", content: currentAssistantText, displayContent: currentAssistantText, modelLabel: pendingModelLabel, modelId: pendingModelId });
       currentAssistantBubble = null;
       setStreaming(false);
-      saveConversations().catch((err) => console.error("[Brave AI Assistant] Unable to save conversation:", err));
+      saveConversations().catch((err) => console.error("[AI Assistant] Unable to save conversation:", err));
       break;
     }
     case "ERROR": {
@@ -1068,7 +1217,7 @@ async function restoreMicLang() {
       return;
     }
   } catch (err) {
-    console.debug("[Brave AI Assistant] Unable to restore voice input language:", err);
+    console.debug("[AI Assistant] Unable to restore voice input language:", err);
   }
   // First run: guess a sensible starting language from the system/browser locale.
   micLangIndex = (navigator.language || "en-US").toLowerCase().startsWith("zh") ? 1 : 0;
@@ -1103,7 +1252,7 @@ function buildRecognition() {
 
   rec.onerror = (event) => {
     const err = event.error;
-    console.debug("[Brave AI Assistant] Voice input error:", err);
+    console.debug("[AI Assistant] Voice input error:", err);
     if (err === "no-speech" || err === "aborted") return; // benign; onend decides what happens next
     userStoppedMic = true;
     const messages = {
@@ -1135,7 +1284,7 @@ function buildRecognition() {
       micBtn.classList.add("active");
       micBtn.setAttribute("aria-pressed", "true");
     } catch (err) {
-      console.debug("[Brave AI Assistant] Unable to auto-restart voice input:", err);
+      console.debug("[AI Assistant] Unable to auto-restart voice input:", err);
     }
     updateMicLangUI();
   };
@@ -1204,7 +1353,7 @@ async function startMic() {
       updateMicLangUI();
       setMicStatus(`Listening… (${currentMicLang().name})`);
     } catch (err) {
-      console.error("[Brave AI Assistant] Unable to start voice input:", err);
+      console.error("[AI Assistant] Unable to start voice input:", err);
       setMicStatus("Unable to start voice input.", true, 6000);
     }
   } finally {
@@ -1288,6 +1437,8 @@ async function handleSubmit(e) {
 
   let pageContext = null;
   if (includeContextToggle.checked) {
+    // Capture the page at the moment the user submits the request. The API
+    // request must never reuse the page context shown or captured earlier.
     pageContext = await getActivePageContext();
     updateContextBar(pageContext);
   }
@@ -1356,8 +1507,7 @@ async function refreshActivePageContext() {
   if (!includeContextToggle.checked) return;
   const token = ++pageContextRefreshToken;
   try {
-    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    const tab = tabs?.[0];
+    const tab = await getCurrentActiveTab();
     if (!tab?.id) {
       updateContextBar(null);
       return;
@@ -1368,7 +1518,7 @@ async function refreshActivePageContext() {
     if (token !== pageContextRefreshToken) return;
     updateContextBar(ctx);
   } catch (err) {
-    console.debug("[Brave AI Assistant] Unable to refresh page context:", err);
+    console.debug("[AI Assistant] Unable to refresh page context:", err);
     if (token === pageContextRefreshToken) updateContextBar(null);
   }
 }
@@ -1428,5 +1578,5 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   //    explicit navigation (selecting a conversation, or the initial
   //    restore in init()), not an incidental background sync.
   if (isStreaming) return;
-  loadConversations({ syncModel: false }).catch((err) => console.error("[Brave AI Assistant] Unable to refresh restored history:", err));
+  loadConversations({ syncModel: false }).catch((err) => console.error("[AI Assistant] Unable to refresh restored history:", err));
 });

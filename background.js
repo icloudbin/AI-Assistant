@@ -393,17 +393,21 @@ async function readSse(resp, extractDelta, ctx) {
 }
 
 function buildMessages(question, pageContext, history, customPrompt) {
-  const basePrompt = "You are an assistant running in the browser side panel. If web page context is provided, use it to answer.";
+  const basePrompt = "You are an assistant running in the browser side panel. When current web page context is provided, it is authoritative for requests about the current page. Ignore page content from previous tabs, previous pages, or earlier page contexts. Always use the CURRENT PAGE CONTEXT supplied with this request for current-page tasks.";
   const messages = [
     { role: "system", content: customPrompt ? `${basePrompt}\n\nUser-defined instructions:\n${customPrompt}` : basePrompt },
   ];
+  for (const h of history || []) messages.push({ role: h.role, content: h.content });
+  // Put the current page context immediately before the current user request.
+  // This makes the current page the freshest and most explicit source of
+  // page information, while history remains available for conversational
+  // continuity. Older page information must never be treated as current.
   if (pageContext) {
     messages.push({
       role: "system",
-      content: `The web page the user is viewing:\nTitle:${pageContext.title || ""}\nURL：${pageContext.url || ""}\nText excerpt:\n${(pageContext.text || "").slice(0, 6000)}`,
+      content: `CURRENT PAGE CONTEXT (authoritative; captured at request time):\nTab ID:${pageContext.tabId ?? ""}\nTitle:${pageContext.title || ""}\nURL:${pageContext.url || ""}\nPage text:\n${(pageContext.text || "").slice(0, 20000)}`,
     });
   }
-  for (const h of history || []) messages.push({ role: h.role, content: h.content });
   messages.push({ role: "user", content: question });
   return messages;
 }
@@ -414,10 +418,10 @@ function buildMessages(question, pageContext, history, customPrompt) {
 // streamClaude() above reuses this same function for its own top-level
 // `system` string field.
 function buildSystemInstruction(pageContext, customPrompt) {
-  const basePrompt = "You are an assistant running in the browser side panel. If web page context is provided, use it to answer.";
+  const basePrompt = "You are an assistant running in the browser side panel. When current web page context is provided, it is authoritative for requests about the current page. Ignore page content from previous tabs, previous pages, or earlier page contexts. Always use the CURRENT PAGE CONTEXT supplied with this request for current-page tasks.";
   let text = customPrompt ? `${basePrompt}\n\nUser-defined instructions:\n${customPrompt}` : basePrompt;
   if (pageContext) {
-    text += `\n\nThe web page the user is viewing:\nTitle:${pageContext.title || ""}\nURL：${pageContext.url || ""}\nText excerpt:\n${(pageContext.text || "").slice(0, 6000)}`;
+    text += `\n\nCURRENT PAGE CONTEXT (authoritative; captured at request time):\nTab ID:${pageContext.tabId ?? ""}\nTitle:${pageContext.title || ""}\nURL:${pageContext.url || ""}\nPage text:\n${(pageContext.text || "").slice(0, 20000)}\n\nFor any request about the current web page, use this context and do not use content from a previous page.`;
   }
   return text;
 }
