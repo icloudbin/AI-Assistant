@@ -708,12 +708,60 @@ async function getActivePageContext() {
     if (!/^https?:\/\//i.test(initialUrl)) return null;
     const results = await chrome.scripting.executeScript({
       target: { tabId: initialTabId },
-      func: () => ({
-        title: document.title,
-        url: location.href,
-        text: document.body?.innerText || document.documentElement?.innerText || "",
-      }),
+      func: () => {
+        // Synology MailPlus renders the selected message body inside an
+        // expanded message item. Extract that body directly instead of
+        // taking the first 20,000 characters of the entire MailPlus DOM.
+        const message =
+          document.querySelector(".syno-mc-message-list .item-wrap.item-expanded") ||
+          document.querySelector(".syno-mc-thread-message-panel .item-wrap.item-expanded") ||
+          document.querySelector(".syno-mc-message-panel .item-wrap.item-expanded");
+
+        if (message) {
+          const body =
+            message.querySelector(".item-detail .body.reset") ||
+            message.querySelector(".body.reset");
+
+          const bodyText = (body?.innerText || body?.textContent || "").trim();
+
+          if (bodyText) {
+            const subject =
+              message.querySelector(".item-title .body-preview")?.innerText?.trim() ||
+              message.querySelector(".subject")?.innerText?.trim() ||
+              "";
+            const sender =
+              message.querySelector(".from")?.innerText?.trim() ||
+              message.querySelector('[class*="from"]')?.innerText?.trim() ||
+              "";
+            const recipient =
+              message.querySelector(".to")?.innerText?.trim() ||
+              message.querySelector('[class*="to"]')?.innerText?.trim() ||
+              "";
+
+            const parts = [];
+            if (subject) parts.push(`Subject: ${subject}`);
+            if (sender) parts.push(`From: ${sender}`);
+            if (recipient) parts.push(`To: ${recipient}`);
+            parts.push(`Email body:\n${bodyText}`);
+
+            return {
+              source: "synology-mailplus",
+              title: document.title,
+              url: location.href,
+              text: parts.join("\n\n"),
+            };
+          }
+        }
+
+        return {
+          source: "generic-page",
+          title: document.title,
+          url: location.href,
+          text: document.body?.innerText || document.documentElement?.innerText || "",
+        };
+      },
     });
+
     const data = results?.[0]?.result;
     const currentTab = await getCurrentActiveTab();
     if (currentTab?.id !== initialTabId || String(currentTab.url || "") !== initialUrl) {
