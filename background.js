@@ -109,7 +109,13 @@ chrome.runtime.onConnect.addListener((port) => {
     activeAbortController = abortController;
 
     try {
-      const { question, pageContext, history, images = [], modelId, provider, apiModel, thinking } = msg.payload;
+      const { question, pageContext, includePageContext, history, images = [], modelId, provider, apiModel, thinking } = msg.payload;
+      // Never trust a stale/accidental pageContext value when the user has
+      // disabled "Read current page". This is the final privacy boundary
+      // before any provider request is constructed - independent of, and
+      // unaffected by, any attached images (see normalizedImages below),
+      // which are sent whenever present regardless of this toggle.
+      const requestPageContext = includePageContext === true ? pageContext : null;
       const storedModel = findModelById(modelId);
 
       // Resolve the model for THIS request. Never reuse a previous request's
@@ -142,23 +148,15 @@ chrome.runtime.onConnect.addListener((port) => {
       if (normalizedImages.length !== (Array.isArray(images) ? images.length : 0)) throw new Error("One or more attached images could not be encoded for the AI request");
 
       if (model.provider === "gemini") {
-        await streamGemini(model, question, pageContext, history, normalizedImages, ctx);
+        await streamGemini(model, question, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "deepseek") {
-        await streamDeepSeek(model, question, pageContext, history, normalizedImages, ctx);
+        await streamDeepSeek(model, question, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "claude") {
-        await streamClaude(model, question, pageContext, history, normalizedImages, ctx);
+        await streamClaude(model, question, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "openai") {
-        await streamOpenAI(model, question, pageContext, history, normalizedImages, ctx);
+        await streamOpenAI(model, question, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "openrouter") {
-        await streamOpenRouter(model, question, pageContext, history, normalizedImages, ctx);
-      } else if (model.provider === "deepseek") {
-        await streamDeepSeek(model, question, pageContext, history, ctx);
-      } else if (model.provider === "claude") {
-        await streamClaude(model, question, pageContext, history, ctx);
-      } else if (model.provider === "openai") {
-        await streamOpenAI(model, question, pageContext, history, ctx);
-      } else if (model.provider === "openrouter") {
-        await streamOpenRouter(model, question, pageContext, history, ctx);
+        await streamOpenRouter(model, question, requestPageContext, history, normalizedImages, ctx);
       }
 
       port.postMessage({ type: "DONE", requestId });
@@ -403,22 +401,60 @@ async function readSse(resp, extractDelta, ctx) {
   }
 }
 
+// Shared base prompt, kept provider-agnostic and toggle-agnostic. Previously
+// this string (plus the whole CURRENT PAGE CONTEXT template below) was
+// hand-duplicated inside both buildMessages() and buildSystemInstruction(),
+// which risked the two drifting apart on a future edit; both now read from
+// this single copy via pageContextInstruction().
+const BASE_PROMPT = "You are an assistant running in the browser side panel.";
+
+// Returns this request's page-context instruction, for either providers with
+// a message-list system role (buildMessages) or a single system string
+// (buildSystemInstruction). Unconditional - always returns something, rather
+// than only when pageContext is present - because the OFF case needs its own
+// explicit, per-request instruction just as much as the ON case does: with no
+// pageContext this call, the model otherwise gets no explicit signal that
+// "Read current page" was off *this time*, and could fall back to an earlier
+// turn's page context still visible in `history`, or ask the user which page
+// they mean. Both branches are placed immediately before the user's question
+// (see call sites below) so this is the freshest, most explicit thing the
+// model reads before answering - never something for it to infer from mere
+// absence. This instruction is only about webpage content: it deliberately
+// says nothing about attached images/files, which are a separate mechanism
+// (see the `images` parameter in buildMessages() and streamXxx() in this
+// file) and should be used normally regardless of this toggle's state.
+function pageContextInstruction(pageContext) {
+  if (pageContext) {
+    return `CURRENT PAGE CONTEXT (authoritative; captured at request time):\nTab ID:${pageContext.tabId ?? ""}\nTitle:${pageContext.title || ""}\nURL:${pageContext.url || ""}\nPage text:\n${(pageContext.text || "").slice(0, 20000)}\n\nFor this request, "Read current page" is ON: use this context for any request about the current page, and ignore page content from a previous tab, a previous page, or an earlier turn in this conversation.`;
+  }
+  return `For this request, "Read current page" is OFF: treat this question as fully independent of any webpage and answer using your own general knowledge only. Do not use, reference, or assume any page content - including anything about a page discussed earlier in this conversation - and do not ask the user which page they mean. This has nothing to do with any attached image or file, which you should still use normally if one is present with this request.`;
+}
+
 function buildMessages(question, pageContext, history, customPrompt, images = []) {
-  const basePrompt = "You are an assistant running in the browser side panel. When current web page context is provided, it is authoritative for requests about the current page. Ignore page content from previous tabs, previous pages, or earlier page contexts. Always use the CURRENT PAGE CONTEXT supplied with this request for current-page tasks.";
-  const messages = [{ role: "system", content: customPrompt ? `${basePrompt}\n\nUser-defined instructions:\n${customPrompt}` : basePrompt }];
+  const messages = [
+    { role: "system", content: customPrompt ? `${BASE_PROMPT}\n\nUser-defined instructions:\n${customPrompt}` : BASE_PROMPT },
+  ];
   for (const h of history || []) messages.push({ role: h.role, content: h.content });
-  if (pageContext) messages.push({ role: "system", content: `CURRENT PAGE CONTEXT (authoritative; captured at request time):\nTab ID:${pageContext.tabId ?? ""}\nTitle:${pageContext.title || ""}\nURL:${pageContext.url || ""}\nPage text:\n${(pageContext.text || "").slice(0, 20000)}` });
+  // Put this request's page-context instruction (ON or OFF) immediately
+  // before the current user request, while history remains available for
+  // conversational continuity. Older page information must never be treated
+  // as current - see pageContextInstruction() above.
+  messages.push({ role: "system", content: pageContextInstruction(pageContext) });
   const content = [{ type: "text", text: question }];
   for (const img of images) content.push({ type: "image_url", image_url: { url: img.dataUrl, detail: "auto" } });
   messages.push({ role: "user", content: images.length ? content : question });
   return messages;
 }
 
+// Gemini has one system_instruction field rather than a list of system
+// messages, so the base prompt, the user's custom prompt, and the
+// page-context instruction are combined into a single instruction block
+// instead. Claude's streamClaude() and OpenAI's streamOpenAI() above reuse
+// this same function for their own top-level `system`/`instructions` string
+// fields.
 function buildSystemInstruction(pageContext, customPrompt) {
-  const basePrompt = "You are an assistant running in the browser side panel. When current web page context is provided, it is authoritative for requests about the current page. Ignore page content from previous tabs, previous pages, or earlier page contexts. Always use the CURRENT PAGE CONTEXT supplied with this request for current-page tasks.";
-  let text = customPrompt ? `${basePrompt}\n\nUser-defined instructions:\n${customPrompt}` : basePrompt;
-  if (pageContext) text += `\n\nCURRENT PAGE CONTEXT (authoritative; captured at request time):\nTab ID:${pageContext.tabId ?? ""}\nTitle:${pageContext.title || ""}\nURL:${pageContext.url || ""}\nPage text:\n${(pageContext.text || "").slice(0, 20000)}\n\nFor any request about the current web page, use this context and do not use content from a previous page.`;
-  return text;
+  const text = customPrompt ? `${BASE_PROMPT}\n\nUser-defined instructions:\n${customPrompt}` : BASE_PROMPT;
+  return `${text}\n\n${pageContextInstruction(pageContext)}`;
 }
 
 function buildGeminiContents(question, history, images = []) {

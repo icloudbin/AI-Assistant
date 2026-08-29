@@ -1,27 +1,35 @@
-<!-- README.md —— For this update, replace the entire package, especially manifest.json -->
-# Structure (three sidepanel files in the subdirectory, all other files in the root; matches import "../models.js")
+<!-- README.md -->
+# Structure
 AI-Assistant/
-├── manifest.json      ← v1.0.2：options_ui removed; this avoids the "Could not load options page" error
+├── manifest.json
 ├── models.js
 ├── background.js
 ├── content.js
-├── options.html       ← kept: even if your old manifest still has options_ui, it can pass validation
-├── options.js
+├── storage-keys.js
+├── icons/
+│   └── icon16.png / icon48.png / icon128.png (manifest.json does not currently declare an "icons" field)
+├── options/
+│   ├── options.html
+│   └── options.js
 └── sidepanel/
-    ├── sidepanel.html ← dropdown moved next to the title; API Key configuration bar built in
-    ├── sidepanel.css  ← fixed the * selector
-    └── sidepanel.js   ← fixed all trailing-space bugs
+    ├── sidepanel.html
+    ├── sidepanel.css
+    ├── sidepanel.js
+    ├── mic-permission.html  ← opened as its own tab for the mic permission grant, see "Voice input" below
+    ├── mic-permission.css
+    └── mic-permission.js
 
 # Deployment
-1. brave://extensions → Developer mode → Load unpacked → select the deepseek-assistant folder
+1. brave://extensions → Developer mode → Load unpacked → select the AI-Assistant-main folder
 2. If loading failed before: remove the old entry first, then select "Load unpacked" again
-3. Click the toolbar icon to open the side panel; click "Settings" to paste and save the API Key
+3. Click the toolbar icon to open the side panel; click "Settings" to paste and save an API key
 4. After changing code: reload the extension card; reopen the side panel; refresh existing web pages
 
 # Validation checklist (file names must match exactly, UTF-8, no .txt suffix)
-manifest.json / models.js / background.js / content.js /
-options.html / options.js / sidepanel/sidepanel.html /
-sidepanel/sidepanel.css / sidepanel/sidepanel.js
+manifest.json / models.js / background.js / content.js / storage-keys.js /
+options/options.html / options/options.js /
+sidepanel/sidepanel.html / sidepanel/sidepanel.css / sidepanel/sidepanel.js /
+sidepanel/mic-permission.html / sidepanel/mic-permission.css / sidepanel/mic-permission.js
 
 ## File Uploads (v1.0.6)
 
@@ -178,6 +186,21 @@ Fix, in two parts:
 - **sidepanel.js**: `clearBtn`'s handler and both branches of `selectConversation()` (New Topic and switching to a different past conversation) no longer block while `isStreaming` - they call a new `stopActiveRequest()` first, which sends `STOP` for the current request, immediately clears the pending/streaming bubble, and resets streaming state on this side regardless of whether the abort message actually reaches (or is acted on by) the other end in time, since a hang is exactly the situation this needs to recover from without depending on anything responding. Every `ASK` now carries a `requestId`, echoed back on `START`/`CHUNK`/`DONE`/`ERROR`; `handlePortMessage` ignores anything whose `requestId` doesn't match what's currently being tracked, so a message that was already in flight for a just-abandoned request (a chunk queued on the port before the abort reached the fetch, for instance) can't resurrect the old bubble or get appended to whatever conversation is active by the time it arrives.
 
 Verified with a background.js-only test simulating a genuinely hung `fetch()` (a promise that only ever settles when its `AbortSignal` fires, the same way a real stalled request behaves): confirms a `STOP` with a mismatched `requestId` leaves an unrelated hung request untouched, a matching `STOP` aborts it with no `ERROR`/`DONE` posted, and a fresh request on the same port afterward starts normally. A second background.js-only test confirms a port disconnect (panel closed) also aborts whatever was still hung. A full side-panel UI test (real `sidepanel.html`/`sidepanel.js`) reproduces the reported hang directly (`START` arrives, then nothing, ever) and confirms the composer is genuinely stuck at that point, then confirms clicking "Clear" sends `STOP`, unsticks every disabled control, clears the stuck bubble, and resets to New Topic; confirms a stray late message for the now-abandoned request afterward is correctly ignored; and confirms picking a different conversation from the history dropdown escapes a second hang the same way. Re-ran every prior test - two (`harness.mjs`, `harness3.mjs`) needed their simulated background.js responses updated to also echo the new `requestId`, matching the same change a real background.js now needs; a third (`harness4.mjs`) had the identical gap.
+
+## Fixed: "Read current page" had no explicit per-request instruction, a leftover duplicate set of provider-dispatch branches, and no re-verification layer in background.js (v1.10.9)
+
+Reported behavior: with "Read current page" unchecked, a question should be answered independently of any webpage, using only general knowledge; checked, the answer should use the active page's content.
+
+This package's `background.js` and `sidepanel/sidepanel.js` (specifically the `ASK` payload construction and the provider-dispatch chain) supported image attachments - encoded locally and sent as multimodal content to whichever provider supports it - but, unlike a page-context fix made against an earlier state of this project, did not include an `includePageContext` flag in the `ASK` payload, did not re-derive a `requestPageContext` value in `background.js` from it, and the provider-dispatch `if`/`else if` chain in the `ASK` handler had two full sets of branches for `deepseek`/`claude`/`openai`/`openrouter` - the first four (added alongside image support, each correctly passing the new `normalizedImages` argument) always matched first, making the second, older set of four (calling each `streamXxx()` with its pre-image five-argument shape, which would have passed `ctx` into the `images` parameter had any of them ever run) permanently unreachable dead code.
+
+None of this put page data on the wire incorrectly by itself - `sidepanel.js`'s `pageContext` variable was still only ever assigned when the checkbox was checked, so an unchecked box still resulted in `pageContext: null` reaching `background.js` - but it removed the second, independent layer that a request's page-context state didn't depend on trusting a single value along the way, and the model was still only ever told something when page context was present, never given an explicit instruction for the OFF case.
+
+Fix:
+- `sidepanel/sidepanel.js`: the `ASK` payload now also sends `includePageContext: includeContextToggle.checked === true`, and `pageContext` is re-gated on that same check before being sent, independent of the `images` field (unaffected, still built from `readyAttachments`).
+- `background.js`: the `ASK` handler now destructures `includePageContext` and computes `const requestPageContext = includePageContext === true ? pageContext : null` before dispatching to any provider, and the dispatch chain's dead second set of four branches was deleted, leaving exactly one branch per provider (verified by counting `model.provider === "..."` occurrences in the file - one each for `gemini`/`deepseek`/`claude`/`openai`/`openrouter`).
+- `buildMessages()` and `buildSystemInstruction()` now both call a new `pageContextInstruction(pageContext)` helper - unconditional, naming "Read current page" as ON or OFF by name - instead of only ever adding page-related text when a page was present. The OFF instruction explicitly notes it has nothing to do with attached images/files, which should still be used normally; this note wasn't needed in a page-context fix made before image support existed, but matters now that a request can have an image attached while "Read current page" is off. This also de-duplicates a base-prompt/page-context template previously hand-copied in both functions.
+
+Verified with a Node-only test that extracts the real, current `pageContextInstruction()`/`buildMessages()`/`buildSystemInstruction()` from `background.js` and checks, across OFF/ON and with/without an attached image: OFF never contains page title/URL/text anywhere in the constructed request, regardless of whether an image is attached; an attached image is still present in the request's content in every case (OFF+image, ON+image); ON contains the expected page title/URL/text; and every case's system instruction explicitly says ON or OFF by name. `node --check` confirms every JS file in the package still parses after the edits. Grepped the dispatch chain to confirm exactly one branch remains per provider. This could not be verified against a real Brave side panel from this sandbox (no browser/`chrome.*` runtime available here) - worth a real click-through per the Deployment steps above with an image attached and the checkbox both on and off.
 
 ## Rich conversation rendering
 

@@ -1489,7 +1489,14 @@ async function handleSubmit(e) {
     payload: {
       requestId,
       question: questionForApi,
-      pageContext,
+      // Defense in depth: the background worker also receives an explicit
+      // flag so an unchecked "Read current page" can never be interpreted as
+      // a request to use/send page content, even if pageContext were ever
+      // non-null here by mistake. This is independent of attached images
+      // (below), which are unrelated to this toggle and always sent when
+      // present.
+      includePageContext: includeContextToggle.checked === true,
+      pageContext: includeContextToggle.checked === true ? pageContext : null,
       history: getApiHistory().slice(0, -1),
       images: readyAttachments.filter((a) => a.kind === "image" && a.dataUrl).map((a) => ({ name: a.name, dataUrl: a.dataUrl })),
       // Send the exact model selected at submit time.
