@@ -22,6 +22,15 @@ deviceThemeQuery.addEventListener?.("change", async () => {
   if ((stored[THEME_STORAGE_KEY] || "device") === "device") applyTheme("device");
 });
 
+// Repaint the history selector when the side panel becomes visible/focused.
+// Chromium can restore the side panel DOM from a suspended state without
+// rerunning the full initialization sequence.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) scheduleHistoryRender();
+});
+window.addEventListener("focus", scheduleHistoryRender);
+window.addEventListener("pageshow", scheduleHistoryRender);
+
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName === "local" && changes[THEME_STORAGE_KEY]) {
     applyTheme(changes[THEME_STORAGE_KEY].newValue || "device");
@@ -708,60 +717,12 @@ async function getActivePageContext() {
     if (!/^https?:\/\//i.test(initialUrl)) return null;
     const results = await chrome.scripting.executeScript({
       target: { tabId: initialTabId },
-      func: () => {
-        // Synology MailPlus renders the selected message body inside an
-        // expanded message item. Extract that body directly instead of
-        // taking the first 20,000 characters of the entire MailPlus DOM.
-        const message =
-          document.querySelector(".syno-mc-message-list .item-wrap.item-expanded") ||
-          document.querySelector(".syno-mc-thread-message-panel .item-wrap.item-expanded") ||
-          document.querySelector(".syno-mc-message-panel .item-wrap.item-expanded");
-
-        if (message) {
-          const body =
-            message.querySelector(".item-detail .body.reset") ||
-            message.querySelector(".body.reset");
-
-          const bodyText = (body?.innerText || body?.textContent || "").trim();
-
-          if (bodyText) {
-            const subject =
-              message.querySelector(".item-title .body-preview")?.innerText?.trim() ||
-              message.querySelector(".subject")?.innerText?.trim() ||
-              "";
-            const sender =
-              message.querySelector(".from")?.innerText?.trim() ||
-              message.querySelector('[class*="from"]')?.innerText?.trim() ||
-              "";
-            const recipient =
-              message.querySelector(".to")?.innerText?.trim() ||
-              message.querySelector('[class*="to"]')?.innerText?.trim() ||
-              "";
-
-            const parts = [];
-            if (subject) parts.push(`Subject: ${subject}`);
-            if (sender) parts.push(`From: ${sender}`);
-            if (recipient) parts.push(`To: ${recipient}`);
-            parts.push(`Email body:\n${bodyText}`);
-
-            return {
-              source: "synology-mailplus",
-              title: document.title,
-              url: location.href,
-              text: parts.join("\n\n"),
-            };
-          }
-        }
-
-        return {
-          source: "generic-page",
-          title: document.title,
-          url: location.href,
-          text: document.body?.innerText || document.documentElement?.innerText || "",
-        };
-      },
+      func: () => ({
+        title: document.title,
+        url: location.href,
+        text: document.body?.innerText || document.documentElement?.innerText || "",
+      }),
     });
-
     const data = results?.[0]?.result;
     const currentTab = await getCurrentActiveTab();
     if (currentTab?.id !== initialTabId || String(currentTab.url || "") !== initialUrl) {
@@ -895,9 +856,13 @@ async function saveConversations() {
     [CURRENT_CONVERSATION_KEY]: currentConversationId || "",
   });
   renderHistorySelect();
+  scheduleHistoryRender();
 }
 
+let historyRenderQueued = false;
+
 function renderHistorySelect() {
+  if (!historySelect || !document.documentElement.isConnected) return;
   const previous = historySelect.value;
   historySelect.innerHTML = "";
   const newOpt = document.createElement("option");
@@ -921,6 +886,22 @@ function renderHistorySelect() {
     historySelect.value = NEW_TOPIC_VALUE;
   }
 }
+
+// Side-panel controls can be laid out before asynchronous storage/model
+// initialization has completed. Queue one render after the browser has had a
+// chance to finish layout/paint; this prevents the history selector from
+// occasionally remaining visually empty until the panel is reopened.
+function scheduleHistoryRender() {
+  if (historyRenderQueued) return;
+  historyRenderQueued = true;
+  const run = () => {
+    historyRenderQueued = false;
+    renderHistorySelect();
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+  else setTimeout(run, 0);
+}
+
 
 function renderConversation(messages) {
   chatLog.innerHTML = "";
@@ -973,6 +954,7 @@ async function loadConversations({ activate = true, syncModel = true } = {}) {
     }
   }
   renderHistorySelect();
+  scheduleHistoryRender();
 }
 
 async function selectConversation(id) {
@@ -1017,14 +999,14 @@ function attachmentContextText() {
   const imageParts = [];
   for (const a of usable) {
     if (a.kind === "image") {
-      imageParts.push(`- ${a.name} (image attachment; this extension does not send image data to the AI model)`);
+      imageParts.push(`- ${a.name} (image attachment; image data is included in the current request)`);
     } else if (a.text) {
       textParts.push(`\n===== FILE: ${a.name} =====\n${a.text}`);
     }
   }
   return [
     "\n\n[ATTACHMENTS]",
-    imageParts.length ? `Images attached (not sent as image data):\n${imageParts.join("\n")}` : "",
+    imageParts.length ? `Images attached (image data sent with this request):\n${imageParts.join("\n")}` : "",
     textParts.length ? `Text-based attachment contents:${textParts.join("\n")}` : "",
     "[/ATTACHMENTS]"
   ].filter(Boolean).join("\n");
@@ -1179,9 +1161,20 @@ async function processFile(file) {
   try {
     if (file.size > MAX_FILE_BYTES) throw new Error("File is larger than 12 MB");
     if (isImageFile(file)) {
+      if (!/^image\/(jpeg|png|gif|webp)$/i.test(file.type)) {
+        throw new Error("Unsupported image format. Use JPEG, PNG, GIF, or WebP");
+      }
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("Unable to read image"));
+        reader.readAsDataURL(file);
+      });
+      if (!dataUrl.startsWith("data:image/")) throw new Error("Unable to encode image");
       item.kind = "image";
       item.text = "";
-      setAttachmentStatus(item, "ready", "Attached");
+      item.dataUrl = dataUrl;
+      setAttachmentStatus(item, "ready", "Ready");
       return;
     }
     if (isTextFile(file)) {
@@ -1498,6 +1491,7 @@ async function handleSubmit(e) {
       question: questionForApi,
       pageContext,
       history: getApiHistory().slice(0, -1),
+      images: readyAttachments.filter((a) => a.kind === "image" && a.dataUrl).map((a) => ({ name: a.name, dataUrl: a.dataUrl })),
       // Send the exact model selected at submit time.
       modelId: selectedModel.id,
       provider: selectedModel.provider,
@@ -1591,6 +1585,10 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 
 (async function init() {
   populateModelSelect();
+  // Render the selector immediately so the control is never dependent on the
+  // timing of asynchronous model/storage initialization.
+  renderHistorySelect();
+  scheduleHistoryRender();
   await restoreSelectedModel();
   // Load the saved conversation list (so the history dropdown is populated
   // and past conversations stay one click away), but do not activate/display
@@ -1603,6 +1601,7 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
   await loadConversations({ activate: false });
   startNewTopic();
   renderHistorySelect();
+  scheduleHistoryRender();
   connectPort();
   if (includeContextToggle.checked) {
     await refreshActivePageContext();
@@ -1626,5 +1625,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   //    explicit navigation (selecting a conversation, or the initial
   //    restore in init()), not an incidental background sync.
   if (isStreaming) return;
-  loadConversations({ syncModel: false }).catch((err) => console.error("[AI Assistant] Unable to refresh restored history:", err));
+  loadConversations({ syncModel: false })
+    .then(() => scheduleHistoryRender())
+    .catch((err) => console.error("[AI Assistant] Unable to refresh restored history:", err));
 });

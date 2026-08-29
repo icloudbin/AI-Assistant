@@ -109,7 +109,7 @@ chrome.runtime.onConnect.addListener((port) => {
     activeAbortController = abortController;
 
     try {
-      const { question, pageContext, history, modelId, provider, apiModel, thinking } = msg.payload;
+      const { question, pageContext, history, images = [], modelId, provider, apiModel, thinking } = msg.payload;
       const storedModel = findModelById(modelId);
 
       // Resolve the model for THIS request. Never reuse a previous request's
@@ -138,9 +138,19 @@ chrome.runtime.onConnect.addListener((port) => {
       port.postMessage({ type: "START", requestId });
 
       const ctx = { port, requestId, signal: abortController.signal };
+      const normalizedImages = Array.isArray(images) ? images.filter((img) => img && typeof img.dataUrl === "string" && /^data:image\/(jpeg|png|gif|webp);base64,/i.test(img.dataUrl)) : [];
+      if (normalizedImages.length !== (Array.isArray(images) ? images.length : 0)) throw new Error("One or more attached images could not be encoded for the AI request");
 
       if (model.provider === "gemini") {
-        await streamGemini(model, question, pageContext, history, ctx);
+        await streamGemini(model, question, pageContext, history, normalizedImages, ctx);
+      } else if (model.provider === "deepseek") {
+        await streamDeepSeek(model, question, pageContext, history, normalizedImages, ctx);
+      } else if (model.provider === "claude") {
+        await streamClaude(model, question, pageContext, history, normalizedImages, ctx);
+      } else if (model.provider === "openai") {
+        await streamOpenAI(model, question, pageContext, history, normalizedImages, ctx);
+      } else if (model.provider === "openrouter") {
+        await streamOpenRouter(model, question, pageContext, history, normalizedImages, ctx);
       } else if (model.provider === "deepseek") {
         await streamDeepSeek(model, question, pageContext, history, ctx);
       } else if (model.provider === "claude") {
@@ -170,10 +180,11 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-async function streamDeepSeek(model, question, pageContext, history, ctx) {
+async function streamDeepSeek(model, question, pageContext, history, images, ctx) {
   const { apiKey, customPrompt } = await chrome.storage.local.get(["apiKey", "customPrompt"]);
   if (!apiKey) throw new Error("DeepSeek API Key is not configured: open the Settings page to configure and save it");
 
+  const requestModel = images.length ? "deepseek-v4-flash-vision-exp" : model.apiModel;
   const resp = await fetch("https://api.deepseek.com/chat/completions", {
     method: "POST",
     headers: {
@@ -181,8 +192,8 @@ async function streamDeepSeek(model, question, pageContext, history, ctx) {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: model.apiModel,
-      messages: buildMessages(question, pageContext, history, customPrompt),
+      model: requestModel,
+      messages: buildMessages(question, pageContext, history, customPrompt, images),
       stream: true,
       thinking: { type: model.thinking },
     }),
@@ -198,7 +209,7 @@ async function streamDeepSeek(model, question, pageContext, history, ctx) {
 // `openrouter/free`, which automatically selects an available free model.
 // The endpoint is OpenAI-Chat-Completions-compatible, so the request shape
 // and SSE response handling below stay unchanged.
-async function streamOpenRouter(model, question, pageContext, history, ctx) {
+async function streamOpenRouter(model, question, pageContext, history, images, ctx) {
   const { openrouterApiKey, customPrompt } = await chrome.storage.local.get(["openrouterApiKey", "customPrompt"]);
   if (!openrouterApiKey) throw new Error("OpenRouter API Key is not configured: open the Settings page to configure and save it");
 
@@ -212,7 +223,7 @@ async function streamOpenRouter(model, question, pageContext, history, ctx) {
     },
     body: JSON.stringify({
       model: model.apiModel,
-      messages: buildMessages(question, pageContext, history, customPrompt),
+      messages: buildMessages(question, pageContext, history, customPrompt, images),
       stream: true,
     }),
     signal: ctx.signal,
@@ -229,7 +240,7 @@ async function streamOpenRouter(model, question, pageContext, history, ctx) {
 // alt=sse Server-Sent-Events streaming mechanics as DeepSeek - see
 // https://ai.google.dev/gemini-api/docs/text-generation and
 // https://ai.google.dev/gemini-api/docs/streaming (checked 2026-08-22).
-async function streamGemini(model, question, pageContext, history, ctx) {
+async function streamGemini(model, question, pageContext, history, images, ctx) {
   const { geminiApiKey, customPrompt } = await chrome.storage.local.get(["geminiApiKey", "customPrompt"]);
   if (!geminiApiKey) throw new Error("Gemini API Key is not configured: open the Settings page to configure and save it");
 
@@ -242,7 +253,7 @@ async function streamGemini(model, question, pageContext, history, ctx) {
     },
     body: JSON.stringify({
       system_instruction: { parts: [{ text: buildSystemInstruction(pageContext, customPrompt) }] },
-      contents: buildGeminiContents(question, history),
+      contents: buildGeminiContents(question, history, images),
     }),
     signal: ctx.signal,
   });
@@ -271,7 +282,7 @@ async function streamGemini(model, question, pageContext, history, ctx) {
 // "text_delta" carry answer text, everything else is ignored - see
 // https://platform.claude.com/docs/en/build-with-claude/streaming (checked
 // 2026-08-23).
-async function streamClaude(model, question, pageContext, history, ctx) {
+async function streamClaude(model, question, pageContext, history, images, ctx) {
   const { claudeApiKey, customPrompt } = await chrome.storage.local.get(["claudeApiKey", "customPrompt"]);
   if (!claudeApiKey) throw new Error("Claude API Key is not configured: open the Settings page to configure and save it");
 
@@ -287,7 +298,7 @@ async function streamClaude(model, question, pageContext, history, ctx) {
       model: model.apiModel,
       max_tokens: 4096,
       system: buildSystemInstruction(pageContext, customPrompt),
-      messages: buildClaudeMessages(question, history),
+      messages: buildClaudeMessages(question, history, images),
       stream: true,
     }),
     signal: ctx.signal,
@@ -331,7 +342,7 @@ async function streamClaude(model, question, pageContext, history, ctx) {
 // include it), so it needs a real test with a live key; unlike Claude,
 // OpenAI does not document an equivalent explicit opt-in header to add if
 // a direct request does turn out to be blocked.
-async function streamOpenAI(model, question, pageContext, history, ctx) {
+async function streamOpenAI(model, question, pageContext, history, images, ctx) {
   const { openaiApiKey, customPrompt } = await chrome.storage.local.get(["openaiApiKey", "customPrompt"]);
   if (!openaiApiKey) throw new Error("ChatGPT API Key is not configured: open the Settings page to configure and save it");
 
@@ -344,7 +355,7 @@ async function streamOpenAI(model, question, pageContext, history, ctx) {
     body: JSON.stringify({
       model: model.apiModel,
       instructions: buildSystemInstruction(pageContext, customPrompt),
-      input: buildOpenAIInput(question, history),
+      input: buildOpenAIInput(question, history, images),
       store: false,
       stream: true,
     }),
@@ -392,73 +403,50 @@ async function readSse(resp, extractDelta, ctx) {
   }
 }
 
-function buildMessages(question, pageContext, history, customPrompt) {
+function buildMessages(question, pageContext, history, customPrompt, images = []) {
   const basePrompt = "You are an assistant running in the browser side panel. When current web page context is provided, it is authoritative for requests about the current page. Ignore page content from previous tabs, previous pages, or earlier page contexts. Always use the CURRENT PAGE CONTEXT supplied with this request for current-page tasks.";
-  const messages = [
-    { role: "system", content: customPrompt ? `${basePrompt}\n\nUser-defined instructions:\n${customPrompt}` : basePrompt },
-  ];
+  const messages = [{ role: "system", content: customPrompt ? `${basePrompt}\n\nUser-defined instructions:\n${customPrompt}` : basePrompt }];
   for (const h of history || []) messages.push({ role: h.role, content: h.content });
-  // Put the current page context immediately before the current user request.
-  // This makes the current page the freshest and most explicit source of
-  // page information, while history remains available for conversational
-  // continuity. Older page information must never be treated as current.
-  if (pageContext) {
-    messages.push({
-      role: "system",
-      content: `CURRENT PAGE CONTEXT (authoritative; captured at request time):\nTab ID:${pageContext.tabId ?? ""}\nTitle:${pageContext.title || ""}\nURL:${pageContext.url || ""}\nPage text:\n${(pageContext.text || "").slice(0, 20000)}`,
-    });
-  }
-  messages.push({ role: "user", content: question });
+  if (pageContext) messages.push({ role: "system", content: `CURRENT PAGE CONTEXT (authoritative; captured at request time):\nTab ID:${pageContext.tabId ?? ""}\nTitle:${pageContext.title || ""}\nURL:${pageContext.url || ""}\nPage text:\n${(pageContext.text || "").slice(0, 20000)}` });
+  const content = [{ type: "text", text: question }];
+  for (const img of images) content.push({ type: "image_url", image_url: { url: img.dataUrl, detail: "auto" } });
+  messages.push({ role: "user", content: images.length ? content : question });
   return messages;
 }
 
-// Gemini has one system_instruction field rather than a list of system
-// messages, so the base prompt, the user's custom prompt, and the page
-// context are combined into a single instruction block instead. Claude's
-// streamClaude() above reuses this same function for its own top-level
-// `system` string field.
 function buildSystemInstruction(pageContext, customPrompt) {
   const basePrompt = "You are an assistant running in the browser side panel. When current web page context is provided, it is authoritative for requests about the current page. Ignore page content from previous tabs, previous pages, or earlier page contexts. Always use the CURRENT PAGE CONTEXT supplied with this request for current-page tasks.";
   let text = customPrompt ? `${basePrompt}\n\nUser-defined instructions:\n${customPrompt}` : basePrompt;
-  if (pageContext) {
-    text += `\n\nCURRENT PAGE CONTEXT (authoritative; captured at request time):\nTab ID:${pageContext.tabId ?? ""}\nTitle:${pageContext.title || ""}\nURL:${pageContext.url || ""}\nPage text:\n${(pageContext.text || "").slice(0, 20000)}\n\nFor any request about the current web page, use this context and do not use content from a previous page.`;
-  }
+  if (pageContext) text += `\n\nCURRENT PAGE CONTEXT (authoritative; captured at request time):\nTab ID:${pageContext.tabId ?? ""}\nTitle:${pageContext.title || ""}\nURL:${pageContext.url || ""}\nPage text:\n${(pageContext.text || "").slice(0, 20000)}\n\nFor any request about the current web page, use this context and do not use content from a previous page.`;
   return text;
 }
 
-// Gemini turns use role "model" rather than "assistant", and each turn is
-// {role, parts:[{text}]} rather than {role, content}.
-function buildGeminiContents(question, history) {
-  const contents = (history || []).map((h) => ({
-    role: h.role === "assistant" ? "model" : "user",
-    parts: [{ text: h.content }],
-  }));
-  contents.push({ role: "user", parts: [{ text: question }] });
+function buildGeminiContents(question, history, images = []) {
+  const contents = (history || []).map((h) => ({ role: h.role === "assistant" ? "model" : "user", parts: [{ text: h.content }] }));
+  const parts = [{ text: question }];
+  for (const img of images) {
+    const match = img.dataUrl.match(/^data:(image\/(?:jpeg|png|gif|webp));base64,(.+)$/i);
+    if (match) parts.push({ inline_data: { mime_type: match[1], data: match[2] } });
+  }
+  contents.push({ role: "user", parts });
   return contents;
 }
 
-// Claude's messages array takes {role, content} turns like DeepSeek, but
-// only accepts "user"/"assistant" roles - unlike DeepSeek's buildMessages,
-// no "system" role entries are mixed in here, since Claude rejects that
-// role in the messages array (the system prompt goes through the top-level
-// `system` field instead, via buildSystemInstruction above).
-function buildClaudeMessages(question, history) {
-  const messages = (history || [])
-    .filter((h) => h.role === "user" || h.role === "assistant")
-    .map((h) => ({ role: h.role, content: h.content }));
-  messages.push({ role: "user", content: question });
+function buildClaudeMessages(question, history, images = []) {
+  const messages = (history || []).filter((h) => h.role === "user" || h.role === "assistant").map((h) => ({ role: h.role, content: h.content }));
+  const content = [{ type: "text", text: question }];
+  for (const img of images) {
+    const match = img.dataUrl.match(/^data:(image\/(?:jpeg|png|gif|webp));base64,(.+)$/i);
+    if (match) content.push({ type: "image", source: { type: "base64", media_type: match[1], data: match[2] } });
+  }
+  messages.push({ role: "user", content });
   return messages;
 }
 
-// OpenAI's Responses API `input` array takes the same {role, content} turn
-// shape as Claude's `messages` (and, like Claude, only "user"/"assistant"
-// roles are sent here - the system prompt goes through the top-level
-// `instructions` field above instead, even though OpenAI's `input` array
-// would technically also accept a "system"/"developer" role turn).
-function buildOpenAIInput(question, history) {
-  const input = (history || [])
-    .filter((h) => h.role === "user" || h.role === "assistant")
-    .map((h) => ({ role: h.role, content: h.content }));
-  input.push({ role: "user", content: question });
+function buildOpenAIInput(question, history, images = []) {
+  const input = (history || []).filter((h) => h.role === "user" || h.role === "assistant").map((h) => ({ role: h.role, content: h.content }));
+  const content = [{ type: "input_text", text: question }];
+  for (const img of images) content.push({ type: "input_image", image_url: img.dataUrl, detail: "auto" });
+  input.push({ role: "user", content });
   return input;
 }

@@ -27,7 +27,7 @@ sidepanel/sidepanel.css / sidepanel/sidepanel.js
 
 The side panel now has an Upload button below the question box. It accepts images, common text/code files, HTML, and ZIP/WinZip archives. Text and HTML files are read locally and included in the DeepSeek chat request. ZIP files are parsed locally and supported text/HTML entries are extracted and included.
 
-The current DeepSeek API Chat Completions interface is text-only, so image files can be attached and displayed in the extension but their binary image data is not sent to DeepSeek. The extension does not claim image understanding through DeepSeek.
+Image attachments are encoded locally as data URLs and sent with the current request. DeepSeek image requests automatically use deepseek-v4-flash-vision-exp; Gemini, Claude, OpenAI, and OpenRouter receive their provider-specific multimodal image content when the selected model/API supports vision.
 
 
 Version 1.0.9 adds a Settings > Backup History button that exports all locally saved conversations as a standard ZIP file. API keys and custom prompts are not included.
@@ -64,7 +64,7 @@ Implementation notes:
 - The internal message-passing port between the side panel and the background script was renamed from `"deepseek-chat"` to `"ai-chat"`, since it now carries requests for either provider. This is an internal channel name only and has no effect on stored data or on either provider's API.
 - The Gemini API key field's placeholder intentionally does not show a fixed prefix like "AIza...": Google has been transitioning newly issued Google AI Studio keys to a different "AQ." prefix since mid-2026 alongside the older "AIza" format, and both are accepted as-is by the raw `generativelanguage.googleapis.com` endpoint used here.
 - Gemini's "thinking" (extended reasoning before answering) is left at each model's own default, and thought summaries are not requested, so only the final answer streams into the chat — no chain-of-thought text should appear.
-- Image attachments are still not sent as image data to either provider (only a filename placeholder is included in the prompt text); this was previously described in one spot as a DeepSeek-specific limitation, which was inaccurate now that Gemini is an option, and has been reworded.
+- Image attachments are sent as image content with the current request using the selected provider's multimodal request format.
 
 ## Claude support alongside DeepSeek and Gemini (v1.8.0)
 
@@ -87,7 +87,7 @@ Implementation notes:
 - Unlike DeepSeek and Gemini, Anthropic's Messages API requires `max_tokens` on every request; it's set to `4096` here.
 - Claude's SSE stream uses named events (`message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`, plus periodic pings) rather than DeepSeek/Gemini's unnamed `alt=sse` chunks. The shared reader in `background.js` only ever inspects lines starting with `"data:"` and ignores the preceding `"event:"` line, so no changes to the reader itself were needed — `streamClaude` just extracts text from `content_block_delta` events whose `delta.type` is `"text_delta"` and ignores everything else (tool-use deltas, thinking deltas, pings, etc. don't apply here since this extension doesn't request tools or thinking).
 - As with Gemini, no `thinking` field is sent for Claude models. Fable 5/Opus 5/Sonnet 5 use Anthropic's "adaptive thinking," which isn't a simple request-time on/off flag the way DeepSeek's `thinking` field is, so each model's own default is used and only the final answer text streams into the chat.
-- Image attachments are still not sent as image data to any of the three providers (only a filename placeholder is included in the prompt text).
+- Image attachments are sent as image content with the current request when the selected provider/model supports vision.
 
 ## Conversation history now restores the model used (v1.8.0)
 
