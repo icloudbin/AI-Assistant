@@ -668,14 +668,15 @@ function stopActiveRequest() {
 }
 
 async function getCurrentActiveTab() {
-  // The side panel is an extension page. Use the browser window containing
-  // this side panel rather than lastFocusedWindow, which can refer to a
-  // different window when focus briefly moves between the panel and browser.
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  // A side panel is an extension page, so `currentWindow` can refer to the
+  // extension page's window context rather than the browser window that owns
+  // the side panel. `lastFocusedWindow` reliably identifies the browser
+  // window the user is currently working in, including after tab switches.
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   return tabs?.[0] || null;
 }
 
-async function getActivePageContext() {
+async function getActivePageContext(retryCount = 0) {
   const tab = await getCurrentActiveTab();
   if (!tab?.id) return null;
   const initialTabId = tab.id;
@@ -705,7 +706,9 @@ async function getActivePageContext() {
       // active page. This prevents a slow content-script response from a
       // previous tab/navigation being attached to the next request.
       if (currentTab?.id !== initialTabId || String(currentTab.url || "") !== initialUrl) {
-        return getActivePageContext();
+        // The user switched tabs/navigated while extraction was in progress.
+        // Retry against the tab that is active now, but never recurse forever.
+        return retryCount < 2 ? getActivePageContext(retryCount + 1) : null;
       }
       return makeContext(response.data);
     }
@@ -825,6 +828,10 @@ function toStoredMessage(message) {
     displayContent: message.displayContent || message.content,
     modelLabel: message.modelLabel || "",
     modelId: message.modelId || "",
+    // Which page (title/url only - never the page text itself) was used for
+    // this message, if any. Read back on the next submission to tell the
+    // model explicitly when the page has changed - see handleSubmit() below.
+    pageContext: message.pageContext || null,
   };
 }
 
@@ -1482,6 +1489,26 @@ async function handleSubmit(e) {
     // request must never reuse the page context shown or captured earlier.
     pageContext = await getActivePageContext();
     updateContextBar(pageContext);
+  }
+
+  // Tell the model explicitly when the page has changed since its last
+  // answer in this conversation. history[].pageContext (title/url only, set
+  // below and persisted via toStoredMessage) records which page, if any, was
+  // used for each earlier user message; find the most recent one before this
+  // request. A plain "ignore old page content" reminder is easy for a model
+  // to under-weight against a conversation history full of the previous
+  // page's actual content - naming the specific earlier page and contrasting
+  // it with the current one (in pageContextInstruction(), background.js) is
+  // a much harder signal to miss. Only attached when a change is actually
+  // detected (different URL), so a same-page follow-up ("tell me more")
+  // isn't cluttered with an irrelevant note.
+  const previousPageContext = history
+    .slice(0, -1)
+    .reverse()
+    .find((h) => h.role === "user" && h.pageContext)?.pageContext || null;
+  history[history.length - 1].pageContext = pageContext ? { title: pageContext.title, url: pageContext.url } : null;
+  if (pageContext && previousPageContext && previousPageContext.url !== pageContext.url) {
+    pageContext = { ...pageContext, previousPage: previousPageContext };
   }
 
   ensurePort().postMessage({

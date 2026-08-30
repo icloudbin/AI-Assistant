@@ -425,7 +425,14 @@ const BASE_PROMPT = "You are an assistant running in the browser side panel.";
 // file) and should be used normally regardless of this toggle's state.
 function pageContextInstruction(pageContext) {
   if (pageContext) {
-    return `CURRENT PAGE CONTEXT (authoritative; captured at request time):\nTab ID:${pageContext.tabId ?? ""}\nTitle:${pageContext.title || ""}\nURL:${pageContext.url || ""}\nPage text:\n${(pageContext.text || "").slice(0, 20000)}\n\nFor this request, "Read current page" is ON: use this context for any request about the current page, and ignore page content from a previous tab, a previous page, or an earlier turn in this conversation.`;
+    let text = `CURRENT PAGE CONTEXT (authoritative; captured at request time):\nTab ID:${pageContext.tabId ?? ""}\nTitle:${pageContext.title || ""}\nURL:${pageContext.url || ""}\nPage text:\n${(pageContext.text || "").slice(0, 20000)}\n\nFor this request, "Read current page" is ON: use this context for any request about the current page, and ignore page content from a previous tab, a previous page, or an earlier turn in this conversation.`;
+    // sidepanel.js only sets this when it has detected an actual change (the
+    // URL differs from the page used for the last message in this
+    // conversation) - so this note is never added for a same-page follow-up.
+    if (pageContext.previousPage) {
+      text += ` Note: earlier in this conversation you were shown a different page ("${pageContext.previousPage.title || pageContext.previousPage.url}"). The page above is not that page - the user has switched tabs or navigated. Do not reuse, repeat, or extend your earlier answer; answer this request fresh, based only on the current page content above.`;
+    }
+    return text;
   }
   return `For this request, "Read current page" is OFF: treat this question as fully independent of any webpage and answer using your own general knowledge only. Do not use, reference, or assume any page content - including anything about a page discussed earlier in this conversation - and do not ask the user which page they mean. This has nothing to do with any attached image or file, which you should still use normally if one is present with this request.`;
 }
