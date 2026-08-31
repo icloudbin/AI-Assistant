@@ -343,7 +343,12 @@ function markdownToHtml(markdown) {
       }
       if (i < lines.length) i++;
       const langClass = language ? ` class="language-${escapeHtml(language.replace(/[^a-zA-Z0-9_-]/g, ""))}"` : "";
-      out.push(`<pre><code${langClass}>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+      // Wrapped in .code-block (same idea as .table-wrap below, for a table)
+      // so a copy button can be anchored to a container that doesn't itself
+      // scroll horizontally - <pre> does, via overflow-x, so a button
+      // positioned against <pre> directly would scroll out of view with
+      // long lines.
+      out.push(`<div class="code-block"><pre><code${langClass}>${escapeHtml(codeLines.join("\n"))}</code></pre></div>`);
       continue;
     }
 
@@ -520,11 +525,82 @@ chatLog.addEventListener("error", (event) => {
   if (event.target?.tagName === "IMG") fallbackRemoteImage(event.target);
 }, true);
 
+// Copies text to the clipboard, preferring the modern async Clipboard API
+// and falling back to the older execCommand technique (an offscreen,
+// selected textarea) if that API is unavailable or throws - e.g. some
+// permissions-policy configurations. Returns whether it believes the copy
+// succeeded; callers use this to decide whether to show success feedback.
+async function copyTextToClipboard(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_) {
+    // Fall through to the execCommand fallback below.
+  }
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.cssText = "position:fixed; top:-9999px; left:-9999px;";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    const ok = document.execCommand("copy");
+    textarea.remove();
+    return ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Briefly swaps a copy button's label to confirm success, then restores it.
+// The true original label is cached on first use (in a data attribute, so
+// it survives across calls) rather than re-read from a possibly-already-
+// swapped button on a fast repeat click.
+function showCopyFeedback(button, label) {
+  clearTimeout(button._copyResetTimer);
+  if (button.dataset.originalLabel === undefined) {
+    button.dataset.originalLabel = button.textContent;
+  }
+  button.textContent = label;
+  button.classList.add("copied");
+  button._copyResetTimer = setTimeout(() => {
+    button.textContent = button.dataset.originalLabel;
+    button.classList.remove("copied");
+  }, 1500);
+}
+
+// Adds a small copy button to every fenced code block inside container that
+// doesn't already have one. Called after every markdown render (including
+// once per streamed chunk, since setBubbleContent replaces bubble-text's
+// innerHTML wholesale each time - any button added to a previous chunk's
+// DOM is gone once that happens, so this re-adds them each time rather than
+// assuming they persist).
+function enhanceCodeBlocks(container) {
+  for (const block of container.querySelectorAll(".code-block")) {
+    if (block.querySelector(":scope > .code-copy-btn")) continue;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "code-copy-btn";
+    btn.textContent = "📋";
+    btn.title = "Copy code";
+    btn.setAttribute("aria-label", "Copy code");
+    btn.addEventListener("click", async () => {
+      const code = block.querySelector("code");
+      const ok = await copyTextToClipboard(code ? code.textContent : block.textContent);
+      if (ok) showCopyFeedback(btn, "✓");
+    });
+    block.appendChild(btn);
+  }
+}
+
 function setBubbleContent(bubbleEl, text, role) {
   const textEl = getBubbleTextEl(bubbleEl);
   if (!textEl) return;
   if (role === "assistant") {
     textEl.innerHTML = sanitizeRenderedHtml(markdownToHtml(text));
+    enhanceCodeBlocks(textEl);
   } else {
     textEl.textContent = text;
   }
@@ -534,16 +610,46 @@ function addBubble(role, text, modelLabel) {
   emptyState.hidden = true;
   const wrap = document.createElement("div");
   wrap.className = `bubble ${role}`;
-  if (role === "assistant" && modelLabel) {
-    const tag = document.createElement("div");
-    tag.className = "model-tag";
-    tag.textContent = modelLabel;
-    wrap.appendChild(tag);
-  }
+
   const textEl = document.createElement("div");
   textEl.className = "bubble-text";
+
+  // The user's own typed messages don't need a copy button - they're
+  // already sitting in the input the user just typed them into. Only
+  // non-user content (assistant replies, error notices) gets one, in a
+  // header row above the text rather than below it. This lives in
+  // .bubble-header, a sibling of .bubble-text rather than a child of it,
+  // specifically so setBubbleContent reassigning bubble-text's
+  // innerHTML/textContent on every streamed chunk (see above) never
+  // touches or removes it - it's added exactly once, here.
+  if (role !== "user") {
+    const header = document.createElement("div");
+    header.className = "bubble-header";
+    if (role === "assistant" && modelLabel) {
+      const tag = document.createElement("div");
+      tag.className = "model-tag";
+      tag.textContent = modelLabel;
+      header.appendChild(tag);
+    }
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "copy-btn";
+    copyBtn.textContent = "📋 Copy";
+    copyBtn.title = "Copy message";
+    copyBtn.setAttribute("aria-label", "Copy message");
+    copyBtn.addEventListener("click", async () => {
+      // Read live at click time (innerText, not a cached string) so this is
+      // correct whether the message is complete or still streaming in.
+      const ok = await copyTextToClipboard(textEl.innerText);
+      if (ok) showCopyFeedback(copyBtn, "✓ Copied");
+    });
+    header.appendChild(copyBtn);
+    wrap.appendChild(header);
+  }
+
   wrap.appendChild(textEl);
   setBubbleContent(wrap, text, role);
+
   chatLog.appendChild(wrap);
   scrollToBottom();
   return wrap;

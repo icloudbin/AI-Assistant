@@ -216,6 +216,40 @@ body.panel-resizing * { cursor: row-resize !important; user-select: none !import
 .bubble.pending::after { content: "▍"; animation: blink 1s step-start infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
+.bubble-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.bubble-header .model-tag { margin-bottom: 0; }
+.bubble-header .copy-btn { margin-left: auto; }
+.copy-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.copy-btn:hover { color: var(--text); border-color: var(--accent); }
+.copy-btn.copied { color: var(--accent); border-color: var(--accent); }
+
+.code-block { position: relative; }
+.code-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 5px;
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  opacity: 0.85;
+}
+.code-copy-btn:hover { color: var(--text); border-color: var(--accent); opacity: 1; }
+.code-copy-btn.copied { color: var(--accent); border-color: var(--accent); opacity: 1; }
+
 .composer {
   flex: 0 0 var(--composer-height, 132px);
   height: var(--composer-height, 132px);
