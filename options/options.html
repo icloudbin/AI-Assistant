@@ -54,8 +54,8 @@
   .history-management-title { font-size: 13px; font-weight: 700; margin-bottom: 2px; }
   .history-management .actions { margin-top: 2px; }
   .backup-hint { margin-top: 10px; }
-  .language-section { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
-  .language-section label { margin-bottom: 6px; }
+  .language-section select { margin-top: 6px; }
+  .version-number { margin-top: 6px; font-size: 13px; color: var(--muted); }
   .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none; align-items: center; justify-content: center; z-index: 1000; }
   .modal-backdrop.show { display: flex; }
   .confirm-modal { width: 340px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: 0 18px 60px rgba(0,0,0,.45); }
@@ -119,12 +119,15 @@
       <div class="hint backup-hint" data-i18n="historyManagement_hint">Backup exports all locally saved conversations to a ZIP file. Restore imports conversations from a backup ZIP and merges them with existing history. Delete permanently removes all saved conversation history. Your API keys and custom prompt are not included in backups.</div>
     </div>
 
-    <div class="language-section">
-      <label for="languageSelect" data-i18n="language_label">Language</label>
+    <div class="history-management language-section" role="group" aria-labelledby="languageTitle">
+      <div id="languageTitle" class="history-management-title" data-i18n="language_label">Language</div>
       <select id="languageSelect"></select>
     </div>
 
-    <div class="version"><span data-i18n="version_label">Version</span> 1.10.7</div>
+    <div class="history-management version-section" role="group" aria-labelledby="versionTitle">
+      <div id="versionTitle" class="history-management-title" data-i18n="version_label">Version</div>
+      <div id="versionNumber" class="version-number"></div>
+    </div>
   </div>
 
   <div id="deleteConfirm" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">

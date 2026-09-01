@@ -23,6 +23,13 @@ const deleteConfirm = document.getElementById("deleteConfirm");
 const confirmYes = document.getElementById("confirmYes");
 const confirmNo = document.getElementById("confirmNo");
 const languageSelect = document.getElementById("languageSelect");
+const versionNumberEl = document.getElementById("versionNumber");
+
+// Always display the installed extension version from manifest.json.
+// This prevents the Settings page from becoming stale when the build version changes.
+if (versionNumberEl) {
+  versionNumberEl.textContent = chrome.runtime.getManifest().version;
+}
 
 // ---------- Language ----------
 // Follows the same pattern as ---------- Theme ---------- below: read once
