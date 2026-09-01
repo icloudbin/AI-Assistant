@@ -1,6 +1,7 @@
 // sidepanel/sidepanel.js —— Fixed version: no trailing spaces; keeps import "../models.js"; API Key configuration moved to Settings
 import { MODELS, findModelById } from "../models.js";
 import { HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY } from "../storage-keys.js";
+import { getStoredLanguage, applyStaticTranslations, t, LANGUAGE_STORAGE_KEY } from "../i18n.js";
 
 // ---------- Theme ----------
 const THEME_STORAGE_KEY = "themePreference";
@@ -38,6 +39,47 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 });
 
 loadTheme();
+
+// ---------- Language ----------
+// Same "read once, then live-sync via chrome.storage.onChanged" pattern as
+// Theme above. The language dropdown itself lives on the Settings page
+// (options.js), a separate tab/document from this side panel, so this side
+// panel needs its own listener to pick up a change immediately - exactly
+// like it already does for theme. applyLanguage() re-applies every
+// declarative data-i18n[-*] element (via applyStaticTranslations) and then
+// refreshes the handful of pieces generated dynamically in JS rather than
+// sitting statically in sidepanel.html: history dropdown options, any
+// currently-rendered attachment chips, the mic button/badge tooltips, and
+// the copy buttons already attached to messages from earlier in this
+// session.
+let currentLang = "en";
+
+function applyLanguage(lang) {
+  currentLang = lang;
+  applyStaticTranslations(lang);
+  // Set directly, not just via the data-i18n-html sweep above: emptyState
+  // is detached from the document whenever a non-empty conversation is
+  // showing (renderConversation() replaces chatLog's children wholesale and
+  // only re-appends emptyState when the log is empty), so
+  // document.querySelectorAll would miss it at those times.
+  emptyState.innerHTML = t(lang, "emptyState_html");
+  renderHistorySelect();
+  renderAttachments();
+  refreshMicUiLanguage();
+  refreshExistingCopyButtons();
+}
+
+async function loadLanguage() {
+  applyLanguage(await getStoredLanguage());
+}
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === "local" && changes[LANGUAGE_STORAGE_KEY]) {
+    applyLanguage(changes[LANGUAGE_STORAGE_KEY].newValue || "en");
+  }
+});
+
+loadLanguage();
 
 
 const PORT_NAME = "ai-chat";
@@ -484,7 +526,7 @@ function sanitizeRenderedHtml(html) {
         if (isImageUrl && (u.protocol === "http:" || u.protocol === "https:")) {
           const img = document.createElement("img");
           img.setAttribute("src", u.href);
-          img.setAttribute("alt", el.textContent || "image");
+          img.setAttribute("alt", el.textContent || t(currentLang, "imageAltFallback"));
           img.setAttribute("loading", "lazy");
           img.setAttribute("decoding", "async");
           el.replaceWith(img);
@@ -584,8 +626,8 @@ function enhanceCodeBlocks(container) {
     btn.type = "button";
     btn.className = "code-copy-btn";
     btn.textContent = "📋";
-    btn.title = "Copy code";
-    btn.setAttribute("aria-label", "Copy code");
+    btn.title = t(currentLang, "copyCode_title");
+    btn.setAttribute("aria-label", t(currentLang, "copyCode_title"));
     btn.addEventListener("click", async () => {
       const code = block.querySelector("code");
       const ok = await copyTextToClipboard(code ? code.textContent : block.textContent);
@@ -593,6 +635,28 @@ function enhanceCodeBlocks(container) {
     });
     block.appendChild(btn);
   }
+}
+
+// Refreshes the title/aria-label (and, where not mid-"copied" feedback, the
+// visible label) of every copy button already attached to messages/code
+// blocks rendered earlier in this session, so switching languages doesn't
+// leave stale-language tooltips/labels on them. Buttons created after the
+// switch already pick up the current language directly from addBubble/
+// enhanceCodeBlocks above.
+function refreshExistingCopyButtons() {
+  chatLog.querySelectorAll(".copy-btn").forEach((btn) => {
+    const label = t(currentLang, "copyMessage_title");
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+    const defaultText = t(currentLang, "copyMessage_button");
+    if (!btn.classList.contains("copied")) btn.textContent = defaultText;
+    if (btn.dataset.originalLabel) btn.dataset.originalLabel = defaultText;
+  });
+  chatLog.querySelectorAll(".code-copy-btn").forEach((btn) => {
+    const label = t(currentLang, "copyCode_title");
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+  });
 }
 
 function setBubbleContent(bubbleEl, text, role) {
@@ -634,14 +698,14 @@ function addBubble(role, text, modelLabel) {
     const copyBtn = document.createElement("button");
     copyBtn.type = "button";
     copyBtn.className = "copy-btn";
-    copyBtn.textContent = "📋 Copy";
-    copyBtn.title = "Copy message";
-    copyBtn.setAttribute("aria-label", "Copy message");
+    copyBtn.textContent = t(currentLang, "copyMessage_button");
+    copyBtn.title = t(currentLang, "copyMessage_title");
+    copyBtn.setAttribute("aria-label", t(currentLang, "copyMessage_title"));
     copyBtn.addEventListener("click", async () => {
       // Read live at click time (innerText, not a cached string) so this is
       // correct whether the message is complete or still streaming in.
       const ok = await copyTextToClipboard(textEl.innerText);
-      if (ok) showCopyFeedback(copyBtn, "✓ Copied");
+      if (ok) showCopyFeedback(copyBtn, t(currentLang, "copyMessage_copiedFeedback"));
     });
     header.appendChild(copyBtn);
     wrap.appendChild(header);
@@ -774,12 +838,41 @@ function stopActiveRequest() {
 }
 
 async function getCurrentActiveTab() {
-  // A side panel is an extension page, so `currentWindow` can refer to the
-  // extension page's window context rather than the browser window that owns
-  // the side panel. `lastFocusedWindow` reliably identifies the browser
-  // window the user is currently working in, including after tab switches.
-  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  return tabs?.[0] || null;
+  // A side panel can remain alive while the user changes tabs. Do not use the
+  // panel's window or a cached tab. Query all active tabs and select the active
+  // tab belonging to the currently focused NORMAL browser window. This is more
+  // reliable in Brave than lastFocusedWindow alone, which can occasionally
+  // retain the tab that was active when the panel was opened.
+  try {
+    const [windows, activeTabs] = await Promise.all([
+      chrome.windows.getAll({ populate: false }),
+      chrome.tabs.query({ active: true }),
+    ]);
+    const focusedNormal = windows.find(
+      (w) => w.focused && w.type === "normal"
+    );
+    if (focusedNormal) {
+      const tab = activeTabs.find((t) => t.windowId === focusedNormal.id);
+      if (tab?.id) return tab;
+    }
+    // If the focused-window lookup is temporarily unavailable, prefer a tab
+    // from any focused window before falling back to the legacy query.
+    const focusedWindow = windows.find((w) => w.focused);
+    if (focusedWindow) {
+      const tab = activeTabs.find((t) => t.windowId === focusedWindow.id);
+      if (tab?.id) return tab;
+    }
+  } catch (err) {
+    console.debug("[AI Assistant] Unable to resolve active browser tab:", err);
+  }
+
+  try {
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    return tabs?.[0] || null;
+  } catch (err) {
+    console.debug("[AI Assistant] Unable to query active tab:", err);
+    return null;
+  }
 }
 
 async function getActivePageContext(retryCount = 0) {
@@ -835,7 +928,7 @@ async function getActivePageContext(retryCount = 0) {
     const data = results?.[0]?.result;
     const currentTab = await getCurrentActiveTab();
     if (currentTab?.id !== initialTabId || String(currentTab.url || "") !== initialUrl) {
-      return getActivePageContext();
+      return retryCount < 2 ? getActivePageContext(retryCount + 1) : null;
     }
     return makeContext(data);
   } catch (err) {
@@ -889,7 +982,7 @@ function handlePortMessage(msg) {
         currentAssistantBubble.remove();
         currentAssistantBubble = null;
       }
-      addBubble("error", `Error:${msg.error}`);
+      addBubble("error", t(currentLang, "error_withMessage_template", { message: msg.error }));
       setStreaming(false);
       break;
     }
@@ -924,7 +1017,7 @@ function makeTopicTitle(messages) {
   if (!userTexts.length) return "";
   const summarySource = userTexts.join(" ");
   const words = summarySource.split(/\s+/).filter(Boolean);
-  return words.slice(0, 10).join(" ") || "New Topic";
+  return words.slice(0, 10).join(" ") || t(currentLang, "historySelect_newTopic");
 }
 
 function toStoredMessage(message) {
@@ -980,7 +1073,7 @@ function renderHistorySelect() {
   historySelect.innerHTML = "";
   const newOpt = document.createElement("option");
   newOpt.value = NEW_TOPIC_VALUE;
-  newOpt.textContent = "New Topic";
+  newOpt.textContent = t(currentLang, "historySelect_newTopic");
   historySelect.appendChild(newOpt);
 
   const items = [...conversations].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
@@ -988,7 +1081,7 @@ function renderHistorySelect() {
     if (!convo.messages?.length) continue;
     const opt = document.createElement("option");
     opt.value = convo.id;
-    opt.textContent = convo.title || makeTopicTitle(convo.messages) || "Untitled conversation";
+    opt.textContent = convo.title || makeTopicTitle(convo.messages) || t(currentLang, "untitledConversation");
     historySelect.appendChild(opt);
   }
   if (currentConversationId && items.some((c) => c.id === currentConversationId && c.messages?.length)) {
@@ -1152,7 +1245,7 @@ function readU32(view, offset) { return view.getUint32(offset, true); }
 
 async function inflateRaw(bytes) {
   if (typeof DecompressionStream === "undefined") {
-    throw new Error("This browser does not support ZIP decompression");
+    throw new Error(t(currentLang, "sp_zip_error_decompressionUnsupported"));
   }
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
   return new Uint8Array(await new Response(stream).arrayBuffer());
@@ -1166,13 +1259,13 @@ async function extractZipText(file) {
   for (let i = bytes.length - 22; i >= min; i--) {
     if (i >= 0 && readU32(view, i) === 0x06054b50) { eocd = i; break; }
   }
-  if (eocd < 0) throw new Error("Invalid ZIP file");
+  if (eocd < 0) throw new Error(t(currentLang, "sp_zip_error_invalidFile"));
 
   const entryCount = readU16(view, eocd + 10);
   const centralSize = readU32(view, eocd + 12);
   const centralOffset = readU32(view, eocd + 16);
-  if (entryCount > MAX_ZIP_ENTRIES) throw new Error(`ZIP contains too many files (max ${MAX_ZIP_ENTRIES})`);
-  if (centralOffset + centralSize > bytes.length) throw new Error("Invalid ZIP central directory");
+  if (entryCount > MAX_ZIP_ENTRIES) throw new Error(t(currentLang, "sp_zip_error_tooManyFiles_template", { max: MAX_ZIP_ENTRIES }));
+  if (centralOffset + centralSize > bytes.length) throw new Error(t(currentLang, "sp_zip_error_invalidCentralDir"));
 
   let offset = centralOffset;
   let totalChars = 0;
@@ -1233,7 +1326,7 @@ function setAttachmentStatus(item, status, message = "") {
   item.status = status;
   const state = item.el?.querySelector(".attachment-state");
   if (state) {
-    state.textContent = message || (status === "ready" ? "Ready" : status === "reading" ? "Reading…" : "Error");
+    state.textContent = message || (status === "ready" ? t(currentLang, "attachment_ready") : status === "reading" ? t(currentLang, "attachment_reading") : t(currentLang, "attachment_error"));
     state.classList.toggle("error", status === "error");
   }
 }
@@ -1251,11 +1344,11 @@ function renderAttachments() {
     name.textContent = item.name;
     const state = document.createElement("span");
     state.className = "attachment-state";
-    state.textContent = item.status === "ready" ? "Ready" : item.status === "reading" ? "Reading…" : "Error";
+    state.textContent = item.status === "ready" ? t(currentLang, "attachment_ready") : item.status === "reading" ? t(currentLang, "attachment_reading") : t(currentLang, "attachment_error");
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "remove-attachment";
-    remove.title = `Remove ${item.name}`;
+    remove.title = t(currentLang, "attachment_remove_title_template", { name: item.name });
     remove.textContent = "×";
     remove.addEventListener("click", () => {
       attachments = attachments.filter((a) => a.id !== item.id);
@@ -1272,42 +1365,42 @@ async function processFile(file) {
   attachments.push(item);
   renderAttachments();
   try {
-    if (file.size > MAX_FILE_BYTES) throw new Error("File is larger than 12 MB");
+    if (file.size > MAX_FILE_BYTES) throw new Error(t(currentLang, "attachment_error_tooLarge"));
     if (isImageFile(file)) {
       if (!/^image\/(jpeg|png|gif|webp)$/i.test(file.type)) {
-        throw new Error("Unsupported image format. Use JPEG, PNG, GIF, or WebP");
+        throw new Error(t(currentLang, "attachment_error_unsupportedImage"));
       }
       const dataUrl = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result || ""));
-        reader.onerror = () => reject(new Error("Unable to read image"));
+        reader.onerror = () => reject(new Error(t(currentLang, "attachment_error_unableToReadImage")));
         reader.readAsDataURL(file);
       });
-      if (!dataUrl.startsWith("data:image/")) throw new Error("Unable to encode image");
+      if (!dataUrl.startsWith("data:image/")) throw new Error(t(currentLang, "attachment_error_unableToEncodeImage"));
       item.kind = "image";
       item.text = "";
       item.dataUrl = dataUrl;
-      setAttachmentStatus(item, "ready", "Ready");
+      setAttachmentStatus(item, "ready", t(currentLang, "attachment_ready"));
       return;
     }
     if (isTextFile(file)) {
       item.text = await file.text();
-      if (!item.text.trim()) throw new Error("File is empty");
+      if (!item.text.trim()) throw new Error(t(currentLang, "attachment_error_emptyFile"));
       if (item.text.length > MAX_TOTAL_EXTRACTED_CHARS) item.text = item.text.slice(0, MAX_TOTAL_EXTRACTED_CHARS);
       item.kind = "text";
-      setAttachmentStatus(item, "ready", "Ready");
+      setAttachmentStatus(item, "ready", t(currentLang, "attachment_ready"));
       return;
     }
     if (isZipFile(file)) {
       item.text = await extractZipText(file);
-      if (!item.text.trim()) throw new Error("No supported text/HTML files found in ZIP");
+      if (!item.text.trim()) throw new Error(t(currentLang, "attachment_error_noZipText"));
       item.kind = "zip";
-      setAttachmentStatus(item, "ready", "Ready");
+      setAttachmentStatus(item, "ready", t(currentLang, "attachment_ready"));
       return;
     }
-    throw new Error("Unsupported file type");
+    throw new Error(t(currentLang, "attachment_error_unsupportedType"));
   } catch (err) {
-    setAttachmentStatus(item, "error", err?.message || "Unable to read");
+    setAttachmentStatus(item, "error", err?.message || t(currentLang, "attachment_error_unableToRead"));
   }
 }
 
@@ -1327,8 +1420,8 @@ fileInput.addEventListener("change", async () => {
 // handling below, which surfaces this clearly instead of failing silently.
 const MIC_LANG_STORAGE_KEY = "micRecognitionLang";
 const MIC_LANG_OPTIONS = [
-  { code: "en-US", label: "EN", name: "English", joiner: " " },
-  { code: "zh-CN", label: "中", name: "Mandarin Chinese", joiner: "" },
+  { code: "en-US", label: "EN", nameKey: "micLangName_en", joiner: " " },
+  { code: "zh-CN", label: "中", nameKey: "micLangName_zhCN", joiner: "" },
 ];
 const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -1344,6 +1437,14 @@ function currentMicLang() {
   return MIC_LANG_OPTIONS[micLangIndex];
 }
 
+// currentMicLang().name held a fixed English string; the speech-recognition
+// language names are now translated like everything else, so this resolves
+// the display name for the *current* UI language each time it's needed
+// instead of baking one in at MIC_LANG_OPTIONS's module-load time.
+function micLangDisplayName(lang) {
+  return t(currentLang, lang.nameKey);
+}
+
 function setMicStatus(message, isError = false, autoHideMs = 0) {
   clearTimeout(micStatusTimer);
   micStatus.classList.toggle("error", isError);
@@ -1356,9 +1457,24 @@ function setMicStatus(message, isError = false, autoHideMs = 0) {
 
 function updateMicLangUI() {
   const lang = currentMicLang();
+  const name = micLangDisplayName(lang);
   micLangBtn.textContent = lang.label;
-  micLangBtn.title = `Voice input language: ${lang.name}. Click to switch.`;
-  micBtn.title = isListening ? `Stop voice input (${lang.name})` : `Start voice input (${lang.name})`;
+  micLangBtn.title = t(currentLang, "micLang_title_template", { name });
+  micBtn.title = isListening
+    ? t(currentLang, "mic_stop_title_template", { name })
+    : t(currentLang, "mic_start_title_template", { name });
+}
+
+// Called from applyLanguage() on every language switch. Speech-recognition
+// support itself doesn't change at runtime, but the tooltip text
+// reflecting it does, so this picks the right refresh for whichever branch
+// setupMic (below) already committed to.
+function refreshMicUiLanguage() {
+  if (SpeechRecognitionCtor) {
+    updateMicLangUI();
+  } else {
+    micBtn.title = t(currentLang, "mic_unsupported_title");
+  }
 }
 
 async function restoreMicLang() {
@@ -1409,14 +1525,16 @@ function buildRecognition() {
     console.debug("[AI Assistant] Voice input error:", err);
     if (err === "no-speech" || err === "aborted") return; // benign; onend decides what happens next
     userStoppedMic = true;
-    const messages = {
-      "not-allowed": "Microphone access is blocked. Click the mic again to grant permission.",
-      "service-not-allowed": "Microphone access is blocked. Click the mic again to grant permission.",
-      "audio-capture": "No microphone was found. Check that one is connected.",
-      network:
-        "Voice input needs an online recognition service that Brave currently blocks or breaks for most users. This usually works in Chrome; Brave support depends on your version.",
+    const messageKeys = {
+      "not-allowed": "mic_notAllowed",
+      "service-not-allowed": "mic_notAllowed",
+      "audio-capture": "mic_audioCapture",
+      network: "mic_network",
     };
-    setMicStatus(messages[err] || `Voice input error: ${err}`, true, err === "network" ? 0 : 6000);
+    const message = messageKeys[err]
+      ? t(currentLang, messageKeys[err])
+      : t(currentLang, "mic_genericError_template", { err });
+    setMicStatus(message, true, err === "network" ? 0 : 6000);
   };
 
   rec.onend = () => {
@@ -1485,13 +1603,13 @@ async function startMic() {
     if (permState !== "granted") {
       setMicStatus(
         permState === "denied"
-          ? "Microphone is blocked for this extension. Allow it in the tab that just opened, then try again."
-          : "Requesting microphone permission in a new tab…"
+          ? t(currentLang, "mic_blockedForExtension")
+          : t(currentLang, "mic_requestingPermission")
       );
       await openMicPermissionTab();
       const recheck = await ensureMicPermission();
       if (recheck !== "granted") {
-        setMicStatus("Microphone permission was not granted, so voice input can't start.", true, 6000);
+        setMicStatus(t(currentLang, "mic_permissionDenied"), true, 6000);
         return;
       }
     }
@@ -1505,10 +1623,10 @@ async function startMic() {
       micBtn.classList.add("active");
       micBtn.setAttribute("aria-pressed", "true");
       updateMicLangUI();
-      setMicStatus(`Listening… (${currentMicLang().name})`);
+      setMicStatus(t(currentLang, "mic_listening_template", { name: micLangDisplayName(currentMicLang()) }));
     } catch (err) {
       console.error("[AI Assistant] Unable to start voice input:", err);
-      setMicStatus("Unable to start voice input.", true, 6000);
+      setMicStatus(t(currentLang, "mic_unableToStart"), true, 6000);
     }
   } finally {
     micStarting = false;
@@ -1529,7 +1647,7 @@ function stopMic() {
 if (!SpeechRecognitionCtor) {
   micBtn.disabled = true;
   micLangBtn.hidden = true;
-  micBtn.title = "Voice input is not supported in this browser";
+  micBtn.title = t(currentLang, "mic_unsupported_title");
 } else {
   restoreMicLang();
 
@@ -1568,7 +1686,7 @@ async function handleSubmit(e) {
   currentRequestId = requestId;
 
   questionInput.value = "";
-  const displayQuestion = question || "Attached files";
+  const displayQuestion = question || t(currentLang, "attachedFilesFallback");
   const readyAttachments = attachments.filter((a) => a.status === "ready");
   const displayContent = attachmentText
     ? `${displayQuestion}\n\n📎 ${readyAttachments.map((a) => a.name).join(", ")}`
@@ -1630,7 +1748,15 @@ async function handleSubmit(e) {
       // present.
       includePageContext: includeContextToggle.checked === true,
       pageContext: includeContextToggle.checked === true ? pageContext : null,
-      history: getApiHistory().slice(0, -1),
+      // When the user changes pages, do not send the previous page's
+      // conversation turns to the model. The UI history remains intact, but
+      // old assistant answers can themselves contain facts from Page B and
+      // therefore act as stale page context even when the new Page C text is
+      // supplied correctly. A page change starts a fresh model context; normal
+      // follow-up questions on the same page retain conversation history.
+      history: (pageContext && previousPageContext && pageContext.url !== previousPageContext.url)
+        ? []
+        : getApiHistory().slice(0, -1),
       images: readyAttachments.filter((a) => a.kind === "image" && a.dataUrl).map((a) => ({ name: a.name, dataUrl: a.dataUrl })),
       // Send the exact model selected at submit time.
       modelId: selectedModel.id,

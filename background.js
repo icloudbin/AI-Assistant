@@ -1,6 +1,7 @@
 // background.js (root directory)
 import { findModelById } from "./models.js";
 import { CURRENT_CONVERSATION_KEY } from "./storage-keys.js";
+import { getStoredLanguage, t } from "./i18n.js";
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.warn);
 
@@ -110,6 +111,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
     try {
       const { question, pageContext, includePageContext, history, images = [], modelId, provider, apiModel, thinking } = msg.payload;
+      const lang = await getStoredLanguage();
       // Never trust a stale/accidental pageContext value when the user has
       // disabled "Read current page". This is the final privacy boundary
       // before any provider request is constructed - independent of, and
@@ -121,7 +123,7 @@ chrome.runtime.onConnect.addListener((port) => {
       // Resolve the model for THIS request. Never reuse a previous request's
       // provider/model or silently fall back to another provider.
       if (!storedModel || storedModel.id !== modelId) {
-        throw new Error(`Unknown model selection: ${modelId || "(none)"}`);
+        throw new Error(t(lang, "bg_error_unknownModel_template", { model: modelId || "(none)" }));
       }
 
       const model = {
@@ -138,14 +140,14 @@ chrome.runtime.onConnect.addListener((port) => {
         model.provider !== "openai" &&
         model.provider !== "openrouter"
       ) {
-        throw new Error(`Unsupported model provider: ${model.provider}`);
+        throw new Error(t(lang, "bg_error_unsupportedProvider_template", { provider: model.provider }));
       }
 
       port.postMessage({ type: "START", requestId });
 
-      const ctx = { port, requestId, signal: abortController.signal };
+      const ctx = { port, requestId, signal: abortController.signal, lang };
       const normalizedImages = Array.isArray(images) ? images.filter((img) => img && typeof img.dataUrl === "string" && /^data:image\/(jpeg|png|gif|webp);base64,/i.test(img.dataUrl)) : [];
-      if (normalizedImages.length !== (Array.isArray(images) ? images.length : 0)) throw new Error("One or more attached images could not be encoded for the AI request");
+      if (normalizedImages.length !== (Array.isArray(images) ? images.length : 0)) throw new Error(t(lang, "bg_error_imagesEncoding"));
 
       if (model.provider === "gemini") {
         await streamGemini(model, question, requestPageContext, history, normalizedImages, ctx);
@@ -180,7 +182,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
 async function streamDeepSeek(model, question, pageContext, history, images, ctx) {
   const { apiKey, customPrompt } = await chrome.storage.local.get(["apiKey", "customPrompt"]);
-  if (!apiKey) throw new Error("DeepSeek API Key is not configured: open the Settings page to configure and save it");
+  if (!apiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "DeepSeek" }));
 
   const requestModel = images.length ? "deepseek-v4-flash-vision-exp" : model.apiModel;
   const resp = await fetch("https://api.deepseek.com/chat/completions", {
@@ -209,7 +211,7 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
 // and SSE response handling below stay unchanged.
 async function streamOpenRouter(model, question, pageContext, history, images, ctx) {
   const { openrouterApiKey, customPrompt } = await chrome.storage.local.get(["openrouterApiKey", "customPrompt"]);
-  if (!openrouterApiKey) throw new Error("OpenRouter API Key is not configured: open the Settings page to configure and save it");
+  if (!openrouterApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "OpenRouter" }));
 
   const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -240,7 +242,7 @@ async function streamOpenRouter(model, question, pageContext, history, images, c
 // https://ai.google.dev/gemini-api/docs/streaming (checked 2026-08-22).
 async function streamGemini(model, question, pageContext, history, images, ctx) {
   const { geminiApiKey, customPrompt } = await chrome.storage.local.get(["geminiApiKey", "customPrompt"]);
-  if (!geminiApiKey) throw new Error("Gemini API Key is not configured: open the Settings page to configure and save it");
+  if (!geminiApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "Gemini" }));
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model.apiModel}:streamGenerateContent?alt=sse`;
   const resp = await fetch(url, {
@@ -282,7 +284,7 @@ async function streamGemini(model, question, pageContext, history, images, ctx) 
 // 2026-08-23).
 async function streamClaude(model, question, pageContext, history, images, ctx) {
   const { claudeApiKey, customPrompt } = await chrome.storage.local.get(["claudeApiKey", "customPrompt"]);
-  if (!claudeApiKey) throw new Error("Claude API Key is not configured: open the Settings page to configure and save it");
+  if (!claudeApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "Claude" }));
 
   const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -342,7 +344,7 @@ async function streamClaude(model, question, pageContext, history, images, ctx) 
 // a direct request does turn out to be blocked.
 async function streamOpenAI(model, question, pageContext, history, images, ctx) {
   const { openaiApiKey, customPrompt } = await chrome.storage.local.get(["openaiApiKey", "customPrompt"]);
-  if (!openaiApiKey) throw new Error("ChatGPT API Key is not configured: open the Settings page to configure and save it");
+  if (!openaiApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "ChatGPT" }));
 
   const resp = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",

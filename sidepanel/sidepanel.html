@@ -4,29 +4,29 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Assistant</title>
+  <title data-i18n="app_title">AI Assistant</title>
   <link rel="stylesheet" href="sidepanel.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="title">
       <span class="dot"></span>
-      <span class="title-text">AI Assistant</span>
-      <select id="modelSelect" aria-label="Model" title="Select model"></select>
+      <span class="title-text" data-i18n="app_title">AI Assistant</span>
+      <select id="modelSelect" aria-label="Model" title="Select model" data-i18n-aria-label="modelSelect_ariaLabel" data-i18n-title="modelSelect_title"></select>
     </div>
     <div class="controls">
-      <label class="toggle" title="Include the current page content">
+      <label class="toggle" title="Include the current page content" data-i18n-title="readCurrentPage_title">
         <input type="checkbox" id="includeContextToggle" checked />
-        <span>Read current page</span>
+        <span data-i18n="readCurrentPage_label">Read current page</span>
       </label>
-      <button id="clearBtn" class="icon-btn" type="button" title="Clear conversation">Clear</button>
-      <button id="optionsBtn" class="icon-btn" type="button" title="Open settings page">Settings</button>
+      <button id="clearBtn" class="icon-btn" type="button" title="Clear conversation" data-i18n="clear_button" data-i18n-title="clear_title">Clear</button>
+      <button id="optionsBtn" class="icon-btn" type="button" title="Open settings page" data-i18n="settings_button" data-i18n-title="settings_title">Settings</button>
     </div>
   </header>
 
 
   <main class="chat-log" id="chatLog">
-    <div class="empty-state" id="emptyState">
+    <div class="empty-state" id="emptyState" data-i18n-html="emptyState_html">
       👋 I can answer questions using the web page you are currently viewing.<br />
       Enter your question below and press Enter to send.
     </div>
@@ -36,27 +36,27 @@
     <span class="context-title" id="pageContextTitle"></span>
   </div>
 
-  <div class="panel-resize-handle" id="panelResizeHandle" role="separator" aria-orientation="horizontal" aria-label="Resize conversation and question areas" tabindex="0" title="Drag to resize conversation and question areas"></div>
+  <div class="panel-resize-handle" id="panelResizeHandle" role="separator" aria-orientation="horizontal" aria-label="Resize conversation and question areas" tabindex="0" title="Drag to resize conversation and question areas" data-i18n-aria-label="panelResize_ariaLabel" data-i18n-title="panelResize_title"></div>
 
   <form class="composer" id="chatForm">
-    <div class="attachment-list" id="attachmentList" hidden aria-label="Attached files"></div>
+    <div class="attachment-list" id="attachmentList" hidden aria-label="Attached files" data-i18n-aria-label="attachmentList_ariaLabel"></div>
     <div class="composer-row">
       <div class="composer-main">
-        <textarea id="questionInput" rows="2" placeholder="Enter your question… (Enter to send, Shift+Enter for a new line)"></textarea>
+        <textarea id="questionInput" rows="2" placeholder="Enter your question… (Enter to send, Shift+Enter for a new line)" data-i18n-placeholder="questionInput_placeholder"></textarea>
         <div class="composer-tools">
           <input id="fileInput" type="file" hidden multiple accept="image/*,.txt,.md,.csv,.json,.xml,.yaml,.yml,.html,.htm,.css,.js,.ts,.java,.py,.sql,.log,.properties,.zip,.winzip" />
-          <button id="uploadBtn" class="upload-btn" type="button" title="Attach images, text, HTML, or ZIP files">📎 Upload</button>
+          <button id="uploadBtn" class="upload-btn" type="button" title="Attach images, text, HTML, or ZIP files" data-i18n="upload_button" data-i18n-title="upload_title">📎 Upload</button>
           <span class="mic-wrap">
             <button id="micBtn" class="mic-btn" type="button" title="Start voice input" aria-pressed="false">🎤</button>
             <button id="micLangBtn" class="mic-lang-badge" type="button" title="Voice input language: English. Click to switch.">EN</button>
           </span>
-          <select id="historySelect" class="history-select" aria-label="Conversation history" title="Conversation history">
-            <option value="__new__">New Topic</option>
+          <select id="historySelect" class="history-select" aria-label="Conversation history" title="Conversation history" data-i18n-aria-label="historySelect_label" data-i18n-title="historySelect_label">
+            <option value="__new__" data-i18n="historySelect_newTopic">New Topic</option>
           </select>
         </div>
         <div class="mic-status" id="micStatus" hidden aria-live="polite"></div>
       </div>
-      <button id="sendBtn" type="submit">Send</button>
+      <button id="sendBtn" type="submit" data-i18n="send_button">Send</button>
     </div>
   </form>
 

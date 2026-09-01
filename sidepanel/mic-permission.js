@@ -1,4 +1,6 @@
 // sidepanel/mic-permission.js
+import { getStoredLanguage, applyStaticTranslations, t } from "../i18n.js";
+
 // Match the side panel's theme so this tab doesn't look out of place.
 (async function loadTheme() {
   try {
@@ -13,6 +15,15 @@
   }
 })();
 
+// This tab is short-lived (it closes itself once permission is granted), so
+// unlike options.js/sidepanel.js it only needs a one-time snapshot of the
+// language, not a live chrome.storage.onChanged listener.
+let currentLang = "en";
+(async function loadLanguage() {
+  currentLang = await getStoredLanguage();
+  applyStaticTranslations(currentLang);
+})();
+
 const requestBtn = document.getElementById("requestBtn");
 const stateEl = document.getElementById("state");
 
@@ -25,17 +36,17 @@ async function requestMic() {
     // We only needed the prompt to record the permission grant; release the
     // mic immediately so no recording indicator lingers on this tab.
     stream.getTracks().forEach((track) => track.stop());
-    stateEl.textContent = "Microphone allowed — closing this tab…";
+    stateEl.textContent = t(currentLang, "micPermission_success");
     stateEl.className = "state ok";
     setTimeout(() => window.close(), 500);
   } catch (err) {
     requestBtn.disabled = false;
     if (err.name === "NotAllowedError") {
-      stateEl.textContent = "Microphone access was blocked. Click the site info icon in the address bar, allow the microphone, then try again.";
+      stateEl.textContent = t(currentLang, "micPermission_blocked");
     } else if (err.name === "NotFoundError") {
-      stateEl.textContent = "No microphone was found on this device.";
+      stateEl.textContent = t(currentLang, "micPermission_notFound");
     } else {
-      stateEl.textContent = `Could not access the microphone: ${err.message || err.name}`;
+      stateEl.textContent = t(currentLang, "micPermission_genericError_template", { detail: err.message || err.name });
     }
     stateEl.className = "state error";
   }

@@ -1,4 +1,13 @@
 // options.js — Settings page for AI Assistant
+import {
+  getStoredLanguage,
+  applyStaticTranslations,
+  t,
+  tPlural,
+  SUPPORTED_LANGUAGES,
+  LANGUAGE_STORAGE_KEY,
+} from "../i18n.js";
+
 const apiKeyInput = document.getElementById("apiKey");
 const geminiApiKeyInput = document.getElementById("geminiApiKey");
 const claudeApiKeyInput = document.getElementById("claudeApiKey");
@@ -13,6 +22,49 @@ const deleteHistoryBtn = document.getElementById("deleteHistory");
 const deleteConfirm = document.getElementById("deleteConfirm");
 const confirmYes = document.getElementById("confirmYes");
 const confirmNo = document.getElementById("confirmNo");
+const languageSelect = document.getElementById("languageSelect");
+
+// ---------- Language ----------
+// Follows the same pattern as ---------- Theme ---------- below: read once
+// on load, apply immediately, then keep listening so a change made in
+// another AI Assistant tab (e.g. the side panel, if it ever gains its own
+// language control) is reflected here live too.
+let currentLang = "en";
+
+function populateLanguageSelect() {
+  languageSelect.innerHTML = "";
+  for (const { code, nativeName } of SUPPORTED_LANGUAGES) {
+    const opt = document.createElement("option");
+    opt.value = code;
+    opt.textContent = nativeName;
+    languageSelect.appendChild(opt);
+  }
+}
+
+function applyLanguage(lang) {
+  currentLang = lang;
+  languageSelect.value = lang;
+  applyStaticTranslations(lang);
+}
+
+async function loadLanguage() {
+  populateLanguageSelect();
+  applyLanguage(await getStoredLanguage());
+}
+
+languageSelect.addEventListener("change", async () => {
+  const lang = languageSelect.value;
+  await chrome.storage.local.set({ [LANGUAGE_STORAGE_KEY]: lang });
+  applyLanguage(lang);
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === "local" && changes[LANGUAGE_STORAGE_KEY]) {
+    applyLanguage(changes[LANGUAGE_STORAGE_KEY].newValue || "en");
+  }
+});
+
+loadLanguage();
 
 chrome.storage.local.get(
   ["apiKey", "geminiApiKey", "claudeApiKey", "openaiApiKey", "openrouterApiKey", "customPrompt"],
@@ -35,7 +87,7 @@ document.getElementById("save").addEventListener("click", async () => {
   const customPrompt = customPromptInput.value.trim();
   if (!key && !geminiKey && !claudeKey && !openaiKey && !openrouterKey) {
     msgEl.style.color = "#f55b5b";
-    msgEl.textContent = "Enter at least one API key (DeepSeek, Gemini, Claude, ChatGPT, or OpenRouter)";
+    msgEl.textContent = t(currentLang, "save_error_noKey");
     return;
   }
   await chrome.storage.local.set({
@@ -47,12 +99,19 @@ document.getElementById("save").addEventListener("click", async () => {
     customPrompt,
   });
   msgEl.style.color = "#4ade80";
-  msgEl.textContent = "Saved ✓";
+  msgEl.textContent = t(currentLang, "save_success");
   setTimeout(() => (msgEl.textContent = ""), 1500);
 });
 
 const HISTORY_STORAGE_KEY = "conversationHistory";
 
+// NOTE ON SCOPE: conversationToText()/makeBackupEntries() below build the
+// plain-text/README content that goes *inside* an exported backup ZIP - a
+// portable data file, not part of the extension's rendered UI - so their
+// labels ("Conversation N", "Topic:", "USER"/"ASSISTANT", the README
+// wording, etc.) are intentionally left as-is rather than routed through
+// i18n. Everything the user actually sees on this page (status text, error
+// messages) is translated below.
 function sanitizeFilePart(text) {
   return String(text || "Untitled")
     .replace(/[\\/:*?"<>|\x00-\x1F]/g, "_")
@@ -227,18 +286,18 @@ async function extractZipEntries(bytes) {
   for (let i = bytes.length - 22; i >= min; i--) {
     if (readU32le(bytes, i) === EOCD) { eocd = i; break; }
   }
-  if (eocd < 0) throw new Error("Invalid ZIP file: end of central directory not found");
+  if (eocd < 0) throw new Error(t(currentLang, "zip_error_eocdNotFound"));
 
   const entryCount = readU16le(bytes, eocd + 10);
   const centralSize = readU32le(bytes, eocd + 12);
   const centralOffset = readU32le(bytes, eocd + 16);
-  if (entryCount > 200) throw new Error("Backup contains too many ZIP entries");
-  if (centralOffset + centralSize > bytes.length) throw new Error("Invalid ZIP central directory");
+  if (entryCount > 200) throw new Error(t(currentLang, "zip_error_tooManyEntries"));
+  if (centralOffset + centralSize > bytes.length) throw new Error(t(currentLang, "zip_error_invalidCentralDir"));
 
   let offset = centralOffset;
   for (let i = 0; i < entryCount; i++) {
     if (offset + 46 > bytes.length || readU32le(bytes, offset) !== 0x02014b50) {
-      throw new Error("Invalid ZIP central directory entry");
+      throw new Error(t(currentLang, "zip_error_invalidCentralDirEntry"));
     }
 
     const flags = readU16le(bytes, offset + 8);
@@ -254,17 +313,17 @@ async function extractZipEntries(bytes) {
 
     // ZIP64 is intentionally rejected rather than silently misreading sizes.
     if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localOffset === 0xffffffff) {
-      throw new Error("ZIP64 backups are not supported");
+      throw new Error(t(currentLang, "zip_error_zip64Unsupported"));
     }
 
     if (localOffset + 30 > bytes.length || readU32le(bytes, localOffset) !== 0x04034b50) {
-      throw new Error("Invalid ZIP local header");
+      throw new Error(t(currentLang, "zip_error_invalidLocalHeader"));
     }
     const localNameLength = readU16le(bytes, localOffset + 26);
     const localExtraLength = readU16le(bytes, localOffset + 28);
     const dataStart = localOffset + 30 + localNameLength + localExtraLength;
     const dataEnd = dataStart + compressedSize;
-    if (dataStart > bytes.length || dataEnd > bytes.length) throw new Error("ZIP entry exceeds file size");
+    if (dataStart > bytes.length || dataEnd > bytes.length) throw new Error(t(currentLang, "zip_error_entryExceedsFileSize"));
 
     const compressed = bytes.slice(dataStart, dataEnd);
     let data;
@@ -272,20 +331,20 @@ async function extractZipEntries(bytes) {
       data = compressed;
     } else if (method === 8) {
       if (typeof DecompressionStream === "undefined") {
-        throw new Error("This browser does not support ZIP Deflate decompression");
+        throw new Error(t(currentLang, "zip_error_deflateUnsupported"));
       }
       try {
         const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
         data = new Uint8Array(await new Response(stream).arrayBuffer());
       } catch (err) {
-        throw new Error(`Unable to decompress ZIP entry "${name}": ${err?.message || "invalid Deflate data"}`);
+        throw new Error(t(currentLang, "zip_error_decompressFailed_template", { name, detail: err?.message || t(currentLang, "zip_error_invalidDeflateData") }));
       }
     } else {
-      throw new Error(`Unsupported ZIP compression method ${method}`);
+      throw new Error(t(currentLang, "zip_error_unsupportedMethod_template", { method }));
     }
 
     if (data.length !== uncompressedSize) {
-      throw new Error(`Invalid ZIP entry size for "${name}"`);
+      throw new Error(t(currentLang, "zip_error_invalidEntrySize_template", { name }));
     }
     entries.set(name, decoder.decode(data));
     offset = nameStart + nameLength + extraLength + commentLength;
@@ -295,19 +354,19 @@ async function extractZipEntries(bytes) {
 }
 
 async function readBackupFile(file) {
-  if (!file) throw new Error("No backup file selected");
-  if (file.size > 50 * 1024 * 1024) throw new Error("Backup file is too large");
+  if (!file) throw new Error(t(currentLang, "zip_error_noBackupSelected"));
+  if (file.size > 50 * 1024 * 1024) throw new Error(t(currentLang, "zip_error_tooLarge"));
 
   const bytes = new Uint8Array(await file.arrayBuffer());
   const entries = await extractZipEntries(bytes);
   const jsonText = entries.get("conversation-history.json");
-  if (!jsonText) throw new Error("This ZIP is not an AI Assistant history backup");
+  if (!jsonText) throw new Error(t(currentLang, "zip_error_notBackup"));
 
   let backup;
   try {
     backup = JSON.parse(jsonText);
   } catch {
-    throw new Error("The backup's conversation-history.json is invalid");
+    throw new Error(t(currentLang, "zip_error_invalidJson"));
   }
 
   if (
@@ -315,7 +374,7 @@ async function readBackupFile(file) {
     backup.format !== "Brave AI Assistant Conversation History Backup" ||
     !Array.isArray(backup.conversations)
   ) {
-    throw new Error("Unsupported AI Assistant backup format");
+    throw new Error(t(currentLang, "zip_error_unsupportedFormat"));
   }
 
   return backup.conversations;
@@ -353,10 +412,10 @@ function makeRestoredTopicTitle(messages) {
     .filter((m) => m.role === "user")
     .map((m) => cleanForTopic(m.displayContent || m.content))
     .filter(Boolean);
-  if (!userTexts.length) return "Restored Conversation";
+  if (!userTexts.length) return t(currentLang, "restoredConversationTitle");
   const words = userTexts.join(" ").split(/\s+/).filter(Boolean);
   const title = words.slice(0, 10).join(" ");
-  return title || "Restored Conversation";
+  return title || t(currentLang, "restoredConversationTitle");
 }
 
 function makeBackupEntries(conversations) {
@@ -409,7 +468,7 @@ async function restoreHistory() {
   restoreHistoryBtn.disabled = true;
   backupHistoryBtn.disabled = true;
   msgEl.style.color = "#8b91a3";
-  msgEl.textContent = "Restoring history…";
+  msgEl.textContent = t(currentLang, "restore_restoring");
 
   try {
     const restored = await readBackupFile(restoreHistoryFile.files?.[0]);
@@ -419,7 +478,7 @@ async function restoreHistory() {
       .slice(0, 100);
 
     if (!normalized.length) {
-      throw new Error("The backup contains no usable conversations");
+      throw new Error(t(currentLang, "zip_error_noUsableConversations"));
     }
 
     const stored = await chrome.storage.local.get(HISTORY_STORAGE_KEY);
@@ -443,13 +502,13 @@ async function restoreHistory() {
     await chrome.storage.local.set({ [HISTORY_STORAGE_KEY]: merged });
 
     msgEl.style.color = "#4ade80";
-    msgEl.textContent = `History restored (${normalized.length} conversation${normalized.length === 1 ? "" : "s"})`;
+    msgEl.textContent = tPlural(currentLang, normalized.length, "restore_success_one", "restore_success_other");
     restoreHistoryFile.value = "";
     setTimeout(() => (msgEl.textContent = ""), 3000);
   } catch (err) {
     console.error("[AI Assistant] Unable to restore history:", err);
     msgEl.style.color = "#f55b5b";
-    msgEl.textContent = `Restore failed: ${err?.message || "Unknown error"}`;
+    msgEl.textContent = t(currentLang, "restore_failed_template", { message: err?.message || t(currentLang, "unknownError") });
     restoreHistoryFile.value = "";
   } finally {
     backupHistoryBtn.disabled = false;
@@ -460,13 +519,13 @@ async function restoreHistory() {
 async function backupHistory() {
   backupHistoryBtn.disabled = true;
   msgEl.style.color = "#8b91a3";
-  msgEl.textContent = "Preparing backup…";
+  msgEl.textContent = t(currentLang, "backup_preparing");
   try {
     const stored = await chrome.storage.local.get(HISTORY_STORAGE_KEY);
     const conversations = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
     if (!conversations.length) {
       msgEl.style.color = "#f5c451";
-      msgEl.textContent = "No conversation history to back up";
+      msgEl.textContent = t(currentLang, "backup_noHistory");
       return;
     }
 
@@ -484,12 +543,12 @@ async function backupHistory() {
     setTimeout(() => URL.revokeObjectURL(url), 10000);
 
     msgEl.style.color = "#4ade80";
-    msgEl.textContent = `Backup created (${conversations.length} conversation${conversations.length === 1 ? "" : "s"})`;
+    msgEl.textContent = tPlural(currentLang, conversations.length, "backup_success_one", "backup_success_other");
     setTimeout(() => (msgEl.textContent = ""), 2500);
   } catch (err) {
     console.error("[AI Assistant] Unable to back up history:", err);
     msgEl.style.color = "#f55b5b";
-    msgEl.textContent = `Backup failed: ${err?.message || "Unknown error"}`;
+    msgEl.textContent = t(currentLang, "backup_failed_template", { message: err?.message || t(currentLang, "unknownError") });
   } finally {
     backupHistoryBtn.disabled = false;
   }
@@ -517,17 +576,17 @@ async function deleteAllHistory() {
   restoreHistoryBtn.disabled = true;
   closeDeleteConfirmation();
   msgEl.style.color = "#8b91a3";
-  msgEl.textContent = "Deleting history…";
+  msgEl.textContent = t(currentLang, "delete_deleting");
 
   try {
     await chrome.storage.local.remove(HISTORY_STORAGE_KEY);
     msgEl.style.color = "#4ade80";
-    msgEl.textContent = "All history deleted";
+    msgEl.textContent = t(currentLang, "delete_success");
     setTimeout(() => (msgEl.textContent = ""), 2500);
   } catch (err) {
     console.error("[AI Assistant] Unable to delete history:", err);
     msgEl.style.color = "#f55b5b";
-    msgEl.textContent = `Delete failed: ${err?.message || "Unknown error"}`;
+    msgEl.textContent = t(currentLang, "delete_failed_template", { message: err?.message || t(currentLang, "unknownError") });
   } finally {
     deleteHistoryBtn.disabled = false;
     backupHistoryBtn.disabled = false;
