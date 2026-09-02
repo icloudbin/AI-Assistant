@@ -267,6 +267,7 @@ body.panel-resizing * { cursor: row-resize !important; user-select: none !import
   display: flex;
   align-items: center;
   gap: 6px;
+  margin-top: -5px;
   margin-bottom: 7px;
   flex-wrap: wrap;
 }
