@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI Assistant",
-  "version": "1.10.16",
+  "version": "1.10.17",
   "description": "Answer questions using the current web page, attached files, a user-configurable custom prompt, locally saved conversation history in the Brave side panel, local ZIP backup/restore support, automatic page-context refresh on tab changes, sanitized Markdown-to-HTML conversation rendering, bilingual (English/Mandarin) voice input, a choice of AI models, and AI actions for selected webpage text from the browser context menu.",
   "permissions": [
     "contextMenus",
