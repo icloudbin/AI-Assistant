@@ -107,6 +107,11 @@ const micLangBtn = document.getElementById("micLangBtn");
 const micStatus = document.getElementById("micStatus");
 const panelResizeHandle = document.getElementById("panelResizeHandle");
 const composer = document.getElementById("chatForm");
+const quickSummarizeBtn = document.getElementById("quickSummarizeBtn");
+const quickTranslateBtn = document.getElementById("quickTranslateBtn");
+const quickExplainBtn = document.getElementById("quickExplainBtn");
+const quickKeyPointsBtn = document.getElementById("quickKeyPointsBtn");
+const quickActionButtons = [quickSummarizeBtn, quickTranslateBtn, quickExplainBtn, quickKeyPointsBtn].filter(Boolean);
 
 const COMPOSER_HEIGHT_STORAGE_KEY = "composerHeight";
 const MIN_COMPOSER_HEIGHT = 92;
@@ -795,6 +800,7 @@ function setStreaming(streaming) {
   isStreaming = streaming;
   sendBtn.disabled = streaming;
   questionInput.disabled = streaming;
+  quickActionButtons.forEach((button) => { button.disabled = streaming; });
   modelSelect.disabled = streaming;
   uploadBtn.disabled = streaming;
   if (SpeechRecognitionCtor) {
@@ -1830,6 +1836,30 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 chatForm.addEventListener("submit", handleSubmit);
+
+// Quick actions always operate on the page that is active at the moment the
+// button is clicked. They deliberately force page context on, so they still
+// work when the manual "Read current page" toggle is unchecked.
+async function runQuickPageAction(prompt) {
+  if (isStreaming) return;
+  await handleSubmit(null, prompt, true);
+}
+
+quickSummarizeBtn?.addEventListener("click", () => {
+  runQuickPageAction("Summarize the current page in 5 bullet points.");
+});
+
+quickTranslateBtn?.addEventListener("click", () => {
+  runQuickPageAction("Translate the current page into Chinese.");
+});
+
+quickExplainBtn?.addEventListener("click", () => {
+  runQuickPageAction("Explain the current page clearly. Focus on its main ideas, purpose, and important details.");
+});
+
+quickKeyPointsBtn?.addEventListener("click", () => {
+  runQuickPageAction("Extract the most important points from the current page.");
+});
 
 questionInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {

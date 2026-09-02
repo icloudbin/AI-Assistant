@@ -42,6 +42,12 @@
     <div class="attachment-list" id="attachmentList" hidden aria-label="Attached files" data-i18n-aria-label="attachmentList_ariaLabel"></div>
     <div class="composer-row">
       <div class="composer-main">
+        <div class="quick-actions" id="quickActions" aria-label="Quick actions">
+          <button class="quick-action-btn" id="quickSummarizeBtn" type="button">Summarize</button>
+          <button class="quick-action-btn" id="quickTranslateBtn" type="button">Translate</button>
+          <button class="quick-action-btn" id="quickExplainBtn" type="button">Explain</button>
+          <button class="quick-action-btn" id="quickKeyPointsBtn" type="button">Key Points</button>
+        </div>
         <textarea id="questionInput" rows="2" placeholder="Enter your question… (Enter to send, Shift+Enter for a new line)" data-i18n-placeholder="questionInput_placeholder"></textarea>
         <div class="composer-tools">
           <input id="fileInput" type="file" hidden multiple accept="image/*,.txt,.md,.csv,.json,.xml,.yaml,.yml,.html,.htm,.css,.js,.ts,.java,.py,.sql,.log,.properties,.zip,.winzip" />
