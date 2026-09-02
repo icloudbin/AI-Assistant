@@ -53,6 +53,12 @@ const translations = {
     // ---- Common ----
     language_label: `Language`,
 
+    preferredTranslationLanguage_label: `Preferred Translation Language`,
+    contextMenu_ai: `AI`,
+    contextMenu_summarize: `Summarize`,
+    contextMenu_translate: `Translate`,
+    contextMenu_explain: `Explain`,
+    contextMenu_factCheck: `Fact Check`,
     // ---- Options / Settings page ----
     options_title: `AI Assistant Settings`,
     theme_label: `Theme`,
@@ -194,6 +200,12 @@ const translations = {
   "zh-CN": {
     language_label: `语言`,
 
+    preferredTranslationLanguage_label: `首选翻译语言`,
+    contextMenu_ai: `AI`,
+    contextMenu_summarize: `总结`,
+    contextMenu_translate: `翻译`,
+    contextMenu_explain: `解释`,
+    contextMenu_factCheck: `事实核查`,
     options_title: `AI 助手设置`,
     theme_label: `主题`,
     theme_light: `浅色`,
@@ -331,6 +343,12 @@ const translations = {
   "zh-TW": {
     language_label: `語言`,
 
+    preferredTranslationLanguage_label: `首選翻譯語言`,
+    contextMenu_ai: `AI`,
+    contextMenu_summarize: `摘要`,
+    contextMenu_translate: `翻譯`,
+    contextMenu_explain: `解釋`,
+    contextMenu_factCheck: `事實查核`,
     options_title: `AI 助理設定`,
     theme_label: `主題`,
     theme_light: `淺色`,
@@ -468,6 +486,12 @@ const translations = {
   fr: {
     language_label: `Langue`,
 
+    preferredTranslationLanguage_label: `Langue de traduction préférée`,
+    contextMenu_ai: `IA`,
+    contextMenu_summarize: `Résumer`,
+    contextMenu_translate: `Traduire`,
+    contextMenu_explain: `Expliquer`,
+    contextMenu_factCheck: `Vérification des faits`,
     options_title: `Paramètres de l'assistant IA`,
     theme_label: `Thème`,
     theme_light: `Clair`,
@@ -605,6 +629,12 @@ const translations = {
   ja: {
     language_label: `言語`,
 
+    preferredTranslationLanguage_label: `優先翻訳言語`,
+    contextMenu_ai: `AI`,
+    contextMenu_summarize: `要約`,
+    contextMenu_translate: `翻訳`,
+    contextMenu_explain: `説明`,
+    contextMenu_factCheck: `ファクトチェック`,
     options_title: `AIアシスタント設定`,
     theme_label: `テーマ`,
     theme_light: `ライト`,
@@ -742,6 +772,12 @@ const translations = {
   es: {
     language_label: `Idioma`,
 
+    preferredTranslationLanguage_label: `Idioma de traducción preferido`,
+    contextMenu_ai: `IA`,
+    contextMenu_summarize: `Resumir`,
+    contextMenu_translate: `Traducir`,
+    contextMenu_explain: `Explicar`,
+    contextMenu_factCheck: `Verificación de hechos`,
     options_title: `Configuración del asistente de IA`,
     theme_label: `Tema`,
     theme_light: `Claro`,

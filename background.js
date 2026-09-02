@@ -1,9 +1,76 @@
 // background.js (root directory)
 import { findModelById } from "./models.js";
-import { CURRENT_CONVERSATION_KEY } from "./storage-keys.js";
+import { CURRENT_CONVERSATION_KEY, PENDING_CONTEXT_ACTION_KEY, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "./storage-keys.js";
 import { getStoredLanguage, t } from "./i18n.js";
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.warn);
+
+// ---------- Webpage selection context menu ----------
+const CONTEXT_MENU_PARENT_ID = "ai-assistant-context";
+const CONTEXT_MENU_ACTIONS = ["summarize", "translate", "explain", "fact-check"];
+
+async function rebuildContextMenus() {
+  const lang = await getStoredLanguage();
+  await new Promise((resolve) => chrome.contextMenus.removeAll(() => resolve()));
+  chrome.contextMenus.create({
+    id: CONTEXT_MENU_PARENT_ID,
+    title: t(lang, "contextMenu_ai"),
+    contexts: ["selection"],
+  });
+  const titles = {
+    summarize: t(lang, "contextMenu_summarize"),
+    translate: t(lang, "contextMenu_translate"),
+    explain: t(lang, "contextMenu_explain"),
+    "fact-check": t(lang, "contextMenu_factCheck"),
+  };
+  for (const action of CONTEXT_MENU_ACTIONS) {
+    chrome.contextMenus.create({
+      id: `ai-action-${action}`,
+      parentId: CONTEXT_MENU_PARENT_ID,
+      title: titles[action],
+      contexts: ["selection"],
+    });
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => rebuildContextMenus().catch(console.warn));
+chrome.runtime.onStartup.addListener(() => rebuildContextMenus().catch(console.warn));
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === "local" && changes.languagePreference) {
+    rebuildContextMenus().catch(console.warn);
+  }
+});
+
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (!info.menuItemId?.startsWith("ai-action-") || !info.selectionText?.trim() || !tab?.id) return;
+  const action = info.menuItemId.slice("ai-action-".length);
+  if (!CONTEXT_MENU_ACTIONS.includes(action)) return;
+
+  const pending = {
+    action,
+    text: info.selectionText.trim(),
+    tabId: tab.id,
+    windowId: tab.windowId,
+    url: String(tab.url || ""),
+    createdAt: Date.now(),
+  };
+  await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: pending });
+
+  // The context-menu click is a user gesture, so open the side panel for the
+  // same tab. Storage is used as the durable hand-off because the side panel
+  // may still be loading when the menu click occurs.
+  try {
+    await chrome.sidePanel.open({ tabId: tab.id });
+  } catch (err) {
+    console.debug("[AI Assistant] Unable to open side panel from context menu:", err);
+  }
+  // If a side panel is already open, deliver the action immediately as well.
+  // The storage record remains as a fallback for a panel that is still loading.
+  setTimeout(() => {
+    chrome.runtime.sendMessage({ type: "CONTEXT_ACTION", pending }).catch(() => {});
+  }, 100);
+});
+
 
 // Remote images embedded in model Markdown can be rejected when loaded directly
 // from an extension page (for example, because the image host applies hotlink

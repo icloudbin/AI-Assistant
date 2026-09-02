@@ -55,6 +55,7 @@
   .history-management .actions { margin-top: 2px; }
   .backup-hint { margin-top: 10px; }
   .language-section select { margin-top: 6px; }
+  .language-section label { margin-top: 14px; }
   .version-number { margin-top: 6px; font-size: 13px; color: var(--muted); }
   .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none; align-items: center; justify-content: center; z-index: 1000; }
   .modal-backdrop.show { display: flex; }
@@ -122,6 +123,8 @@
     <div class="history-management language-section" role="group" aria-labelledby="languageTitle">
       <div id="languageTitle" class="history-management-title" data-i18n="language_label">Language</div>
       <select id="languageSelect"></select>
+      <label for="preferredTranslationLanguage" data-i18n="preferredTranslationLanguage_label">Preferred Translation Language</label>
+      <select id="preferredTranslationLanguage"></select>
     </div>
 
     <div class="history-management version-section" role="group" aria-labelledby="versionTitle">

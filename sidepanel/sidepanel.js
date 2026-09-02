@@ -1,6 +1,6 @@
 // sidepanel/sidepanel.js —— Fixed version: no trailing spaces; keeps import "../models.js"; API Key configuration moved to Settings
 import { MODELS, findModelById } from "../models.js";
-import { HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY } from "../storage-keys.js";
+import { HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY, PENDING_CONTEXT_ACTION_KEY, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
 import { getStoredLanguage, applyStaticTranslations, t, LANGUAGE_STORAGE_KEY } from "../i18n.js";
 
 // ---------- Theme ----------
@@ -1673,9 +1673,9 @@ if (!SpeechRecognitionCtor) {
   });
 }
 
-async function handleSubmit(e) {
-  e.preventDefault();
-  const question = questionInput.value.trim();
+async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null) {
+  e?.preventDefault?.();
+  const question = forcedQuestion !== null ? String(forcedQuestion).trim() : questionInput.value.trim();
   const attachmentText = attachmentContextText();
   if ((!question && !attachmentText) || isStreaming) return;
 
@@ -1708,7 +1708,10 @@ async function handleSubmit(e) {
   setStreaming(true);
 
   let pageContext = null;
-  if (includeContextToggle.checked) {
+  const shouldIncludePageContext = forcedIncludePageContext === null
+    ? includeContextToggle.checked === true
+    : forcedIncludePageContext === true;
+  if (shouldIncludePageContext) {
     // Capture the page at the moment the user submits the request. The API
     // request must never reuse the page context shown or captured earlier.
     pageContext = await getActivePageContext();
@@ -1746,8 +1749,8 @@ async function handleSubmit(e) {
       // non-null here by mistake. This is independent of attached images
       // (below), which are unrelated to this toggle and always sent when
       // present.
-      includePageContext: includeContextToggle.checked === true,
-      pageContext: includeContextToggle.checked === true ? pageContext : null,
+      includePageContext: shouldIncludePageContext,
+      pageContext: shouldIncludePageContext ? pageContext : null,
       // When the user changes pages, do not send the previous page's
       // conversation turns to the model. The UI history remains intact, but
       // old assistant answers can themselves contain facts from Page B and
@@ -1766,6 +1769,65 @@ async function handleSubmit(e) {
     },
   });
 }
+
+
+
+async function processContextAction(pending) {
+  if (!pending?.action || !pending?.text) return;
+  if (isStreaming) stopActiveRequest();
+
+  let instruction;
+  switch (pending.action) {
+    case "summarize":
+      instruction = "Summarize the following highlighted text. Be concise and preserve the key facts and meaning.";
+      break;
+    case "translate": {
+      const stored = await chrome.storage.local.get(PREFERRED_TRANSLATION_LANGUAGE_KEY);
+      const code = stored[PREFERRED_TRANSLATION_LANGUAGE_KEY] || "en";
+      const names = { "en": "English", "zh-CN": "Simplified Chinese", "zh-TW": "Traditional Chinese", "fr": "French", "ja": "Japanese", "es": "Spanish" };
+      instruction = `Translate the following highlighted text into ${names[code] || "English"}. Return only the translation, without commentary.`;
+      break;
+    }
+    case "explain":
+      instruction = "Explain the following highlighted text clearly. If it is source code, explain what the code does, its important logic, and any notable behavior.";
+      break;
+    case "fact-check":
+      instruction = "Fact-check the following highlighted text. Identify claims that can be verified, state whether each is accurate, inaccurate, or uncertain, and briefly explain the evidence or uncertainty. Do not invent sources or facts.";
+      break;
+    default:
+      return;
+  }
+
+  // A context-menu operation is scoped to the highlighted text. Do not add
+  // the whole webpage as hidden context, even if "Read current page" is on.
+  const prompt = `${instruction}\n\nHighlighted text:\n${pending.text}`;
+  await handleSubmit(null, prompt, false);
+  await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: null });
+}
+
+async function consumePendingContextAction(pending = null) {
+  let action = pending;
+  if (!action) {
+    const stored = await chrome.storage.local.get(PENDING_CONTEXT_ACTION_KEY);
+    action = stored[PENDING_CONTEXT_ACTION_KEY];
+  }
+  if (!action) return;
+  // Ignore a stale menu action after 2 minutes, or one that was created for a
+  // different active tab. This prevents an old selection from being reused.
+  if (!action.createdAt || Date.now() - action.createdAt > 120000) {
+    await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: null });
+    return;
+  }
+  const activeTab = await getCurrentActiveTab();
+  if (action.tabId && activeTab?.id && action.tabId !== activeTab.id) return;
+  await processContextAction(action);
+}
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === "CONTEXT_ACTION") {
+    consumePendingContextAction(message.pending).catch((err) => console.debug("[AI Assistant] Context action failed:", err));
+  }
+});
 
 chatForm.addEventListener("submit", handleSubmit);
 
@@ -1869,6 +1931,7 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
   renderHistorySelect();
   scheduleHistoryRender();
   connectPort();
+  await consumePendingContextAction();
   if (includeContextToggle.checked) {
     await refreshActivePageContext();
   }

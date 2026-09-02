@@ -7,6 +7,7 @@ import {
   SUPPORTED_LANGUAGES,
   LANGUAGE_STORAGE_KEY,
 } from "../i18n.js";
+import { PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
 
 const apiKeyInput = document.getElementById("apiKey");
 const geminiApiKeyInput = document.getElementById("geminiApiKey");
@@ -23,6 +24,7 @@ const deleteConfirm = document.getElementById("deleteConfirm");
 const confirmYes = document.getElementById("confirmYes");
 const confirmNo = document.getElementById("confirmNo");
 const languageSelect = document.getElementById("languageSelect");
+const preferredTranslationLanguageSelect = document.getElementById("preferredTranslationLanguage");
 const versionNumberEl = document.getElementById("versionNumber");
 
 // Always display the installed extension version from manifest.json.
@@ -48,6 +50,26 @@ function populateLanguageSelect() {
   }
 }
 
+function populatePreferredTranslationLanguageSelect() {
+  preferredTranslationLanguageSelect.innerHTML = "";
+  for (const { code, nativeName } of SUPPORTED_LANGUAGES) {
+    const opt = document.createElement("option");
+    opt.value = code;
+    opt.textContent = nativeName;
+    preferredTranslationLanguageSelect.appendChild(opt);
+  }
+}
+
+async function loadPreferredTranslationLanguage() {
+  const stored = await chrome.storage.local.get(PREFERRED_TRANSLATION_LANGUAGE_KEY);
+  preferredTranslationLanguageSelect.value = SUPPORTED_LANGUAGES.some((l) => l.code === stored[PREFERRED_TRANSLATION_LANGUAGE_KEY])
+    ? stored[PREFERRED_TRANSLATION_LANGUAGE_KEY] : "en";
+}
+
+preferredTranslationLanguageSelect.addEventListener("change", async () => {
+  await chrome.storage.local.set({ [PREFERRED_TRANSLATION_LANGUAGE_KEY]: preferredTranslationLanguageSelect.value });
+});
+
 function applyLanguage(lang) {
   currentLang = lang;
   languageSelect.value = lang;
@@ -56,7 +78,9 @@ function applyLanguage(lang) {
 
 async function loadLanguage() {
   populateLanguageSelect();
+  populatePreferredTranslationLanguageSelect();
   applyLanguage(await getStoredLanguage());
+  await loadPreferredTranslationLanguage();
 }
 
 languageSelect.addEventListener("change", async () => {
@@ -68,6 +92,9 @@ languageSelect.addEventListener("change", async () => {
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName === "local" && changes[LANGUAGE_STORAGE_KEY]) {
     applyLanguage(changes[LANGUAGE_STORAGE_KEY].newValue || "en");
+  }
+  if (areaName === "local" && changes[PREFERRED_TRANSLATION_LANGUAGE_KEY]) {
+    preferredTranslationLanguageSelect.value = changes[PREFERRED_TRANSLATION_LANGUAGE_KEY].newValue || "en";
   }
 });
 
