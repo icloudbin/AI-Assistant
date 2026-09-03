@@ -1782,23 +1782,31 @@ async function processContextAction(pending) {
   if (!pending?.action || !pending?.text) return;
   if (isStreaming) stopActiveRequest();
 
+  const lang = currentLang || await getStoredLanguage();
   let instruction;
   switch (pending.action) {
     case "summarize":
-      instruction = "Summarize the following highlighted text. Be concise and preserve the key facts and meaning.";
+      instruction = t(lang, "contextAction_summarize_prefix");
       break;
     case "translate": {
       const stored = await chrome.storage.local.get(PREFERRED_TRANSLATION_LANGUAGE_KEY);
       const code = stored[PREFERRED_TRANSLATION_LANGUAGE_KEY] || "en";
-      const names = { "en": "English", "zh-CN": "Simplified Chinese", "zh-TW": "Traditional Chinese", "fr": "French", "ja": "Japanese", "es": "Spanish" };
-      instruction = `Translate the following highlighted text into ${names[code] || "English"}. Return only the translation, without commentary.`;
+      const languageKey = {
+        "en": "contextAction_language_en",
+        "zh-CN": "contextAction_language_zhCN",
+        "zh-TW": "contextAction_language_zhTW",
+        "fr": "contextAction_language_fr",
+        "ja": "contextAction_language_ja",
+        "es": "contextAction_language_es",
+      }[code] || "contextAction_language_en";
+      instruction = t(lang, "contextAction_translate_prefix", { language: t(lang, languageKey) });
       break;
     }
     case "explain":
-      instruction = "Explain the following highlighted text clearly. If it is source code, explain what the code does, its important logic, and any notable behavior.";
+      instruction = t(lang, "contextAction_explain_prefix");
       break;
     case "fact-check":
-      instruction = "Fact-check the following highlighted text. Identify claims that can be verified, state whether each is accurate, inaccurate, or uncertain, and briefly explain the evidence or uncertainty. Do not invent sources or facts.";
+      instruction = t(lang, "contextAction_factCheck_prefix");
       break;
     default:
       return;
@@ -1806,7 +1814,8 @@ async function processContextAction(pending) {
 
   // A context-menu operation is scoped to the highlighted text. Do not add
   // the whole webpage as hidden context, even if "Read current page" is on.
-  const prompt = `${instruction}\n\nHighlighted text:\n${pending.text}`;
+  // The visible instruction prefix follows the language selected in Settings.
+  const prompt = `${instruction}\n\n${t(lang, "contextAction_highlightedText_label")}:\n${pending.text}`;
   await handleSubmit(null, prompt, false);
   await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: null });
 }
