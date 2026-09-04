@@ -234,6 +234,190 @@ function readerModeScore(root) {
 // its cleaned text, or null if nothing scores well enough to be confident -
 // the caller then falls through to the plain innerText fallback exactly as
 // it did before this function existed.
+
+
+// Reddit uses custom <shreddit-post> and <shreddit-comment> elements.
+// The main post has its article body inside the post element itself;
+// comments are separate custom elements. Handle this before generic
+// reader-mode heuristics so a comment is never mistaken for the article.
+function extractRedditArticle() {
+  const host = String(location.hostname || '').toLowerCase();
+  if (!/(^|\.)reddit\.com$/.test(host) && !/(^|\.)old\.reddit\.com$/.test(host)) {
+    return null;
+  }
+
+  const post = document.querySelector('shreddit-post[id^="t3_"], shreddit-post[post-type], shreddit-post');
+  if (!post) return null;
+
+  const title =
+    String(post.getAttribute('post-title') || '').trim() ||
+    (post.querySelector('h1[slot="title"], h1[id^="post-title-"], h1')?.innerText || '').replace(/\s+/g, ' ').trim() ||
+    document.title;
+
+  // IMPORTANT: scope body lookup to the main shreddit-post element.
+  // Do not use document.querySelector('.md') because Reddit comments also
+  // use .md and would otherwise be selected instead of the main post.
+  const bodySelectors = [
+    'shreddit-post-text-body .md[property="schema:articleBody"]',
+    'shreddit-post-text-body [property="schema:articleBody"]',
+    'shreddit-post-text-body .md',
+    '[slot="text-body"] .md[property="schema:articleBody"]',
+    '[slot="text-body"] [property="schema:articleBody"]',
+    'div.md[property="schema:articleBody"]',
+  ];
+
+  let bodyEl = null;
+  for (const selector of bodySelectors) {
+    const el = post.querySelector(selector);
+    const text = (el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text) {
+      bodyEl = el;
+      break;
+    }
+  }
+
+  // Some Reddit layouts expose the body through a direct text-body slot.
+  if (!bodyEl) {
+    const slotBody = post.querySelector('[slot="text-body"]');
+    const text = (slotBody?.innerText || slotBody?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text) bodyEl = slotBody;
+  }
+
+  if (!bodyEl) return null;
+
+  const articleText = (bodyEl.innerText || bodyEl.textContent || '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!articleText) return null;
+
+  const parts = [];
+  if (title) parts.push(`MAIN ARTICLE TITLE:\n${title}`);
+  parts.push(`MAIN ARTICLE:\n${articleText}`);
+
+  // Add comments only after the main article. Scope the lookup to comments
+  // and never let comment content participate in main-post selection.
+  const comments = [];
+  const seen = new Set();
+  for (const comment of Array.from(document.querySelectorAll('shreddit-comment'))) {
+    if (seen.has(comment)) continue;
+    seen.add(comment);
+
+    // Skip comments that are clearly promoted/advertising containers.
+    const wrapper = comment.closest('shreddit-comments-page-ad, [data-testid*="ad"], [id*="ad"]');
+    if (wrapper) continue;
+
+    const commentBody = comment.querySelector(
+      '.md[property="schema:commentBody"], [property="schema:commentBody"], .md'
+    );
+    const text = (commentBody?.innerText || commentBody?.textContent || '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    if (text) comments.push(text);
+  }
+
+  if (comments.length) {
+    parts.push(`COMMENTS:\n${comments.join('\n\n---\n\n')}`);
+  }
+
+  return {
+    source: 'reddit',
+    title: title || document.title,
+    url: location.href,
+    text: parts.join('\n\n').slice(0, PAGE_CONTEXT_CHAR_LIMIT),
+  };
+}
+
+// Synology Community forum pages use a dedicated #original-post container for
+// the thread's main article, while replies/comments live in separate
+// .reply-panel / comment containers. Prefer this structure explicitly so a
+// forum thread is never mistaken for a generic article containing replies.
+function extractSynologyCommunity() {
+  const host = String(location.hostname || '').toLowerCase();
+  if (!/(^|\.)community\.synology\.com$/.test(host)) return null;
+
+  // Synology Community has a stable thread structure:
+  //   #original-post                  -> the topic / main article
+  //   #replies-container .reply-panel -> replies
+  // The main post and replies can both contain .editor-tinymce-container,
+  // therefore the selector must always start from #original-post.
+  const original = document.querySelector('#original-post');
+  if (!original) return null;
+
+  const title = (
+    original.querySelector('h1.post-title, h2.post-title, .post-title')?.innerText ||
+    document.title ||
+    ''
+  ).replace(/\s+/g, ' ').trim();
+
+  const bodyCandidates = [
+    '#original-post .editor-tinymce-container',
+    '#original-post [class*="editor-tinymce-container"]',
+    '#original-post .post-content',
+    '#original-post .article-content',
+    '#original-post [class*="post-content"]',
+  ];
+
+  let articleBody = null;
+  for (const selector of bodyCandidates) {
+    const el = original.querySelector(selector);
+    const value = (el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (value) {
+      articleBody = el;
+      break;
+    }
+  }
+  if (!articleBody) return null;
+
+  const articleText = (articleBody.innerText || articleBody.textContent || '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!articleText) return null;
+
+  const parts = [];
+  if (title) parts.push(`MAIN ARTICLE TITLE:\n${title}`);
+  parts.push(`MAIN ARTICLE:\n${articleText}`);
+
+  // Replies/comments are deliberately collected only AFTER the main article.
+  // Never search the whole document for .editor-tinymce-container here.
+  const repliesRoot = document.querySelector('#replies-container');
+  if (repliesRoot) {
+    const replies = [];
+    const replyPanels = repliesRoot.querySelectorAll(':scope > .reply-panel, .reply-panel');
+
+    for (const panel of replyPanels) {
+      const clone = panel.cloneNode(true);
+      for (const noise of Array.from(clone.querySelectorAll(
+        'header, nav, footer, aside, script, style, noscript, iframe, form, button, svg, ' +
+        '.post-action-buttons, .btn-group, .com_btn_like, .reply-bottom-block, ' +
+        '.quick-r-btn, .post-avatar, .post-avatar-name, .post-avatar-date'
+      ))) {
+        noise.remove();
+      }
+
+      // Prefer the actual reply post body; then include nested comment bodies.
+      const replyBody = clone.querySelector('.replay-main-post .editor-tinymce-container, .replay-main-post [class*="editor-tinymce-container"]');
+      const replyText = (replyBody?.innerText || replyBody?.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+      const commentTexts = Array.from(clone.querySelectorAll('.comment-content'))
+        .map((el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+
+      const combined = [replyText, ...commentTexts].filter(Boolean).join('\n\n');
+      if (combined) replies.push(combined);
+    }
+
+    if (replies.length) {
+      parts.push(`REPLIES AND COMMENTS:\n${replies.join('\n\n---\n\n')}`);
+    }
+  }
+
+  return {
+    source: 'synology-community',
+    title: title || document.title,
+    url: location.href,
+    text: parts.join('\n\n').slice(0, PAGE_CONTEXT_CHAR_LIMIT),
+  };
+}
+
 function extractReaderModeArticle() {
   const candidateSelector =
     'article, main, [role="main"], [class*="article"], [class*="post"], ' +
@@ -297,6 +481,12 @@ function extractPageContent() {
 
   const protonMail = extractProtonMail();
   if (protonMail) return protonMail;
+
+  const reddit = extractRedditArticle();
+  if (reddit) return reddit;
+
+  const synologyCommunity = extractSynologyCommunity();
+  if (synologyCommunity) return synologyCommunity;
 
   const readerMode = extractReaderModeArticle();
   if (readerMode) return readerMode;

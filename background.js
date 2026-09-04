@@ -9,28 +9,57 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(consol
 const CONTEXT_MENU_PARENT_ID = "ai-assistant-context";
 const CONTEXT_MENU_ACTIONS = ["summarize", "translate", "explain", "fact-check"];
 
-async function rebuildContextMenus() {
-  const lang = await getStoredLanguage();
-  await new Promise((resolve) => chrome.contextMenus.removeAll(() => resolve()));
-  chrome.contextMenus.create({
-    id: CONTEXT_MENU_PARENT_ID,
-    title: t(lang, "contextMenu_ai"),
-    contexts: ["selection"],
-  });
-  const titles = {
-    summarize: t(lang, "contextMenu_summarize"),
-    translate: t(lang, "contextMenu_translate"),
-    explain: t(lang, "contextMenu_explain"),
-    "fact-check": t(lang, "contextMenu_factCheck"),
-  };
-  for (const action of CONTEXT_MENU_ACTIONS) {
-    chrome.contextMenus.create({
-      id: `ai-action-${action}`,
-      parentId: CONTEXT_MENU_PARENT_ID,
-      title: titles[action],
-      contexts: ["selection"],
+// Context-menu rebuilds can be triggered by installation, startup, and language
+// changes close together. Serialize them so two rebuilds never create the same
+// menu IDs at the same time.
+let contextMenuRebuild = Promise.resolve();
+
+function rebuildContextMenus() {
+  contextMenuRebuild = contextMenuRebuild
+    .catch(() => {})
+    .then(async () => {
+      const lang = await getStoredLanguage();
+
+      await new Promise((resolve) => {
+        chrome.contextMenus.removeAll(() => resolve());
+      });
+
+      await new Promise((resolve, reject) => {
+        chrome.contextMenus.create({
+          id: CONTEXT_MENU_PARENT_ID,
+          title: t(lang, "contextMenu_ai"),
+          contexts: ["selection"],
+        }, () => {
+          const err = chrome.runtime.lastError;
+          if (err) reject(new Error(err.message));
+          else resolve();
+        });
+      });
+
+      const titles = {
+        summarize: t(lang, "contextMenu_summarize"),
+        translate: t(lang, "contextMenu_translate"),
+        explain: t(lang, "contextMenu_explain"),
+        "fact-check": t(lang, "contextMenu_factCheck"),
+      };
+
+      for (const action of CONTEXT_MENU_ACTIONS) {
+        await new Promise((resolve, reject) => {
+          chrome.contextMenus.create({
+            id: `ai-action-${action}`,
+            parentId: CONTEXT_MENU_PARENT_ID,
+            title: titles[action],
+            contexts: ["selection"],
+          }, () => {
+            const err = chrome.runtime.lastError;
+            if (err) reject(new Error(err.message));
+            else resolve();
+          });
+        });
+      }
     });
-  }
+
+  return contextMenuRebuild;
 }
 
 chrome.runtime.onInstalled.addListener(() => rebuildContextMenus().catch(console.warn));

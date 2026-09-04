@@ -217,6 +217,12 @@ let pendingModelId = "";
 // abort signal reached the fetch on the other end).
 let currentRequestId = null;
 
+// During streaming, follow the newest translated text automatically until
+// the user interacts with the conversation viewport. User interaction stops
+// only the automatic scrolling; the background request continues normally.
+let autoScrollEnabled = false;
+let programmaticScroll = false;
+
 function connectPort() {
   port = chrome.runtime.connect({ name: PORT_NAME });
   port.onMessage.addListener(handlePortMessage);
@@ -228,9 +234,28 @@ function ensurePort() {
   return port;
 }
 
-function scrollToBottom() {
+function scrollToBottom(force = false) {
+  if (!force && !autoScrollEnabled) return;
+  programmaticScroll = true;
   chatLog.scrollTop = chatLog.scrollHeight;
+  requestAnimationFrame(() => {
+    programmaticScroll = false;
+  });
 }
+
+function pauseAutoScrollFromUserInteraction() {
+  autoScrollEnabled = false;
+}
+
+// Clicking/dragging/scrolling the conversation viewport gives the user
+// control of the reading position. In particular, pointerdown also catches
+// dragging the native scrollbar thumb before its scroll event fires.
+chatLog.addEventListener("pointerdown", pauseAutoScrollFromUserInteraction);
+chatLog.addEventListener("wheel", pauseAutoScrollFromUserInteraction, { passive: true });
+chatLog.addEventListener("touchstart", pauseAutoScrollFromUserInteraction, { passive: true });
+chatLog.addEventListener("scroll", () => {
+  if (!programmaticScroll) pauseAutoScrollFromUserInteraction();
+});
 
 function escapeHtml(text) {
   return String(text ?? "")
@@ -840,6 +865,7 @@ function stopActiveRequest() {
     currentAssistantBubble = null;
   }
   currentAssistantText = "";
+  autoScrollEnabled = false;
   setStreaming(false);
 }
 
@@ -925,11 +951,90 @@ async function getActivePageContext(retryCount = 0) {
     if (!/^https?:\/\//i.test(initialUrl)) return null;
     const results = await chrome.scripting.executeScript({
       target: { tabId: initialTabId },
-      func: () => ({
-        title: document.title,
-        url: location.href,
-        text: document.body?.innerText || document.documentElement?.innerText || "",
-      }),
+      func: () => {
+        const host = String(location.hostname || '').toLowerCase();
+        if (/(^|\.)reddit\.com$/.test(host) || /(^|\.)old\.reddit\.com$/.test(host)) {
+          const post = document.querySelector('shreddit-post[id^="t3_"], shreddit-post[post-type], shreddit-post');
+          if (post) {
+            const title =
+              String(post.getAttribute('post-title') || '').trim() ||
+              (post.querySelector('h1[slot="title"], h1[id^="post-title-"], h1')?.innerText || '').replace(/\s+/g, ' ').trim() ||
+              document.title;
+
+            const bodySelectors = [
+              'shreddit-post-text-body .md[property="schema:articleBody"]',
+              'shreddit-post-text-body [property="schema:articleBody"]',
+              'shreddit-post-text-body .md',
+              '[slot="text-body"] .md[property="schema:articleBody"]',
+              '[slot="text-body"] [property="schema:articleBody"]',
+              'div.md[property="schema:articleBody"]',
+            ];
+
+            let body = null;
+            for (const selector of bodySelectors) {
+              const el = post.querySelector(selector);
+              const value = (el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
+              if (value) { body = value; break; }
+            }
+            if (!body) {
+              const slotBody = post.querySelector('[slot="text-body"]');
+              const value = (slotBody?.innerText || slotBody?.textContent || '').replace(/\s+/g, ' ').trim();
+              if (value) body = value;
+            }
+
+            if (body) {
+              const parts = [];
+              if (title) parts.push(`MAIN ARTICLE TITLE:\n${title}`);
+              parts.push(`MAIN ARTICLE:\n${body}`);
+
+              const comments = [];
+              document.querySelectorAll('shreddit-comment').forEach((comment) => {
+                if (comment.closest('shreddit-comments-page-ad, [data-testid*="ad"], [id*="ad"]')) return;
+                const commentBody = comment.querySelector(
+                  '.md[property="schema:commentBody"], [property="schema:commentBody"], .md'
+                );
+                const text = (commentBody?.innerText || commentBody?.textContent || '')
+                  .replace(/\n{3,}/g, '\n\n').trim();
+                if (text) comments.push(text);
+              });
+              if (comments.length) parts.push(`COMMENTS:\n${comments.join('\n\n---\n\n')}`);
+
+              return { title: title || document.title, url: location.href, text: parts.join('\n\n') };
+            }
+          }
+        }
+
+        if (/(^|\.)community\.synology\.com$/.test(host)) {
+          const original = document.querySelector('#original-post');
+          const body = original?.querySelector('.editor-tinymce-container, [class*="editor-tinymce-container"], .post-content, .article-content');
+          const article = (body?.innerText || body?.textContent || '').trim();
+          if (!article) return { title: document.title, url: location.href, text: "" };
+
+          const parts = [];
+          const title = (original?.querySelector('.post-title')?.innerText || document.title || '').trim();
+          if (title) parts.push(`MAIN ARTICLE TITLE:\n${title}`);
+          parts.push(`MAIN ARTICLE:\n${article}`);
+
+          const replies = [];
+          document.querySelectorAll('#replies-container .reply-panel').forEach((panel) => {
+            const reply = panel.querySelector('.replay-main-post .editor-tinymce-container, .replay-main-post [class*="editor-tinymce-container"]');
+            const replyText = (reply?.innerText || reply?.textContent || '').trim();
+            const comments = Array.from(panel.querySelectorAll('.comment-content'))
+              .map((el) => (el.innerText || el.textContent || '').trim())
+              .filter(Boolean);
+            const combined = [replyText, ...comments].filter(Boolean).join('\n\n');
+            if (combined) replies.push(combined);
+          });
+          if (replies.length) parts.push(`REPLIES AND COMMENTS:\n${replies.join('\n\n---\n\n')}`);
+          return { title: title || document.title, url: location.href, text: parts.join('\n\n') };
+        }
+
+        return {
+          title: document.title,
+          url: location.href,
+          text: document.body?.innerText || document.documentElement?.innerText || "",
+        };
+      },
     });
     const data = results?.[0]?.result;
     const currentTab = await getCurrentActiveTab();
@@ -979,6 +1084,7 @@ function handlePortMessage(msg) {
       }
       history.push({ role: "assistant", content: currentAssistantText, displayContent: currentAssistantText, modelLabel: pendingModelLabel, modelId: pendingModelId });
       currentAssistantBubble = null;
+      autoScrollEnabled = false;
       setStreaming(false);
       saveConversations().catch((err) => console.error("[AI Assistant] Unable to save conversation:", err));
       break;
@@ -988,6 +1094,7 @@ function handlePortMessage(msg) {
         currentAssistantBubble.remove();
         currentAssistantBubble = null;
       }
+      autoScrollEnabled = false;
       addBubble("error", t(currentLang, "error_withMessage_template", { message: msg.error }));
       setStreaming(false);
       break;
@@ -1692,6 +1799,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   currentRequestId = requestId;
 
   questionInput.value = "";
+  autoScrollEnabled = true;
   const displayQuestion = forcedDisplayQuestion !== null
     ? String(forcedDisplayQuestion).trim()
     : (question || t(currentLang, "attachedFilesFallback"));
