@@ -1855,7 +1855,7 @@ async function runQuickPageAction(prompt) {
 }
 
 quickSummarizeBtn?.addEventListener("click", () => {
-  runQuickPageAction("Summarize the current page in 5 bullet points.");
+  runQuickPageAction("Summarize the current webpage ");
 });
 
 quickTranslateBtn?.addEventListener("click", () => {
