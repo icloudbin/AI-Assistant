@@ -301,11 +301,25 @@ function extractPageContent() {
   const readerMode = extractReaderModeArticle();
   if (readerMode) return readerMode;
 
+  // Last-resort extraction: still exclude common page chrome/noise rather
+  // than returning document.body.innerText verbatim. This is important for
+  // quick actions such as Translate: when a page has no obvious <article> or
+  // <main>, the model should receive the readable page content without
+  // navigation, headers, footers, sidebars, cookie banners, and ads.
+  if (!document.body) return null;
+
+  const clone = document.body.cloneNode(true);
+  readerModeStripNoise(clone);
+  const text = (clone.innerText || clone.textContent || '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!text) return null;
+
   return {
-    source: 'generic-page',
+    source: 'generic-page-cleaned',
     title: document.title,
     url: location.href,
-    text: (document.body?.innerText || document.documentElement?.innerText || '').slice(0, PAGE_CONTEXT_CHAR_LIMIT),
+    text: text.slice(0, PAGE_CONTEXT_CHAR_LIMIT),
   };
 }
 

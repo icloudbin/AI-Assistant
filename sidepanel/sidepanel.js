@@ -1679,7 +1679,7 @@ if (!SpeechRecognitionCtor) {
   });
 }
 
-async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null) {
+async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null) {
   e?.preventDefault?.();
   const question = forcedQuestion !== null ? String(forcedQuestion).trim() : questionInput.value.trim();
   const attachmentText = attachmentContextText();
@@ -1692,7 +1692,9 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   currentRequestId = requestId;
 
   questionInput.value = "";
-  const displayQuestion = question || t(currentLang, "attachedFilesFallback");
+  const displayQuestion = forcedDisplayQuestion !== null
+    ? String(forcedDisplayQuestion).trim()
+    : (question || t(currentLang, "attachedFilesFallback"));
   const readyAttachments = attachments.filter((a) => a.status === "ready");
   const displayContent = attachmentText
     ? `${displayQuestion}\n\n📎 ${readyAttachments.map((a) => a.name).join(", ")}`
@@ -1849,25 +1851,28 @@ chatForm.addEventListener("submit", handleSubmit);
 // Quick actions always operate on the page that is active at the moment the
 // button is clicked. They deliberately force page context on, so they still
 // work when the manual "Read current page" toggle is unchecked.
-async function runQuickPageAction(prompt) {
+async function runQuickPageAction(apiPromptKey, displayPromptKey) {
   if (isStreaming) return;
-  await handleSubmit(null, prompt, true);
+  const lang = currentLang || await getStoredLanguage();
+  const apiPrompt = t("en", apiPromptKey);
+  const displayPrompt = t(lang, displayPromptKey);
+  await handleSubmit(null, apiPrompt, true, displayPrompt);
 }
 
 quickSummarizeBtn?.addEventListener("click", () => {
-  runQuickPageAction("Summarize the current webpage ");
+  runQuickPageAction("quickSummarize_prompt", "quickSummarize_prompt");
 });
 
 quickTranslateBtn?.addEventListener("click", () => {
-  runQuickPageAction("Translate the current page into Chinese.");
+  runQuickPageAction("quickTranslate_prompt", "quickTranslate_prompt");
 });
 
 quickExplainBtn?.addEventListener("click", () => {
-  runQuickPageAction("Explain the current page clearly. Focus on its main ideas, purpose, and important details.");
+  runQuickPageAction("quickExplain_prompt", "quickExplain_prompt");
 });
 
 quickKeyPointsBtn?.addEventListener("click", () => {
-  runQuickPageAction("Extract the most important points from the current page.");
+  runQuickPageAction("quickKeyPoints_prompt", "quickKeyPoints_prompt");
 });
 
 questionInput.addEventListener("keydown", (e) => {
