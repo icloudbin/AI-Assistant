@@ -530,7 +530,14 @@ const BASE_PROMPT = "You are an assistant running in the browser side panel.";
 // says nothing about attached images/files, which are a separate mechanism
 // (see the `images` parameter in buildMessages() and streamXxx() in this
 // file) and should be used normally regardless of this toggle's state.
+// A third state exists when the side panel requested the page but capture
+// FAILED: pageContext then arrives as a {captureFailed:true} sentinel with
+// no text, and the first branch below instructs the model to say so instead
+// of falling back to the previous article still visible in the history.
 function pageContextInstruction(pageContext) {
+  if (pageContext?.captureFailed) {
+    return `CURRENT PAGE CONTEXT: REQUESTED BUT UNAVAILABLE. The user asked for this request to use the current webpage, but its content could not be captured (the page may still be loading, or it may not be a regular readable web page). Do NOT translate, summarize, explain, or otherwise reuse any article, webpage, or page content that appeared earlier in this conversation - it is not the current page, and using it would give the user output about the wrong page. Briefly tell the user that the current page could not be read yet, and ask them to wait for the page to finish loading and try again.`;
+  }
   if (pageContext) {
     let text = `CURRENT PAGE CONTEXT (authoritative; captured at request time):\nTab ID:${pageContext.tabId ?? ""}\nTitle:${pageContext.title || ""}\nURL:${pageContext.url || ""}\nPage text:\n${(pageContext.text || "").slice(0, 20000)}\n\nFor this request, "Read current page" is ON: use this context for any request about the current page, and ignore page content from a previous tab, a previous page, or an earlier turn in this conversation.`;
     // sidepanel.js only sets this when it has detected an actual change (the

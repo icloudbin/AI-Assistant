@@ -961,57 +961,37 @@ async function getActivePageContext(retryCount = 0) {
     };
   };
 
-  try {
-    const response = await new Promise((resolve) => {
-      chrome.tabs.sendMessage(initialTabId, { type: "EXTRACT_PAGE_CONTENT" }, (value) => {
-        if (chrome.runtime.lastError) { resolve(null); return; }
-        resolve(value || null);
-      });
+  const askExtractor = () => new Promise((resolve) => {
+    chrome.tabs.sendMessage(initialTabId, { type: "EXTRACT_PAGE_CONTENT" }, (value) => {
+      if (chrome.runtime.lastError) { resolve(null); return; }
+      resolve(value || null);
     });
-    if (response?.ok && response.data?.text?.trim()) {
-      const currentTab = await getCurrentActiveTab();
-      // Never return context captured from a page that is no longer the
-      // active page. This prevents a slow content-script response from a
-      // previous tab/navigation being attached to the next request.
-      if (currentTab?.id !== initialTabId || String(currentTab.url || "") !== initialUrl) {
-        // The user switched tabs/navigated while extraction was in progress.
-        // Retry against the tab that is active now, but never recurse forever.
-        return retryCount < 2 ? getActivePageContext(retryCount + 1) : null;
+  });
+
+  const extractOnce = async () => {
+    let response = await askExtractor();
+    if (!(response?.ok && response.data?.text?.trim())) {
+      // No reachable content script (or it answered with no text). Re-inject
+      // content.js and ask once more - content.js is written to be safely
+      // re-injectable, see its file-header note.
+      if (!/^https?:\/\//i.test(initialUrl)) return null;
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: initialTabId },
+          files: ["content.js"],
+        });
+      } catch (err) {
+        console.debug("[AI Assistant] Unable to inject page extractor:", err);
+        return null;
       }
-      return makeContext(response.data);
+      response = await askExtractor();
     }
-  } catch (err) {
-    console.debug("[AI Assistant] Content script unavailable:", err);
-  }
+    return response?.ok && response.data?.text?.trim() ? response.data : null;
+  };
 
   try {
-    if (!/^https?:\/\//i.test(initialUrl)) return null;
-    // Inject the same content.js the manifest registers, then ask it over
-    // the normal message channel. This fallback previously carried a
-    // hand-duplicated copy of the Reddit/Synology/plain-text logic that had
-    // already drifted from content.js (no reader-mode heuristics, no Proton
-    // Mail support); injecting the real file keeps a single implementation.
-    // Injection only happens when the first sendMessage failed, so a
-    // duplicate live listener is rare and benign (both extract the same
-    // content and the first sendResponse wins); content.js is written to be
-    // safely re-injectable - see its file-header note.
-    await chrome.scripting.executeScript({
-      target: { tabId: initialTabId },
-      files: ["content.js"],
-    });
-  } catch (err) {
-    console.debug("[AI Assistant] Unable to inject page extractor:", err);
-    return null;
-  }
-
-  try {
-    const response = await new Promise((resolve) => {
-      chrome.tabs.sendMessage(initialTabId, { type: "EXTRACT_PAGE_CONTENT" }, (value) => {
-        if (chrome.runtime.lastError) { resolve(null); return; }
-        resolve(value || null);
-      });
-    });
-    if (response?.ok && response.data?.text?.trim()) {
+    const data = await extractOnce();
+    if (data) {
       const currentTab = await getCurrentActiveTab();
       // Never return context captured from a page that is no longer the
       // active page. This prevents a slow content-script response from a
@@ -1019,7 +999,29 @@ async function getActivePageContext(retryCount = 0) {
       if (currentTab?.id !== initialTabId || String(currentTab.url || "") !== initialUrl) {
         return retryCount < 2 ? getActivePageContext(retryCount + 1) : null;
       }
-      return makeContext(response.data);
+      return makeContext(data);
+    }
+    // Empty or absent extraction on an http(s) page. The content script
+    // registers at document_idle, and document.body (plus any app-rendered
+    // text) may not exist yet, so a quick action fired right after opening
+    // a page previously returned null here - and the model then answered
+    // from stale conversation history (e.g. re-translating the PREVIOUS
+    // article). While the document is still loading, wait briefly and
+    // retry; a fully loaded page with no text is genuinely unreadable and
+    // falls through immediately.
+    let readyState = "";
+    try {
+      const probe = await chrome.scripting.executeScript({
+        target: { tabId: initialTabId },
+        func: () => document.readyState,
+      });
+      readyState = String(probe?.[0]?.result || "");
+    } catch (err) {
+      console.debug("[AI Assistant] Unable to probe page readiness:", err);
+    }
+    if (readyState && readyState !== "complete" && retryCount < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      return getActivePageContext(retryCount + 1);
     }
   } catch (err) {
     console.debug("[AI Assistant] Content script unavailable:", err);
@@ -1033,6 +1035,15 @@ function updateContextBar(pageContext) {
   }
   pageContextBar.hidden = false;
   pageContextTitle.textContent = `📄 ${pageContext.title || pageContext.url}`;
+}
+
+// Shown when a request asked for page context but the capture failed. The
+// bar used to be silently hidden in this case, which read as if the title
+// the user had just seen (from the tab-info display) had been lost; keeping
+// it visible with an explicit warning makes the outcome unambiguous.
+function updateContextBarUnavailable() {
+  pageContextBar.hidden = false;
+  pageContextTitle.textContent = `⚠️ ${t(currentLang, "contextBar_captureFailed")}`;
 }
 
 function handlePortMessage(msg) {
@@ -1834,7 +1845,18 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     // Capture the page at the moment the user submits the request. The API
     // request must never reuse the page context shown or captured earlier.
     pageContext = await getActivePageContext();
-    updateContextBar(pageContext);
+    if (pageContext) {
+      updateContextBar(pageContext);
+    } else {
+      // Capture failed - the page may still be loading, or may not be a
+      // readable web page (new tab, PDF viewer, browser-internal pages).
+      // Keep the bar visible with a warning, and send a {captureFailed}
+      // sentinel instead of null so background.js instructs the model NOT
+      // to reuse page content from earlier turns - without it, quick
+      // actions translated/summarized the PREVIOUS article out of history.
+      updateContextBarUnavailable();
+      pageContext = { captureFailed: true };
+    }
   }
 
   // Tell the model explicitly when the page has changed since its last
@@ -1848,12 +1870,13 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   // a much harder signal to miss. Only attached when a change is actually
   // detected (different URL), so a same-page follow-up ("tell me more")
   // isn't cluttered with an irrelevant note.
+  const pageContextValid = !!pageContext && !pageContext.captureFailed;
   const previousPageContext = history
     .slice(0, -1)
     .reverse()
     .find((h) => h.role === "user" && h.pageContext)?.pageContext || null;
-  history[history.length - 1].pageContext = pageContext ? { title: pageContext.title, url: pageContext.url } : null;
-  if (pageContext && previousPageContext && previousPageContext.url !== pageContext.url) {
+  history[history.length - 1].pageContext = pageContextValid ? { title: pageContext.title, url: pageContext.url } : null;
+  if (pageContextValid && previousPageContext && previousPageContext.url !== pageContext.url) {
     pageContext = { ...pageContext, previousPage: previousPageContext };
   }
 
@@ -1876,7 +1899,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       // therefore act as stale page context even when the new Page C text is
       // supplied correctly. A page change starts a fresh model context; normal
       // follow-up questions on the same page retain conversation history.
-      history: (pageContext && previousPageContext && pageContext.url !== previousPageContext.url)
+      history: (pageContextValid && previousPageContext && pageContext.url !== previousPageContext.url)
         ? []
         : getApiHistory().slice(0, -1),
       images: readyAttachments.filter((a) => a.kind === "image" && a.dataUrl).map((a) => ({ name: a.name, dataUrl: a.dataUrl })),
