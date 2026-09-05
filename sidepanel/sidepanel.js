@@ -1,6 +1,6 @@
 // sidepanel/sidepanel.js —— Fixed version: no trailing spaces; keeps import "../models.js"; API Key configuration moved to Settings
 import { MODELS, findModelById } from "../models.js";
-import { HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY, PENDING_CONTEXT_ACTION_KEY, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
+import { HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY, PENDING_CONTEXT_ACTION_KEY, PREFERRED_TRANSLATION_LANGUAGE_KEY, MAX_SAVED_CONVERSATIONS } from "../storage-keys.js";
 import { getStoredLanguage, applyStaticTranslations, t, LANGUAGE_STORAGE_KEY } from "../i18n.js";
 
 // ---------- Theme ----------
@@ -85,7 +85,6 @@ loadLanguage();
 const PORT_NAME = "ai-chat";
 const MAX_HISTORY_TURNS = 8;
 const NEW_TOPIC_VALUE = "__new__";
-const MAX_SAVED_CONVERSATIONS = 20;
 
 const chatLog = document.getElementById("chatLog");
 const emptyState = document.getElementById("emptyState");
@@ -226,7 +225,40 @@ let programmaticScroll = false;
 function connectPort() {
   port = chrome.runtime.connect({ name: PORT_NAME });
   port.onMessage.addListener(handlePortMessage);
-  port.onDisconnect.addListener(() => { port = null; });
+  port.onDisconnect.addListener(() => {
+    port = null;
+    // The long-lived port drops when the MV3 service worker is recycled
+    // (normal after ~30s idle - a slow stream producing fewer chunks than
+    // that cannot keep it alive) or when it crashes. If a request was still
+    // streaming at that moment, its DONE/ERROR never arrives, which
+    // previously left the composer disabled and the bubble stuck in
+    // "pending" forever with no explanation. Recover the same way
+    // stopActiveRequest() does, but with a visible error bubble; any partial
+    // answer already received is kept as a finished assistant turn so text
+    // the user was watching stream in is not lost. The next submission
+    // reconnects via ensurePort() against a fresh service worker instance.
+    if (!isStreaming || currentRequestId === null) return;
+    currentRequestId = null;
+    if (currentAssistantBubble) {
+      if (currentAssistantText.trim()) currentAssistantBubble.classList.remove("pending");
+      else currentAssistantBubble.remove();
+      currentAssistantBubble = null;
+    }
+    if (currentAssistantText.trim()) {
+      history.push({
+        role: "assistant",
+        content: currentAssistantText,
+        displayContent: currentAssistantText,
+        modelLabel: pendingModelLabel,
+        modelId: pendingModelId,
+      });
+      saveConversations().catch((err) => console.error("[AI Assistant] Unable to save conversation:", err));
+    }
+    currentAssistantText = "";
+    autoScrollEnabled = false;
+    setStreaming(false);
+    addBubble("error", t(currentLang, "error_connectionLost"));
+  });
 }
 
 function ensurePort() {
@@ -1927,15 +1959,19 @@ async function processContextAction(pending) {
   // The visible instruction prefix follows the language selected in Settings.
   const prompt = `${instruction}\n\n${t(lang, "contextAction_highlightedText_label")}:\n${pending.text}`;
   await handleSubmit(null, prompt, false);
-  await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: null });
 }
 
+// The createdAt timestamp of the context-menu action most recently claimed by
+// this panel document - see consumePendingContextAction below.
+let claimedContextActionAt = null;
+
 async function consumePendingContextAction(pending = null) {
-  let action = pending;
-  if (!action) {
-    const stored = await chrome.storage.local.get(PENDING_CONTEXT_ACTION_KEY);
-    action = stored[PENDING_CONTEXT_ACTION_KEY];
-  }
+  // Always re-read storage, even when a payload arrived via the
+  // CONTEXT_ACTION runtime message: the stored record is the single source
+  // of truth for whether this action still needs processing.
+  const stored = await chrome.storage.local.get(PENDING_CONTEXT_ACTION_KEY);
+  const storedAction = stored[PENDING_CONTEXT_ACTION_KEY] || null;
+  const action = pending || storedAction;
   if (!action) return;
   // Ignore a stale menu action after 2 minutes, or one that was created for a
   // different active tab. This prevents an old selection from being reused.
@@ -1943,6 +1979,26 @@ async function consumePendingContextAction(pending = null) {
     await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: null });
     return;
   }
+  // Claim the record BEFORE processing it. background.js delivers a context
+  // action through two independent channels - the storage record (consumed
+  // here when a freshly opened panel initializes) and a delayed
+  // CONTEXT_ACTION runtime message (for a panel that is already open) - so a
+  // single menu click could previously submit the same prompt twice: the
+  // message path acted on its payload directly, without noticing the record
+  // had already been consumed. Processing now starts only when the stored
+  // record still matches this action. The in-memory timestamp guard below is
+  // checked and set synchronously (no await in between), so two racing paths
+  // within this same document cannot both claim it; the storage comparison
+  // covers a second panel document (another browser window) racing this one.
+  if (action.createdAt === claimedContextActionAt) return;
+  const stillStored =
+    storedAction &&
+    storedAction.createdAt === action.createdAt &&
+    storedAction.action === action.action &&
+    storedAction.text === action.text;
+  if (!stillStored) return;
+  claimedContextActionAt = action.createdAt;
+  await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: null });
   const activeTab = await getCurrentActiveTab();
   if (action.tabId && activeTab?.id && action.tabId !== activeTab.id) return;
   await processContextAction(action);

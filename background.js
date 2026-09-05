@@ -535,11 +535,38 @@ function pageContextInstruction(pageContext) {
   return `For this request, "Read current page" is OFF: treat this question as fully independent of any webpage and answer using your own general knowledge only. Do not use, reference, or assume any page content - including anything about a page discussed earlier in this conversation - and do not ask the user which page they mean. This has nothing to do with any attached image or file, which you should still use normally if one is present with this request.`;
 }
 
+// Normalizes conversation history for providers that require strict
+// user/assistant alternation. Claude's Messages API rejects adjacent
+// same-role turns outright, and Gemini's contents have the same expectation.
+// Adjacent same-role messages can genuinely occur in this extension: when a
+// request fails or is stopped, the user's question stays in history with no
+// assistant reply after it, so the next submission would send [..., user,
+// user]. Such runs are merged into a single turn, and a leading assistant
+// turn (which Claude also rejects, and which the MAX_HISTORY_TURNS window
+// slice in sidepanel.js can leave behind when it cuts into a conversation
+// mid-exchange) is dropped. Providers that don't require alternation
+// (OpenAI-style message lists) receive the same normalized history for
+// consistency.
+function normalizeHistoryTurns(history) {
+  const out = [];
+  for (const h of history || []) {
+    if (!h || (h.role !== "user" && h.role !== "assistant") || typeof h.content !== "string") continue;
+    const prev = out[out.length - 1];
+    if (prev && prev.role === h.role) {
+      prev.content = `${prev.content}\n\n${h.content}`;
+    } else {
+      out.push({ role: h.role, content: h.content });
+    }
+  }
+  while (out.length && out[0].role === "assistant") out.shift();
+  return out;
+}
+
 function buildMessages(question, pageContext, history, customPrompt, images = []) {
   const messages = [
     { role: "system", content: customPrompt ? `${BASE_PROMPT}\n\nUser-defined instructions:\n${customPrompt}` : BASE_PROMPT },
   ];
-  for (const h of history || []) messages.push({ role: h.role, content: h.content });
+  for (const h of normalizeHistoryTurns(history)) messages.push({ role: h.role, content: h.content });
   // Put this request's page-context instruction (ON or OFF) immediately
   // before the current user request, while history remains available for
   // conversational continuity. Older page information must never be treated
@@ -563,7 +590,7 @@ function buildSystemInstruction(pageContext, customPrompt) {
 }
 
 function buildGeminiContents(question, history, images = []) {
-  const contents = (history || []).map((h) => ({ role: h.role === "assistant" ? "model" : "user", parts: [{ text: h.content }] }));
+  const contents = normalizeHistoryTurns(history).map((h) => ({ role: h.role === "assistant" ? "model" : "user", parts: [{ text: h.content }] }));
   const parts = [{ text: question }];
   for (const img of images) {
     const match = img.dataUrl.match(/^data:(image\/(?:jpeg|png|gif|webp));base64,(.+)$/i);
@@ -574,7 +601,7 @@ function buildGeminiContents(question, history, images = []) {
 }
 
 function buildClaudeMessages(question, history, images = []) {
-  const messages = (history || []).filter((h) => h.role === "user" || h.role === "assistant").map((h) => ({ role: h.role, content: h.content }));
+  const messages = normalizeHistoryTurns(history).map((h) => ({ role: h.role, content: h.content }));
   const content = [{ type: "text", text: question }];
   for (const img of images) {
     const match = img.dataUrl.match(/^data:(image\/(?:jpeg|png|gif|webp));base64,(.+)$/i);
@@ -585,7 +612,7 @@ function buildClaudeMessages(question, history, images = []) {
 }
 
 function buildOpenAIInput(question, history, images = []) {
-  const input = (history || []).filter((h) => h.role === "user" || h.role === "assistant").map((h) => ({ role: h.role, content: h.content }));
+  const input = normalizeHistoryTurns(history).map((h) => ({ role: h.role, content: h.content }));
   const content = [{ type: "input_text", text: question }];
   for (const img of images) content.push({ type: "input_image", image_url: img.dataUrl, detail: "auto" });
   input.push({ role: "user", content });

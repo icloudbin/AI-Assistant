@@ -7,7 +7,7 @@ import {
   SUPPORTED_LANGUAGES,
   LANGUAGE_STORAGE_KEY,
 } from "../i18n.js";
-import { PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
+import { MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
 
 const apiKeyInput = document.getElementById("apiKey");
 const geminiApiKeyInput = document.getElementById("geminiApiKey");
@@ -509,7 +509,7 @@ async function restoreHistory() {
     const normalized = restored
       .map(normalizeRestoredConversation)
       .filter(Boolean)
-      .slice(0, 100);
+      .slice(0, MAX_SAVED_CONVERSATIONS);
 
     if (!normalized.length) {
       throw new Error(t(currentLang, "zip_error_noUsableConversations"));
@@ -531,7 +531,7 @@ async function restoreHistory() {
     const merged = [...byId.values()]
       .filter((c) => c?.messages?.length)
       .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
-      .slice(0, 100);
+      .slice(0, MAX_SAVED_CONVERSATIONS);
 
     await chrome.storage.local.set({ [HISTORY_STORAGE_KEY]: merged });
 
