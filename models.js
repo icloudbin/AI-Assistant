@@ -36,6 +36,20 @@
 // model's default and thought summaries are not requested, so no `thinking`
 // field is set for these entries.
 //
+// 2026-09 update: gemini-3.7-flash replaced with gemini-3.8-flash below
+// (released 2026-09-02, Stable tier per
+// https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash, checked
+// 2026-09-05; same request/response shape and same $0.75/$3.75 per-million-
+// token pricing as 3.7 through 2026-12-31). Google has not deprecated
+// gemini-3.7-flash - to revert, change the id/label/apiModel below back to
+// "gemini-3.7-flash" / "Gemini 3.7 Flash". Replacing the entry (rather than
+// adding a second one) means a saved conversation whose modelId was
+// "gemini-3.7-flash" no longer matches anything in MODELS; per the comments
+// on restoreSelectedModel()/findConversationModelId() in sidepanel.js, that
+// silently falls through, so a user who had Gemini selected will see the
+// model dropdown default back to the first MODELS entry (DeepSeek Chat)
+// until they reselect it.
+//
 // Claude entries added 2026-08. apiModel values per
 // https://platform.claude.com/docs/en/about-claude/models/overview (checked
 // 2026-08-23). `id` differs from `apiModel` only for Haiku 4.5: Anthropic
@@ -88,7 +102,7 @@ export const MODELS = [
   { id: "deepseek-chat", label: "DeepSeek Chat", provider: "deepseek", apiModel: "deepseek-v4-flash", thinking: "disabled", visionModel: "deepseek-v4-flash-vision-exp" },
   { id: "deepseek-reasoner", label: "DeepSeek Reasoner", provider: "deepseek", apiModel: "deepseek-v4-flash", thinking: "enabled", visionModel: "deepseek-v4-flash-vision-exp" },
   { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", provider: "deepseek", apiModel: "deepseek-v4-pro", thinking: "enabled", visionModel: "deepseek-v4-flash-vision-exp" },
-  { id: "gemini-3.7-flash", label: "Gemini 3.7 Flash", provider: "gemini", apiModel: "gemini-3.7-flash" },
+  { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", provider: "gemini", apiModel: "gemini-3.8-flash" },
   { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", provider: "gemini", apiModel: "gemini-3.1-pro-preview" },
   { id: "claude-fable-5", label: "Claude Fable 5", provider: "claude", apiModel: "claude-fable-5" },
   { id: "claude-opus-5", label: "Claude Opus 5", provider: "claude", apiModel: "claude-opus-5" },
