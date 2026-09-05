@@ -21,9 +21,28 @@ AI-Assistant/
 
 # Deployment
 1. brave://extensions → Developer mode → Load unpacked → select the AI-Assistant-main folder
-2. If loading failed before: remove the old entry first, then select "Load unpacked" again
+2. For updates, do NOT click "Remove" first — removing an extension permanently deletes all of its stored data (see "Updating to a newer version" below)
 3. Click the toolbar icon to open the side panel; click "Settings" to paste and save an API key
 4. After changing code: reload the extension card; reopen the side panel; refresh existing web pages
+
+## Updating to a newer version without losing settings (v1.10.26+)
+
+All user data (API keys, theme, language, custom prompt, saved model choice, conversation history) lives in `chrome.storage.local`, which Chrome persists per **extension ID**. Before v1.10.26, `manifest.json` had no `"key"` field, so for a "Load unpacked" install Chrome derived the extension ID from a hash of the **absolute folder path**. Loading each updated download from a new folder (e.g. `AI-Assistant-main`, then `AI-Assistant-main (2)`, ...) produced a *different* ID, so Chrome treated the update as a brand-new extension with empty storage — which is why every update appeared to reset all settings.
+
+Fix: `manifest.json` now includes a `"key"` field (a base64-encoded RSA public key). With a `key` present, Chrome derives the ID from that key instead of the folder path, so the ID is stable — `jhnjhgicilnghoellcbkiokhlhkpbmjh` — no matter where the folder lives, and loading a new version is a true update: same ID, same storage, settings kept.
+
+**Important: never click "Remove" between versions.** Removing an extension deletes its entire `chrome.storage.local` by design — that is Chrome's behavior for every extension, and no manifest field can change it. Removing and then reinstalling always starts from empty settings, even with the pinned ID. The pinned key only preserves data when the old install is updated *in place*.
+
+Recommended update procedure:
+1. Extract the new version's zip somewhere temporary.
+2. Copy its contents over your permanent extension folder (the one originally chosen via "Load unpacked"), overwriting the old files.
+3. In brave://extensions, click the ⟳ reload icon on the AI Assistant card, then reopen the side panel.
+
+That's it — no removal, no "Load unpacked" again, settings intact. (If you instead extract each version to a new folder and pick it with "Load unpacked", Chrome may refuse with "already loaded", because the pinned key makes every folder produce the same ID — that refusal is protecting your installed copy's data. Update in place as above rather than removing.)
+
+**Settings Backup (v1.10.27):** Settings now also has an "Export settings" button that writes every settings key — API keys, custom prompt, theme, languages, selected model — to a single JSON file, and an "Import settings" button that restores them in one click. Use this as the recovery path for anything a remove/reinstall, a profile reset, or a move to another machine: export first, remove/reinstall, import after. The file contains your API keys in readable plain text, so store it like a password.
+
+**Key management:** the matching RSA private key must never be committed to or shipped inside the extension folder. It is kept outside the project as `ai-assistant-private-key.pem`; it is required to build signed CRX updates or to preserve this same ID when publishing to the Chrome Web Store, so keep a backup of it. If it is ever lost, a new key can be pinned the same way — but that changes the ID and resets storage again.
 
 # Validation checklist (file names must match exactly, UTF-8, no .txt suffix)
 manifest.json / models.js / background.js / content.js / storage-keys.js /
@@ -253,6 +272,12 @@ Feedback on v1.10.13: the user's own typed messages don't need a copy button (th
 `addBubble()` in `sidepanel.js` now only builds the `.bubble-header` row (model tag, when there is one, plus the copy button) for `role !== "user"`, and appends that header before `.bubble-text` rather than a `.bubble-actions` row after it - `role === "user"` bubbles get no header and no copy button at all. Error bubbles keep the button, on the same reasoning as assistant replies: they aren't something the user typed, either. `.bubble-actions` in `sidepanel.css` became `.bubble-header` (`.model-tag` and `.copy-btn` share the row, the button pinned to the right via `margin-left: auto` whether or not a model tag is present); the `.bubble.user .copy-btn` contrast override from v1.10.13 was removed as dead code, since user bubbles never render a copy button now.
 
 Verified by extending the same jsdom harness from v1.10.13 with three more cases: an assistant message's `.bubble-header` now precedes `.bubble-text` in DOM order (button on top, not bottom); a user message has no `.bubble-header`, no `.copy-btn`, and no `.code-copy-btn` at all; and an assistant message with a model label puts the tag and the copy button in the same header, with the button still copying the message body rather than the tag text. All prior v1.10.13 cases were re-run against the restructured code and still pass unchanged - nine cases, twenty-five assertions in total, all passing. Could not verify the actual on-screen position or spacing of the header row in a real Brave side panel from this sandbox - worth a quick look, particularly a long model-tag name next to the button on a narrow panel width.
+
+## Added: Settings Backup — one-click settings export/import (v1.10.27)
+
+Follow-up to the v1.10.26 stable-ID fix. That fix keeps settings across in-place *updates*, but clicking "Remove" on an extension permanently deletes its entire `chrome.storage.local` — Chrome does this for every extension by design, so a remove-then-reinstall cycle always starts empty no matter what the manifest contains.
+
+Settings (options page) now has a "Settings Backup" section: "Export settings" writes every settings key — the five API keys, custom prompt, theme, UI language, preferred translation language, selected model, voice-input language, and composer height — to a single plain-text JSON file, and "Import settings" restores them in one click (validating the file's format marker and accepting only known keys with sane types, so a wrong or hand-edited file can't break anything). Use it before removing/reinstalling the extension, resetting the browser profile, or moving to another machine. The file intentionally contains API keys in readable form (that is its purpose), so it should be stored like a password. Conversation history is excluded — the existing History Management ZIP backup/restore covers it — and the two backups together move everything a user has configured.
 
 ## Rich conversation rendering
 

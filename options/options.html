@@ -45,11 +45,11 @@
            padding: 8px 18px; font-weight: 600; cursor: pointer; }
   .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   #msg { font-size: 12px; color: #4ade80; }
-  #backupHistory, #restoreHistory { background: var(--button-bg); }
-  #backupHistory:hover, #restoreHistory:hover { background: #343a4b; }
+  #backupHistory, #restoreHistory, #exportSettings, #importSettings { background: var(--button-bg); }
+  #backupHistory:hover, #restoreHistory:hover, #exportSettings:hover, #importSettings:hover { background: #343a4b; }
   #deleteHistory { background: #b83a3a; }
   #deleteHistory:hover { background: #d14a4a; }
-  #backupHistory:disabled, #restoreHistory:disabled, #deleteHistory:disabled { opacity: 0.6; cursor: default; }
+  #backupHistory:disabled, #restoreHistory:disabled, #deleteHistory:disabled, #exportSettings:disabled, #importSettings:disabled { opacity: 0.6; cursor: default; }
   .history-management { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
   .history-management-title { font-size: 13px; font-weight: 700; margin-bottom: 2px; }
   .history-management .actions { margin-top: 2px; }
@@ -118,6 +118,16 @@
         <input id="restoreHistoryFile" type="file" hidden accept=".zip,.winzip,application/zip" />
       </div>
       <div class="hint backup-hint" data-i18n="historyManagement_hint">Backup exports all locally saved conversations to a ZIP file. Restore imports conversations from a backup ZIP and merges them with existing history. Delete permanently removes all saved conversation history. Your API keys and custom prompt are not included in backups.</div>
+    </div>
+
+    <div class="history-management">
+      <div class="history-management-title" data-i18n="settingsBackup_title">Settings Backup</div>
+      <div class="actions">
+        <button id="exportSettings" type="button" data-i18n="settingsBackup_export_button">Export settings</button>
+        <button id="importSettings" type="button" data-i18n="settingsBackup_import_button">Import settings</button>
+        <input id="importSettingsFile" type="file" hidden accept=".json,application/json" />
+      </div>
+      <div class="hint backup-hint" data-i18n="settingsBackup_hint">Export writes all settings — including API keys and your custom prompt — to a plain-text JSON file. Import restores them in one click, for example after removing and reinstalling the extension. Keep the file somewhere safe: it contains your API keys in readable form.</div>
     </div>
 
     <div class="history-management language-section" role="group" aria-labelledby="languageTitle">

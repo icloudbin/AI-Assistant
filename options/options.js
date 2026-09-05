@@ -686,3 +686,148 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 });
 
 loadTheme();
+
+// ---------- Settings backup ----------
+// Removing the extension from chrome://extensions deletes its entire
+// chrome.storage.local by design - no extension can opt out of that, and the
+// pinned manifest "key" only keeps storage stable across in-place *updates*.
+// These buttons cover the removal path: export writes every settings key to
+// one plain-text JSON file, import restores them in a click.
+//
+// Key names mirror the definitions at their write sites: the API-key/custom-
+// prompt fields above, THEME_STORAGE_KEY/LANGUAGE_STORAGE_KEY/
+// PREFERRED_TRANSLATION_LANGUAGE_KEY above, and sidepanel.js's local
+// "selectedModelId", MIC_LANG_STORAGE_KEY ("micRecognitionLang"), and
+// COMPOSER_HEIGHT_STORAGE_KEY ("composerHeight") constants, which are not
+// exported from that file. Conversation history is deliberately excluded -
+// it has its own ZIP backup above - and so are the transient pointers
+// (currentConversationId, pendingContextAction), which are worthless on a
+// fresh install.
+const SETTINGS_BACKUP_KEYS = [
+  "apiKey",
+  "geminiApiKey",
+  "claudeApiKey",
+  "openaiApiKey",
+  "openrouterApiKey",
+  "customPrompt",
+  THEME_STORAGE_KEY,
+  LANGUAGE_STORAGE_KEY,
+  PREFERRED_TRANSLATION_LANGUAGE_KEY,
+  "selectedModelId",
+  "micRecognitionLang",
+  "composerHeight",
+];
+const SETTINGS_BACKUP_FORMAT = "Brave AI Assistant Settings Backup";
+const SETTINGS_BACKUP_MAX_BYTES = 1024 * 1024;
+
+const exportSettingsBtn = document.getElementById("exportSettings");
+const importSettingsBtn = document.getElementById("importSettings");
+const importSettingsFile = document.getElementById("importSettingsFile");
+
+function settingsBackupFail(err) {
+  console.error("[AI Assistant] Settings backup failed:", err);
+  msgEl.style.color = "#f55b5b";
+  msgEl.textContent = t(currentLang, "settingsBackup_failed_template", { message: err?.message || t(currentLang, "unknownError") });
+}
+
+async function exportSettings() {
+  exportSettingsBtn.disabled = true;
+  importSettingsBtn.disabled = true;
+  msgEl.style.color = "#8b91a3";
+  msgEl.textContent = t(currentLang, "settingsBackup_preparing");
+
+  try {
+    const stored = await chrome.storage.local.get(SETTINGS_BACKUP_KEYS);
+    const backup = {
+      format: SETTINGS_BACKUP_FORMAT,
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      settings: stored,
+    };
+
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `brave-ai-assistant-settings-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+
+    msgEl.style.color = "#4ade80";
+    msgEl.textContent = t(currentLang, "settingsBackup_export_success");
+    setTimeout(() => (msgEl.textContent = ""), 3000);
+  } catch (err) {
+    settingsBackupFail(err);
+  } finally {
+    exportSettingsBtn.disabled = false;
+    importSettingsBtn.disabled = false;
+  }
+}
+
+async function importSettings() {
+  exportSettingsBtn.disabled = true;
+  importSettingsBtn.disabled = true;
+
+  try {
+    const file = importSettingsFile.files?.[0];
+    if (!file) throw new Error(t(currentLang, "settingsBackup_error_noFileSelected"));
+    if (file.size > SETTINGS_BACKUP_MAX_BYTES) throw new Error(t(currentLang, "settingsBackup_error_tooLarge"));
+
+    let backup;
+    try {
+      backup = JSON.parse(await file.text());
+    } catch {
+      throw new Error(t(currentLang, "settingsBackup_error_invalidJson"));
+    }
+    if (backup?.format !== SETTINGS_BACKUP_FORMAT || !backup.settings || typeof backup.settings !== "object") {
+      throw new Error(t(currentLang, "settingsBackup_error_notSettingsBackup"));
+    }
+
+    // Only accept known keys with sane types; everything else in the file is
+    // ignored. Numbers are legitimate only for composerHeight - accepting
+    // them anywhere else would let a hand-edited file write, say, a number
+    // over an API key. Downstream readers already tolerate unexpected string
+    // values (the language/theme selects normalize unknown entries to their
+    // defaults, sidepanel.js validates selectedModelId against models.js),
+    // so a bad value can at worst restore a default, not break anything.
+    const NUMERIC_SETTINGS_KEYS = new Set(["composerHeight"]);
+    const restored = {};
+    for (const key of SETTINGS_BACKUP_KEYS) {
+      const value = backup.settings[key];
+      if (typeof value === "string" && value) restored[key] = value;
+      else if (NUMERIC_SETTINGS_KEYS.has(key) && typeof value === "number" && Number.isFinite(value)) restored[key] = value;
+    }
+    if (!Object.keys(restored).length) throw new Error(t(currentLang, "settingsBackup_error_notSettingsBackup"));
+
+    await chrome.storage.local.set(restored);
+
+    // The API-key inputs and the prompt textarea are loaded once at page
+    // load and have no storage.onChanged listener, so refresh them by hand.
+    // Language, theme, and preferred translation live-update through the
+    // listeners registered earlier in this file, triggered by the set()
+    // above.
+    apiKeyInput.value = restored.apiKey || "";
+    geminiApiKeyInput.value = restored.geminiApiKey || "";
+    claudeApiKeyInput.value = restored.claudeApiKey || "";
+    openaiApiKeyInput.value = restored.openaiApiKey || "";
+    openrouterApiKeyInput.value = restored.openrouterApiKey || "";
+    if (restored.customPrompt !== undefined) customPromptInput.value = restored.customPrompt;
+
+    msgEl.style.color = "#4ade80";
+    msgEl.textContent = t(currentLang, "settingsBackup_import_success");
+    setTimeout(() => (msgEl.textContent = ""), 3000);
+  } catch (err) {
+    settingsBackupFail(err);
+  } finally {
+    importSettingsFile.value = "";
+    exportSettingsBtn.disabled = false;
+    importSettingsBtn.disabled = false;
+  }
+}
+
+exportSettingsBtn.addEventListener("click", exportSettings);
+importSettingsBtn.addEventListener("click", () => importSettingsFile.click());
+importSettingsFile.addEventListener("change", importSettings);

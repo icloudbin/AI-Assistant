@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AI Assistant",
-  "version": "1.10.25",
+  "version": "1.10.27",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyV5x1MUq+kZF7HH4FYUpLBpoI2F7eTewR+G9Ef7/bwouus93TSzZL/WCKOqPBaQ3/mdZYYBMgfZvorBnuomvyxRsUFfnlDWUODgyQT4Fw/EWeOkDCYy2LhD3JcRngeVirpTZPKsm6qTo0byrv6vOQBnMZvygMmHFC+/SkfK1Dm/EWZbxu0OyfZQRdXqpvsyuYU7NieLPiMsUvbiPzF7VjpybM/El4GuKE1kSM7sRI9Z7lNueAw70DBzsZ24FCi6V9lmFbo78eShBXNNnLivQtyvvsWvQ8ZRwhnlzoHZ+3PZq0P6EKXWdwRyIgpDQ3bzDxhBKTroQtYjBRRkRL9c5YwIDAQAB",
   "description": "Answer questions using the current web page, attached files, a user-configurable custom prompt, locally saved conversation history in the Brave side panel, local ZIP backup/restore support, automatic page-context refresh on tab changes, sanitized Markdown-to-HTML conversation rendering, bilingual (English/Mandarin) voice input, a choice of AI models, and AI actions for selected webpage text from the browser context menu.",
   "permissions": [
     "contextMenus",
