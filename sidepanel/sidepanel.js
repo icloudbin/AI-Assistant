@@ -366,9 +366,14 @@ function inlineMarkdownToHtml(text) {
   });
 
   s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  s = s.replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
+  // Underscore emphasis follows CommonMark's flanking rule: an intraword
+  // underscore pair is not emphasis, so snake_case identifiers such as
+  // foo_bar_baz survive rendering instead of becoming foo<em>bar</em>baz.
+  // Both underscores must sit at a word boundary; `*` has no such rule and
+  // is deliberately left unchanged below.
+  s = s.replace(/(?<![\p{L}\p{N}])__([^_\n]+)__(?![\p{L}\p{N}])/gu, "<strong>$1</strong>");
   s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
-  s = s.replace(/_([^_\n]+)_/g, "<em>$1</em>");
+  s = s.replace(/(?<![\p{L}\p{N}_])_([^_\n]+)_(?![\p{L}\p{N}_])/gu, "<em>$1</em>");
   s = s.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
 
   for (let i = 0; i < codeSpans.length; i++) {
@@ -981,103 +986,45 @@ async function getActivePageContext(retryCount = 0) {
 
   try {
     if (!/^https?:\/\//i.test(initialUrl)) return null;
-    const results = await chrome.scripting.executeScript({
+    // Inject the same content.js the manifest registers, then ask it over
+    // the normal message channel. This fallback previously carried a
+    // hand-duplicated copy of the Reddit/Synology/plain-text logic that had
+    // already drifted from content.js (no reader-mode heuristics, no Proton
+    // Mail support); injecting the real file keeps a single implementation.
+    // Injection only happens when the first sendMessage failed, so a
+    // duplicate live listener is rare and benign (both extract the same
+    // content and the first sendResponse wins); content.js is written to be
+    // safely re-injectable - see its file-header note.
+    await chrome.scripting.executeScript({
       target: { tabId: initialTabId },
-      func: () => {
-        const host = String(location.hostname || '').toLowerCase();
-        if (/(^|\.)reddit\.com$/.test(host) || /(^|\.)old\.reddit\.com$/.test(host)) {
-          const post = document.querySelector('shreddit-post[id^="t3_"], shreddit-post[post-type], shreddit-post');
-          if (post) {
-            const title =
-              String(post.getAttribute('post-title') || '').trim() ||
-              (post.querySelector('h1[slot="title"], h1[id^="post-title-"], h1')?.innerText || '').replace(/\s+/g, ' ').trim() ||
-              document.title;
-
-            const bodySelectors = [
-              'shreddit-post-text-body .md[property="schema:articleBody"]',
-              'shreddit-post-text-body [property="schema:articleBody"]',
-              'shreddit-post-text-body .md',
-              '[slot="text-body"] .md[property="schema:articleBody"]',
-              '[slot="text-body"] [property="schema:articleBody"]',
-              'div.md[property="schema:articleBody"]',
-            ];
-
-            let body = null;
-            for (const selector of bodySelectors) {
-              const el = post.querySelector(selector);
-              const value = (el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
-              if (value) { body = value; break; }
-            }
-            if (!body) {
-              const slotBody = post.querySelector('[slot="text-body"]');
-              const value = (slotBody?.innerText || slotBody?.textContent || '').replace(/\s+/g, ' ').trim();
-              if (value) body = value;
-            }
-
-            if (body) {
-              const parts = [];
-              if (title) parts.push(`MAIN ARTICLE TITLE:\n${title}`);
-              parts.push(`MAIN ARTICLE:\n${body}`);
-
-              const comments = [];
-              document.querySelectorAll('shreddit-comment').forEach((comment) => {
-                if (comment.closest('shreddit-comments-page-ad, [data-testid*="ad"], [id*="ad"]')) return;
-                const commentBody = comment.querySelector(
-                  '.md[property="schema:commentBody"], [property="schema:commentBody"], .md'
-                );
-                const text = (commentBody?.innerText || commentBody?.textContent || '')
-                  .replace(/\n{3,}/g, '\n\n').trim();
-                if (text) comments.push(text);
-              });
-              if (comments.length) parts.push(`COMMENTS:\n${comments.join('\n\n---\n\n')}`);
-
-              return { title: title || document.title, url: location.href, text: parts.join('\n\n') };
-            }
-          }
-        }
-
-        if (/(^|\.)community\.synology\.com$/.test(host)) {
-          const original = document.querySelector('#original-post');
-          const body = original?.querySelector('.editor-tinymce-container, [class*="editor-tinymce-container"], .post-content, .article-content');
-          const article = (body?.innerText || body?.textContent || '').trim();
-          if (!article) return { title: document.title, url: location.href, text: "" };
-
-          const parts = [];
-          const title = (original?.querySelector('.post-title')?.innerText || document.title || '').trim();
-          if (title) parts.push(`MAIN ARTICLE TITLE:\n${title}`);
-          parts.push(`MAIN ARTICLE:\n${article}`);
-
-          const replies = [];
-          document.querySelectorAll('#replies-container .reply-panel').forEach((panel) => {
-            const reply = panel.querySelector('.replay-main-post .editor-tinymce-container, .replay-main-post [class*="editor-tinymce-container"]');
-            const replyText = (reply?.innerText || reply?.textContent || '').trim();
-            const comments = Array.from(panel.querySelectorAll('.comment-content'))
-              .map((el) => (el.innerText || el.textContent || '').trim())
-              .filter(Boolean);
-            const combined = [replyText, ...comments].filter(Boolean).join('\n\n');
-            if (combined) replies.push(combined);
-          });
-          if (replies.length) parts.push(`REPLIES AND COMMENTS:\n${replies.join('\n\n---\n\n')}`);
-          return { title: title || document.title, url: location.href, text: parts.join('\n\n') };
-        }
-
-        return {
-          title: document.title,
-          url: location.href,
-          text: document.body?.innerText || document.documentElement?.innerText || "",
-        };
-      },
+      files: ["content.js"],
     });
-    const data = results?.[0]?.result;
-    const currentTab = await getCurrentActiveTab();
-    if (currentTab?.id !== initialTabId || String(currentTab.url || "") !== initialUrl) {
-      return retryCount < 2 ? getActivePageContext(retryCount + 1) : null;
-    }
-    return makeContext(data);
   } catch (err) {
-    console.warn("[AI Assistant] Unable to read current page:", err);
+    console.debug("[AI Assistant] Unable to inject page extractor:", err);
     return null;
   }
+
+  try {
+    const response = await new Promise((resolve) => {
+      chrome.tabs.sendMessage(initialTabId, { type: "EXTRACT_PAGE_CONTENT" }, (value) => {
+        if (chrome.runtime.lastError) { resolve(null); return; }
+        resolve(value || null);
+      });
+    });
+    if (response?.ok && response.data?.text?.trim()) {
+      const currentTab = await getCurrentActiveTab();
+      // Never return context captured from a page that is no longer the
+      // active page. This prevents a slow content-script response from a
+      // previous tab/navigation being attached to the next request.
+      if (currentTab?.id !== initialTabId || String(currentTab.url || "") !== initialUrl) {
+        return retryCount < 2 ? getActivePageContext(retryCount + 1) : null;
+      }
+      return makeContext(response.data);
+    }
+  } catch (err) {
+    console.debug("[AI Assistant] Content script unavailable:", err);
+  }
+  return null;
 }
 function updateContextBar(pageContext) {
   if (!pageContext) {
@@ -1437,6 +1384,11 @@ async function extractZipText(file) {
     const ext = fileExtension(name);
     const looksText = TEXT_EXTENSIONS.has(ext) || lowerName.endsWith(".html") || lowerName.endsWith(".htm");
     if (!looksText) continue;
+    // The general-purpose bit 0 marks the entry as password-encrypted, which
+    // this reader cannot decrypt - inflating it would yield garbage bytes
+    // that decode to mojibake rather than real text. Fail with a clear
+    // message instead.
+    if (flags & 1) throw new Error(t(currentLang, "sp_zip_error_encrypted"));
     if (uncompressedSize > MAX_TOTAL_EXTRACTED_CHARS * 4) continue;
     if (localOffset + 30 > bytes.length || readU32(view, localOffset) !== 0x04034b50) continue;
 
@@ -1724,15 +1676,31 @@ async function ensureMicPermission() {
 // a full tab, where the prompt reliably shows, works around it.
 function openMicPermissionTab() {
   return new Promise((resolve) => {
+    // Settles exactly once and always cleans up both waits: the tab-close
+    // listener and a 2-minute give-up timer. Previously only the listener
+    // existed, so if the user left the tab open the listener leaked, the
+    // promise never resolved, and micStarting stayed true - silently
+    // ignoring every later mic click until the browser restarted. After the
+    // timeout, startMic() re-checks permission and reports the result
+    // normally.
+    let tabId = null;
+    let settled = false;
+    let giveUpTimer = null;
+    function onTabRemoved(closedId) {
+      if (closedId === tabId) settle();
+    }
+    function settle() {
+      if (settled) return;
+      settled = true;
+      clearTimeout(giveUpTimer);
+      chrome.tabs.onRemoved.removeListener(onTabRemoved);
+      resolve();
+    }
+    chrome.tabs.onRemoved.addListener(onTabRemoved);
+    giveUpTimer = setTimeout(settle, 120000);
     chrome.tabs.create({ url: chrome.runtime.getURL("sidepanel/mic-permission.html") }, (tab) => {
-      const tabId = tab?.id;
-      if (!tabId) { resolve(); return; }
-      chrome.tabs.onRemoved.addListener(function listener(closedId) {
-        if (closedId === tabId) {
-          chrome.tabs.onRemoved.removeListener(listener);
-          resolve();
-        }
-      });
+      tabId = tab?.id;
+      if (!tabId) settle();
     });
   });
 }
@@ -1830,7 +1798,10 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   currentRequestId = requestId;
 
-  questionInput.value = "";
+  // Only clear the composer when the submission came from it. Quick actions
+  // and context-menu actions pass a forcedQuestion; wiping the input then
+  // would destroy a draft the user typed but had not sent yet.
+  if (forcedQuestion === null) questionInput.value = "";
   autoScrollEnabled = true;
   const displayQuestion = forcedDisplayQuestion !== null
     ? String(forcedDisplayQuestion).trim()
@@ -1916,6 +1887,16 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       thinking: selectedModel.thinking,
     },
   });
+
+  // Attachments are one-shot. Everything this request needed was captured
+  // above (readyAttachments / attachmentText), the user bubble already lists
+  // the file names, and the assistant reply will be appended to the same
+  // conversation - so the chips are removed now. Previously they stayed,
+  // silently re-uploading every attached image with each follow-up message
+  // (and re-inlining the attachment text block) until the user removed every
+  // chip by hand.
+  attachments = [];
+  renderAttachments();
 }
 
 
@@ -1958,7 +1939,12 @@ async function processContextAction(pending) {
   // the whole webpage as hidden context, even if "Read current page" is on.
   // The visible instruction prefix follows the language selected in Settings.
   const prompt = `${instruction}\n\n${t(lang, "contextAction_highlightedText_label")}:\n${pending.text}`;
-  await handleSubmit(null, prompt, false);
+  // Show a compact preview in the user bubble (the instruction plus the start
+  // of the selection) instead of the entire raw prompt, matching how quick
+  // actions display a short prompt rather than their full API wording.
+  const preview = pending.text.length > 120 ? `${pending.text.slice(0, 120).trimEnd()}…` : pending.text;
+  const displayQuestion = `${instruction}\n${t(lang, "contextAction_highlightedText_label")}:\n${preview}`;
+  await handleSubmit(null, prompt, false, displayQuestion);
 }
 
 // The createdAt timestamp of the context-menu action most recently claimed by
@@ -1978,6 +1964,18 @@ async function consumePendingContextAction(pending = null) {
   if (!action.createdAt || Date.now() - action.createdAt > 120000) {
     await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: null });
     return;
+  }
+  // Only the panel in the window the selection was made in may process the
+  // action. chrome.runtime.sendMessage reaches every extension page -
+  // including side panels open in OTHER browser windows - so without this
+  // scoping a second panel could claim the same action and submit the same
+  // prompt in parallel with the intended one. Skipping (instead of claiming
+  // and clearing) leaves the record for the window it belongs to.
+  try {
+    const thisWindow = await chrome.windows.getCurrent();
+    if (action.windowId && thisWindow?.id && action.windowId !== thisWindow.id) return;
+  } catch {
+    // windows.getCurrent unavailable - fall through and process as before.
   }
   // Claim the record BEFORE processing it. background.js delivers a context
   // action through two independent channels - the storage record (consumed
@@ -2091,10 +2089,22 @@ async function refreshActivePageContext() {
       return;
     }
     lastPageContextTabId = tab.id;
-    const ctx = await getActivePageContext();
-    // Ignore a slower read if the user has already switched tabs again.
+    // Ignore a slower result if the user has already switched tabs again.
     if (token !== pageContextRefreshToken) return;
-    updateContextBar(ctx);
+    // Display-only refresh: show which page the next message would use,
+    // from the tab's own title/URL. This used to run the full content-script
+    // extraction (cloning and stripping document.body on large pages) on
+    // every tab switch, navigation commit, and title change, just to render
+    // this one line. Extraction now happens only where its result is
+    // actually consumed, at submit time (handleSubmit ->
+    // getActivePageContext, which hides this bar itself when the page
+    // yields no text). chrome:// and other non-web pages can never yield
+    // context, so the bar stays hidden for them too.
+    if (!/^https?:/i.test(String(tab.url || ""))) {
+      updateContextBar(null);
+      return;
+    }
+    updateContextBar({ title: String(tab.title || ""), url: String(tab.url || "") });
   } catch (err) {
     console.debug("[AI Assistant] Unable to refresh page context:", err);
     if (token === pageContextRefreshToken) updateContextBar(null);
@@ -2157,12 +2167,20 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   //    the stale-model problem above, reloading `history` and re-rendering
   //    the chat log here would also fight the live streaming bubble, which
   //    only exists in memory (currentAssistantBubble) until DONE saves it.
-  // 2. Even outside a live request, never let this reactive refresh touch
-  //    the model dropdown (syncModel:false) - it should only follow
-  //    explicit navigation (selecting a conversation, or the initial
-  //    restore in init()), not an incidental background sync.
+  // 2. activate:false - refresh only the saved-conversation LIST and the
+  //    history dropdown. Previously the default (activate:true) re-read the
+  //    persisted current-conversation pointer and, when it matched, reloaded
+  //    history and rebuilt the whole chat log after every completed save:
+  //    that wiped any text the user was selecting, restarted lazy-loaded
+  //    images in past bubbles, and - with side panels open in two windows -
+  //    let one panel's save switch the other panel to a different
+  //    conversation. The displayed conversation is only ever changed by
+  //    explicit navigation (the history dropdown) or this panel's own
+  //    submissions; if the displayed conversation was deleted or replaced in
+  //    Settings, it stays visible from memory and is re-persisted on its
+  //    next send. syncModel:false keeps the dropdown from following the
+  //    model of an incidental background sync.
   if (isStreaming) return;
-  loadConversations({ syncModel: false })
-    .then(() => scheduleHistoryRender())
+  loadConversations({ activate: false, syncModel: false })
     .catch((err) => console.error("[AI Assistant] Unable to refresh restored history:", err));
 });

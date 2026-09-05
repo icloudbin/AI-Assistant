@@ -25,6 +25,19 @@
 //      it isn't confident it actually found an article.
 //   4. Plain document.body.innerText, sliced to the character limit - the
 //      original fallback, unchanged, used whenever nothing above matches.
+//
+// This file is also injected on demand from sidepanel.js via
+// chrome.scripting.executeScript when the registered content script is
+// unreachable (e.g. the extension was reloaded while this tab stayed open,
+// or the message raced document_idle). Everything therefore lives inside
+// the single aiAssistantPageExtractor() function declaration below:
+// re-injecting redeclares that function without error (top-level const/let
+// would throw on re-injection), and the extractor closure is pure DOM code
+// with no chrome.* calls, so even a closure captured by a stale, orphaned
+// script instance still extracts correctly when the live listener below
+// invokes it.
+
+function aiAssistantPageExtractor() {
 
 function extractSynologyMailPlus() {
   // A selected/open MailPlus message is represented by an expanded item.
@@ -513,14 +526,20 @@ function extractPageContent() {
   };
 }
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg?.type === "EXTRACT_PAGE_CONTENT") {
-    sendResponse({
-      ok: true,
-      data: extractPageContent(),
-    });
-    return false;
-  }
+  return { extractPageContent };
+}
 
+if (!globalThis.__aiAssistantPageExtractor) {
+  globalThis.__aiAssistantPageExtractor = aiAssistantPageExtractor;
+}
+
+// Registered unconditionally (not behind the flag above): on re-injection
+// the previously registered listener may be gone or dead, and a duplicate
+// live registration - possible only when this injection races the manifest
+// content script's document_idle registration - is benign, since both
+// listeners extract identical content and the first sendResponse wins.
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type !== "EXTRACT_PAGE_CONTENT") return false;
+  sendResponse({ ok: true, data: globalThis.__aiAssistantPageExtractor().extractPageContent() });
   return false;
 });

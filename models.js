@@ -9,6 +9,14 @@
 // explicitly turned off to reproduce the old deepseek-chat (non-thinking)
 // behavior - see https://api-docs.deepseek.com/guides/thinking_mode.
 //
+// `visionModel` (DeepSeek entries): the vision-capable endpoint swapped in
+// when a request carries attached images, because the regular deepseek-v4-*
+// chat models reject image inputs. streamDeepSeek() in background.js sends
+// it only for image requests; text-only requests still use the user's chosen
+// `apiModel`, and the `thinking` flag is only sent alongside `apiModel`
+// (the vision-exp endpoint does not take it). Previously this endpoint was
+// hard-coded inside streamDeepSeek, invisible in the model table.
+//
 // `provider` picks which branch of background.js handles the request:
 // "deepseek" -> DeepSeek Chat Completions API, "gemini" -> Google's Gemini
 // streamGenerateContent API, "claude" -> Anthropic's Messages API. Existing
@@ -77,9 +85,9 @@
 // same Chat-Completions request/response shape as DeepSeek (messages array and
 // choices[0].delta.content while streaming).
 export const MODELS = [
-  { id: "deepseek-chat", label: "DeepSeek Chat", provider: "deepseek", apiModel: "deepseek-v4-flash", thinking: "disabled" },
-  { id: "deepseek-reasoner", label: "DeepSeek Reasoner", provider: "deepseek", apiModel: "deepseek-v4-flash", thinking: "enabled" },
-  { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", provider: "deepseek", apiModel: "deepseek-v4-pro", thinking: "enabled" },
+  { id: "deepseek-chat", label: "DeepSeek Chat", provider: "deepseek", apiModel: "deepseek-v4-flash", thinking: "disabled", visionModel: "deepseek-v4-flash-vision-exp" },
+  { id: "deepseek-reasoner", label: "DeepSeek Reasoner", provider: "deepseek", apiModel: "deepseek-v4-flash", thinking: "enabled", visionModel: "deepseek-v4-flash-vision-exp" },
+  { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", provider: "deepseek", apiModel: "deepseek-v4-pro", thinking: "enabled", visionModel: "deepseek-v4-flash-vision-exp" },
   { id: "gemini-3.7-flash", label: "Gemini 3.7 Flash", provider: "gemini", apiModel: "gemini-3.7-flash" },
   { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", provider: "gemini", apiModel: "gemini-3.1-pro-preview" },
   { id: "claude-fable-5", label: "Claude Fable 5", provider: "claude", apiModel: "claude-fable-5" },

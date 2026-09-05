@@ -335,6 +335,10 @@ async function extractZipEntries(bytes) {
     }
 
     const flags = readU16le(bytes, offset + 8);
+    // General-purpose bit 0 marks the entry as password-encrypted, which
+    // this reader cannot decrypt - parsing it would yield garbage. Fail
+    // with a clear message instead.
+    if (flags & 1) throw new Error(t(currentLang, "zip_error_encrypted"));
     const method = readU16le(bytes, offset + 10);
     const compressedSize = readU32le(bytes, offset + 20);
     const uncompressedSize = readU32le(bytes, offset + 24);

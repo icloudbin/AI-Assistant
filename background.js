@@ -280,7 +280,13 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
   const { apiKey, customPrompt } = await chrome.storage.local.get(["apiKey", "customPrompt"]);
   if (!apiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "DeepSeek" }));
 
-  const requestModel = images.length ? "deepseek-v4-flash-vision-exp" : model.apiModel;
+  // Image requests swap in the entry's vision-capable model (the regular
+  // deepseek-v4-* chat models reject image inputs); the user's chosen
+  // apiModel is kept for text-only requests, and the `thinking` flag is
+  // only sent alongside apiModel - the vision-exp endpoint does not take
+  // it. See the `visionModel` note in models.js.
+  const useVision = images.length > 0 && !!model.visionModel;
+  const requestModel = useVision ? model.visionModel : model.apiModel;
   const resp = await fetch("https://api.deepseek.com/chat/completions", {
     method: "POST",
     headers: {
@@ -291,7 +297,7 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
       model: requestModel,
       messages: buildMessages(question, pageContext, history, customPrompt, images),
       stream: true,
-      thinking: { type: model.thinking },
+      ...(useVision || !model.thinking ? {} : { thinking: { type: model.thinking } }),
     }),
     signal: ctx.signal,
   });
@@ -369,6 +375,9 @@ async function streamGemini(model, question, pageContext, history, images, ctx) 
 // plain string here) rather than a message with role "system", so
 // buildSystemInstruction is reused unchanged from the Gemini branch above.
 // Unlike DeepSeek/Gemini, `max_tokens` is required by the Messages API.
+// 8192 is requested because adaptive-thinking models draw from the same
+// output budget and 4096 could be consumed entirely by thinking, leaving no
+// visible answer.
 // The SSE stream itself uses named events (message_start,
 // content_block_start, content_block_delta, content_block_stop,
 // message_delta, message_stop, plus periodic pings) instead of
@@ -392,7 +401,7 @@ async function streamClaude(model, question, pageContext, history, images, ctx) 
     },
     body: JSON.stringify({
       model: model.apiModel,
-      max_tokens: 4096,
+      max_tokens: 8192,
       system: buildSystemInstruction(pageContext, customPrompt),
       messages: buildClaudeMessages(question, history, images),
       stream: true,
@@ -535,6 +544,29 @@ function pageContextInstruction(pageContext) {
   return `For this request, "Read current page" is OFF: treat this question as fully independent of any webpage and answer using your own general knowledge only. Do not use, reference, or assume any page content - including anything about a page discussed earlier in this conversation - and do not ask the user which page they mean. This has nothing to do with any attached image or file, which you should still use normally if one is present with this request.`;
 }
 
+// Follow-up requests re-send this extension's stored conversation history
+// verbatim, and text/ZIP attachments ride inside their user message as an
+// [ATTACHMENTS]...[/ATTACHMENTS] block of up to 180,000 characters
+// (MAX_TOTAL_EXTRACTED_CHARS in sidepanel.js). Left untouched, one large
+// upload would be re-sent with every later turn of the same conversation -
+// up to ~16 times. Attachments in the CURRENT request stay untouched (they
+// are passed as `question`); only HISTORY turns get each such block
+// condensed to a bounded preview plus an explicit note: enough for most
+// follow-up questions about an earlier file, while saying clearly that the
+// full text was only provided when the message was first sent. Blocks are
+// re-condensed from the stored original on every request, so the cut never
+// compounds.
+const ATTACHMENTS_BLOCK_RE = /\[ATTACHMENTS\][\s\S]*?\[\/ATTACHMENTS\]/gi;
+const HISTORY_ATTACHMENT_PREVIEW_CHARS = 4000;
+
+function condenseHistoryAttachments(text) {
+  return String(text || "").replace(ATTACHMENTS_BLOCK_RE, (block) => {
+    if (block.length <= HISTORY_ATTACHMENT_PREVIEW_CHARS) return block;
+    const head = block.slice(0, HISTORY_ATTACHMENT_PREVIEW_CHARS).trimEnd();
+    return `${head}\n...[attachment contents truncated to stay within the context budget - the full text was provided when this message was first sent; ask the user to re-attach the file if this excerpt is not enough]\n[/ATTACHMENTS]`;
+  });
+}
+
 // Normalizes conversation history for providers that require strict
 // user/assistant alternation. Claude's Messages API rejects adjacent
 // same-role turns outright, and Gemini's contents have the same expectation.
@@ -551,11 +583,12 @@ function normalizeHistoryTurns(history) {
   const out = [];
   for (const h of history || []) {
     if (!h || (h.role !== "user" && h.role !== "assistant") || typeof h.content !== "string") continue;
+    const content = h.role === "user" ? condenseHistoryAttachments(h.content) : h.content;
     const prev = out[out.length - 1];
     if (prev && prev.role === h.role) {
-      prev.content = `${prev.content}\n\n${h.content}`;
+      prev.content = `${prev.content}\n\n${content}`;
     } else {
-      out.push({ role: h.role, content: h.content });
+      out.push({ role: h.role, content });
     }
   }
   while (out.length && out[0].role === "assistant") out.shift();
