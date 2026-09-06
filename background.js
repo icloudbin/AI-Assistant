@@ -1,6 +1,6 @@
 // background.js (root directory)
 import { findModelById } from "./models.js";
-import { CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "./storage-keys.js";
+import { CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY } from "./storage-keys.js";
 import { getStoredLanguage, t } from "./i18n.js";
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.warn);
