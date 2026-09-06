@@ -110,7 +110,8 @@ const quickSummarizeBtn = document.getElementById("quickSummarizeBtn");
 const quickTranslateBtn = document.getElementById("quickTranslateBtn");
 const quickExplainBtn = document.getElementById("quickExplainBtn");
 const quickKeyPointsBtn = document.getElementById("quickKeyPointsBtn");
-const quickActionButtons = [quickSummarizeBtn, quickTranslateBtn, quickExplainBtn, quickKeyPointsBtn].filter(Boolean);
+const quickFactCheckBtn = document.getElementById("quickFactCheckBtn");
+const quickActionButtons = [quickSummarizeBtn, quickTranslateBtn, quickExplainBtn, quickKeyPointsBtn, quickFactCheckBtn].filter(Boolean);
 
 const COMPOSER_HEIGHT_STORAGE_KEY = "composerHeight";
 const MIN_COMPOSER_HEIGHT = 92;
@@ -2058,6 +2059,12 @@ quickExplainBtn?.addEventListener("click", () => {
 
 quickKeyPointsBtn?.addEventListener("click", () => {
   runQuickPageAction("quickKeyPoints_prompt", "quickKeyPoints_prompt");
+});
+
+quickFactCheckBtn?.addEventListener("click", () => {
+  // Full detailed prompt goes to the API; the short `quickFactCheck_display`
+  // string is what the user sees in the chat bubble, in the display language.
+  runQuickPageAction("quickFactCheck_prompt", "quickFactCheck_display");
 });
 
 questionInput.addEventListener("keydown", (e) => {

@@ -1,6 +1,6 @@
 // background.js (root directory)
 import { findModelById } from "./models.js";
-import { CURRENT_CONVERSATION_KEY, PENDING_CONTEXT_ACTION_KEY, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "./storage-keys.js";
+import { CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "./storage-keys.js";
 import { getStoredLanguage, t } from "./i18n.js";
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.warn);
@@ -9,7 +9,6 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(consol
 // Keep exactly one top-level context-menu item. There is deliberately no
 // parent menu and no other AI Assistant context-menu actions.
 const CONTEXT_MENU_TRANSLATE_ID = "ai-action-translate";
-const CONTEXT_MENU_TRANSLATE_TITLE = "AI assistant-Translate selected text";
 
 function removeAllContextMenus() {
   return new Promise((resolve) => {
@@ -21,16 +20,23 @@ function removeAllContextMenus() {
 }
 
 function createTranslateContextMenu() {
-  return new Promise((resolve, reject) => {
-    chrome.contextMenus.create(
-      { id: CONTEXT_MENU_TRANSLATE_ID, title: CONTEXT_MENU_TRANSLATE_TITLE, contexts: ["selection"] },
-      () => {
-        const error = chrome.runtime.lastError;
-        if (error) reject(new Error(error.message));
-        else resolve();
-      }
-    );
-  });
+  // The title follows the display language chosen on the Settings page
+  // ("AI assistant-" prefix + localized action), resolved at creation time -
+  // rebuildContextMenus() is re-run at install/startup AND whenever that
+  // stored language changes (storage.onChanged listener below), so the menu
+  // re-translates live without a browser restart.
+  return getStoredLanguage().then((lang) =>
+    new Promise((resolve, reject) => {
+      chrome.contextMenus.create(
+        { id: CONTEXT_MENU_TRANSLATE_ID, title: `AI assistant-${t(lang, "contextMenu_translateSelected")}`, contexts: ["selection"] },
+        () => {
+          const error = chrome.runtime.lastError;
+          if (error) reject(new Error(error.message));
+          else resolve();
+        }
+      );
+    })
+  );
 }
 
 let contextMenuRebuild = Promise.resolve();
@@ -50,6 +56,14 @@ function rebuildContextMenus() {
 rebuildContextMenus().catch((err) => console.warn("[AI Assistant] context menu rebuild failed", err));
 chrome.runtime.onInstalled.addListener(() => rebuildContextMenus().catch((err) => console.warn("[AI Assistant] context menu rebuild failed", err)));
 chrome.runtime.onStartup.addListener(() => rebuildContextMenus().catch((err) => console.warn("[AI Assistant] context menu rebuild failed", err)));
+// Live re-translate the menu when the display language is changed on the
+// Settings page (same chrome.storage.onChanged sync pattern the side panel
+// uses for language changes - see the header comment in i18n.js).
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === "local" && changes[LANGUAGE_STORAGE_KEY]) {
+    rebuildContextMenus().catch((err) => console.warn("[AI Assistant] context menu rebuild failed", err));
+  }
+});
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId !== CONTEXT_MENU_TRANSLATE_ID || !info.selectionText?.trim() || !tab?.id) return;
