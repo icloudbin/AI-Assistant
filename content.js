@@ -513,9 +513,25 @@ function extractPageContent() {
 
   const clone = document.body.cloneNode(true);
   readerModeStripNoise(clone);
-  const text = (clone.innerText || clone.textContent || '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  // innerText needs real layout: on a detached clone it degenerates to
+  // textContent (per spec, an element that is not being rendered returns
+  // textContent), which concatenates text nodes with no separators - every
+  // paragraph, heading, and list item would glue together on one line.
+  // Attach the clone off-screen just long enough to read it (the same
+  // pattern as extractReaderModeArticle above), then remove it again; the
+  // live page itself is never modified.
+  const holder = document.createElement('div');
+  holder.style.cssText = 'position:absolute; left:-99999px; top:0;';
+  holder.appendChild(clone);
+  document.body.appendChild(holder);
+  let text = '';
+  try {
+    text = (clone.innerText || clone.textContent || '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  } finally {
+    holder.remove();
+  }
   if (!text) return null;
 
   return {

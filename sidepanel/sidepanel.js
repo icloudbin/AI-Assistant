@@ -1242,8 +1242,9 @@ function startNewTopic() {
 async function loadConversations({ activate = true, syncModel = true } = {}) {
   const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY]);
   conversations = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
-  // Keep at most 20 saved conversations. Conversations are ordered newest-first
-  // whenever they are saved, so entries beyond the limit are the oldest ones.
+  // Keep at most MAX_SAVED_CONVERSATIONS saved conversations. Conversations are
+  // ordered newest-first whenever they are saved, so entries beyond the limit
+  // are the oldest ones.
   conversations = conversations
     .filter((c) => c && c.messages?.length)
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))

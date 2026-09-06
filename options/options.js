@@ -7,7 +7,7 @@ import {
   SUPPORTED_LANGUAGES,
   LANGUAGE_STORAGE_KEY,
 } from "../i18n.js";
-import { MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
+import { HISTORY_STORAGE_KEY, MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
 
 const apiKeyInput = document.getElementById("apiKey");
 const geminiApiKeyInput = document.getElementById("geminiApiKey");
@@ -136,8 +136,6 @@ document.getElementById("save").addEventListener("click", async () => {
   msgEl.textContent = t(currentLang, "save_success");
   setTimeout(() => (msgEl.textContent = ""), 1500);
 });
-
-const HISTORY_STORAGE_KEY = "conversationHistory";
 
 // NOTE ON SCOPE: conversationToText()/makeBackupEntries() below build the
 // plain-text/README content that goes *inside* an exported backup ZIP - a
