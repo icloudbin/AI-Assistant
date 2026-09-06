@@ -54,7 +54,6 @@ const translations = {
     language_label: `Language`,
 
     preferredTranslationLanguage_label: `Preferred Translation Language`,
-    contextMenu_ai: `AI`,
     contextMenu_summarize: `Summarize`,
     contextMenu_translate: `Translate`,
     contextMenu_explain: `Explain`,
@@ -237,7 +236,6 @@ const translations = {
     language_label: `语言`,
 
     preferredTranslationLanguage_label: `首选翻译语言`,
-    contextMenu_ai: `AI`,
     contextMenu_summarize: `总结`,
     contextMenu_translate: `翻译`,
     contextMenu_explain: `解释`,
@@ -416,7 +414,6 @@ const translations = {
     language_label: `語言`,
 
     preferredTranslationLanguage_label: `首選翻譯語言`,
-    contextMenu_ai: `AI`,
     contextMenu_summarize: `摘要`,
     contextMenu_translate: `翻譯`,
     contextMenu_explain: `解釋`,
@@ -595,7 +592,6 @@ const translations = {
     language_label: `Langue`,
 
     preferredTranslationLanguage_label: `Langue de traduction préférée`,
-    contextMenu_ai: `IA`,
     contextMenu_summarize: `Résumer`,
     contextMenu_translate: `Traduire`,
     contextMenu_explain: `Expliquer`,
@@ -774,7 +770,6 @@ const translations = {
     language_label: `言語`,
 
     preferredTranslationLanguage_label: `優先翻訳言語`,
-    contextMenu_ai: `AI`,
     contextMenu_summarize: `要約`,
     contextMenu_translate: `翻訳`,
     contextMenu_explain: `説明`,
@@ -953,7 +948,6 @@ const translations = {
     language_label: `Idioma`,
 
     preferredTranslationLanguage_label: `Idioma de traducción preferido`,
-    contextMenu_ai: `IA`,
     contextMenu_summarize: `Resumir`,
     contextMenu_translate: `Traducir`,
     contextMenu_explain: `Explicar`,

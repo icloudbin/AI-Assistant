@@ -6,98 +6,75 @@ import { getStoredLanguage, t } from "./i18n.js";
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.warn);
 
 // ---------- Webpage selection context menu ----------
-const CONTEXT_MENU_PARENT_ID = "ai-assistant-context";
-const CONTEXT_MENU_ACTIONS = ["summarize", "translate", "explain", "fact-check"];
+// Keep exactly one top-level context-menu item. There is deliberately no
+// parent menu and no other AI Assistant context-menu actions.
+const CONTEXT_MENU_TRANSLATE_ID = "ai-action-translate";
+const CONTEXT_MENU_TRANSLATE_TITLE = "AI assistant-Translate selected text";
 
-// Context-menu rebuilds can be triggered by installation, startup, and language
-// changes close together. Serialize them so two rebuilds never create the same
-// menu IDs at the same time.
+function removeAllContextMenus() {
+  return new Promise((resolve) => {
+    chrome.contextMenus.removeAll(() => {
+      void chrome.runtime.lastError;
+      resolve();
+    });
+  });
+}
+
+function createTranslateContextMenu() {
+  return new Promise((resolve, reject) => {
+    chrome.contextMenus.create(
+      { id: CONTEXT_MENU_TRANSLATE_ID, title: CONTEXT_MENU_TRANSLATE_TITLE, contexts: ["selection"] },
+      () => {
+        const error = chrome.runtime.lastError;
+        if (error) reject(new Error(error.message));
+        else resolve();
+      }
+    );
+  });
+}
+
 let contextMenuRebuild = Promise.resolve();
 
 function rebuildContextMenus() {
   contextMenuRebuild = contextMenuRebuild
     .catch(() => {})
     .then(async () => {
-      const lang = await getStoredLanguage();
-
-      await new Promise((resolve) => {
-        chrome.contextMenus.removeAll(() => resolve());
-      });
-
-      await new Promise((resolve, reject) => {
-        chrome.contextMenus.create({
-          id: CONTEXT_MENU_PARENT_ID,
-          title: t(lang, "contextMenu_ai"),
-          contexts: ["selection"],
-        }, () => {
-          const err = chrome.runtime.lastError;
-          if (err) reject(new Error(err.message));
-          else resolve();
-        });
-      });
-
-      const titles = {
-        summarize: t(lang, "contextMenu_summarize"),
-        translate: t(lang, "contextMenu_translate"),
-        explain: t(lang, "contextMenu_explain"),
-        "fact-check": t(lang, "contextMenu_factCheck"),
-      };
-
-      for (const action of CONTEXT_MENU_ACTIONS) {
-        await new Promise((resolve, reject) => {
-          chrome.contextMenus.create({
-            id: `ai-action-${action}`,
-            parentId: CONTEXT_MENU_PARENT_ID,
-            title: titles[action],
-            contexts: ["selection"],
-          }, () => {
-            const err = chrome.runtime.lastError;
-            if (err) reject(new Error(err.message));
-            else resolve();
-          });
-        });
-      }
+      // Remove every existing context-menu item first. This also removes
+      // legacy nested menus left behind by previous extension versions.
+      await removeAllContextMenus();
+      await createTranslateContextMenu();
     });
-
   return contextMenuRebuild;
 }
 
-chrome.runtime.onInstalled.addListener(() => rebuildContextMenus().catch(console.warn));
-chrome.runtime.onStartup.addListener(() => rebuildContextMenus().catch(console.warn));
-chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName === "local" && changes.languagePreference) {
-    rebuildContextMenus().catch(console.warn);
-  }
-});
+rebuildContextMenus().catch((err) => console.warn("[AI Assistant] context menu rebuild failed", err));
+chrome.runtime.onInstalled.addListener(() => rebuildContextMenus().catch((err) => console.warn("[AI Assistant] context menu rebuild failed", err)));
+chrome.runtime.onStartup.addListener(() => rebuildContextMenus().catch((err) => console.warn("[AI Assistant] context menu rebuild failed", err)));
 
-chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (!info.menuItemId?.startsWith("ai-action-") || !info.selectionText?.trim() || !tab?.id) return;
-  const action = info.menuItemId.slice("ai-action-".length);
-  if (!CONTEXT_MENU_ACTIONS.includes(action)) return;
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId !== CONTEXT_MENU_TRANSLATE_ID || !info.selectionText?.trim() || !tab?.id) return;
 
   const pending = {
-    action,
+    action: "translate",
     text: info.selectionText.trim(),
     tabId: tab.id,
     windowId: tab.windowId,
     url: String(tab.url || ""),
     createdAt: Date.now(),
   };
-  await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: pending });
 
-  // The context-menu click is a user gesture, so open the side panel for the
-  // same tab. Storage is used as the durable hand-off because the side panel
-  // may still be loading when the menu click occurs.
-  try {
-    await chrome.sidePanel.open({ tabId: tab.id });
-  } catch (err) {
-    console.debug("[AI Assistant] Unable to open side panel from context menu:", err);
-  }
-  // If a side panel is already open, deliver the action immediately as well.
-  // The storage record remains as a fallback for a panel that is still loading.
+  // Must be called directly from the context-menu click before any await.
+  chrome.sidePanel.open({ tabId: tab.id }).catch((err) => {
+    console.warn("[AI Assistant] Unable to open side panel from context menu:", err);
+  });
+
+  chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: pending }).catch((err) => {
+    console.warn("[AI Assistant] Unable to store context action:", err);
+  });
+
   setTimeout(() => {
     chrome.runtime.sendMessage({ type: "CONTEXT_ACTION", pending }).catch(() => {});
-  }, 100);
+  }, 200);
 });
 
 
