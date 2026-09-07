@@ -451,6 +451,16 @@ function normalizeRestoredConversation(conversation, index) {
   };
 }
 
+// Mirrors cleanForTopic() in sidepanel.js. Duplicated rather than imported
+// because sidepanel.js touches the DOM at module load, so importing it here
+// would break the options page.
+function cleanForTopic(text) {
+  return String(text || "")
+    .replace(/\[ATTACHMENTS\][\s\S]*?\[\/ATTACHMENTS\]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function makeRestoredTopicTitle(messages) {
   const userTexts = messages
     .filter((m) => m.role === "user")
@@ -795,34 +805,39 @@ async function importSettings() {
     }
 
     // Only accept known keys with sane types; everything else in the file is
-    // ignored. Numbers are legitimate only for composerHeight - accepting
-    // them anywhere else would let a hand-edited file write, say, a number
-    // over an API key. Downstream readers already tolerate unexpected string
-    // values (the language/theme selects normalize unknown entries to their
-    // defaults, sidepanel.js validates selectedModelId against models.js),
-    // so a bad value can at worst restore a default, not break anything.
+    // ignored. Numbers are legitimate only for composerHeight and booleans
+    // only for factCheckWebResearch (the type exportSettings writes) -
+    // accepting them anywhere else would let a hand-edited file write, say,
+    // a number over an API key. Downstream readers already tolerate
+    // unexpected string values (the language/theme selects normalize unknown
+    // entries to their defaults, sidepanel.js validates selectedModelId
+    // against models.js), so a bad value can at worst restore a default,
+    // not break anything.
     const NUMERIC_SETTINGS_KEYS = new Set(["composerHeight"]);
+    const BOOLEAN_SETTINGS_KEYS = new Set(["factCheckWebResearch"]);
     const restored = {};
     for (const key of SETTINGS_BACKUP_KEYS) {
       const value = backup.settings[key];
       if (typeof value === "string" && value) restored[key] = value;
       else if (NUMERIC_SETTINGS_KEYS.has(key) && typeof value === "number" && Number.isFinite(value)) restored[key] = value;
+      else if (BOOLEAN_SETTINGS_KEYS.has(key) && typeof value === "boolean") restored[key] = value;
     }
     if (!Object.keys(restored).length) throw new Error(t(currentLang, "settingsBackup_error_notSettingsBackup"));
 
     await chrome.storage.local.set(restored);
 
-    // The API-key inputs and the prompt textarea are loaded once at page
-    // load and have no storage.onChanged listener, so refresh them by hand.
-    // Language, theme, and preferred translation live-update through the
-    // listeners registered earlier in this file, triggered by the set()
-    // above.
+    // The API-key inputs, the prompt textarea, and the Fact Check checkbox
+    // are loaded once at page load and have no storage.onChanged listener,
+    // so refresh them by hand. Language, theme, and preferred translation
+    // live-update through the listeners registered earlier in this file,
+    // triggered by the set() above.
     apiKeyInput.value = restored.apiKey || "";
     geminiApiKeyInput.value = restored.geminiApiKey || "";
     claudeApiKeyInput.value = restored.claudeApiKey || "";
     openaiApiKeyInput.value = restored.openaiApiKey || "";
     openrouterApiKeyInput.value = restored.openrouterApiKey || "";
     if (restored.customPrompt !== undefined) customPromptInput.value = restored.customPrompt;
+    if (restored.factCheckWebResearch !== undefined) factCheckWebResearchInput.checked = restored.factCheckWebResearch;
 
     msgEl.style.color = "#4ade80";
     msgEl.textContent = t(currentLang, "settingsBackup_import_success");

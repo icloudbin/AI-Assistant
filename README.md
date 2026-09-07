@@ -7,7 +7,7 @@ AI-Assistant/
 ├── content.js
 ├── storage-keys.js
 ├── icons/
-│   └── icon16.png / icon48.png / icon128.png (manifest.json does not currently declare an "icons" field)
+│   └── icon16.png / icon48.png / icon128.png (declared in manifest.json's "icons" and "action.default_icon" fields)
 ├── options/
 │   ├── options.html
 │   └── options.js

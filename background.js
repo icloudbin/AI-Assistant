@@ -284,7 +284,11 @@ const FACT_CHECK_MAX_CLAIMS = 5;
 const FACT_CHECK_RESULTS_PER_CLAIM = 4;
 const FACT_CHECK_MAX_EVIDENCE_CHARS = 18000;
 
-const FACT_CHECK_LANGUAGE_NAMES = {
+// Human-readable names for the display languages offered in Settings
+// (i18n.js SUPPORTED_LANGUAGES). Used by outputLanguageInstruction() to tell
+// the model which language its answer must be written in, and by the Fact
+// Check prompt for the same purpose.
+const OUTPUT_LANGUAGE_NAMES = {
   "en": "English",
   "zh-CN": "Simplified Chinese (简体中文)",
   "zh-TW": "Traditional Chinese (繁體中文)",
@@ -293,8 +297,25 @@ const FACT_CHECK_LANGUAGE_NAMES = {
   "es": "Spanish (Español)",
 };
 
+function outputLanguageName(lang) {
+  return OUTPUT_LANGUAGE_NAMES[lang] || OUTPUT_LANGUAGE_NAMES.en;
+}
+
 function factCheckOutputLanguage(lang) {
-  return FACT_CHECK_LANGUAGE_NAMES[lang] || FACT_CHECK_LANGUAGE_NAMES.en;
+  return outputLanguageName(lang);
+}
+
+// Sent with EVERY request (all five providers), not just Fact Check: the
+// answer language must follow the display language chosen in Settings.
+// Previously only Fact Check carried an explicit output-language
+// requirement, so with e.g. a Japanese UI a quick action - whose API prompt
+// was hard-coded to the English string, with (usually English) page context
+// on top - came back in English or the page's language instead of Japanese.
+// Quoting verbatim page content and code stays in its original language;
+// only the assistant's own prose is constrained, and an explicit translate
+// request always wins for the translated text itself.
+function outputLanguageInstruction(lang) {
+  return `OUTPUT LANGUAGE REQUIREMENT: Respond entirely in ${outputLanguageName(lang)}, the display language the user selected in this extension's settings. This applies to all of your own prose - explanations, summaries, verdicts, and list or table content. Keep source URLs, code, file paths, identifiers, and verbatim quotes in their original language. Do not switch to the language of the webpage, of earlier conversation turns, or of the question itself. The only exception: when the request explicitly asks for a translation into a specific language, the translated text itself must be in that requested target language.`;
 }
 
 function factCheckLanguageInstruction(lang) {
@@ -462,7 +483,7 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
     },
     body: JSON.stringify({
       model: requestModel,
-      messages: buildMessages(question, pageContext, history, customPrompt, images),
+      messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang),
       stream: true,
       ...(useVision || !model.thinking ? {} : { thinking: { type: model.thinking } }),
     }),
@@ -492,7 +513,7 @@ async function streamOpenRouter(model, question, pageContext, history, images, c
     },
     body: JSON.stringify({
       model: model.apiModel,
-      messages: buildMessages(question, pageContext, history, customPrompt, images),
+      messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang),
       stream: true,
     }),
     signal: ctx.signal,
@@ -769,9 +790,12 @@ function normalizeHistoryTurns(history) {
   return out;
 }
 
-function buildMessages(question, pageContext, history, customPrompt, images = []) {
+function buildMessages(question, pageContext, history, customPrompt, images = [], lang) {
   const messages = [
-    { role: "system", content: customPrompt ? `${BASE_PROMPT}\n\nUser-defined instructions:\n${customPrompt}` : BASE_PROMPT },
+    {
+      role: "system",
+      content: `${customPrompt ? `${BASE_PROMPT}\n\nUser-defined instructions:\n${customPrompt}` : BASE_PROMPT}\n\n${outputLanguageInstruction(lang)}`,
+    },
   ];
   for (const h of normalizeHistoryTurns(history)) messages.push({ role: h.role, content: h.content });
   // Put this request's page-context instruction (ON or OFF) immediately
@@ -786,14 +810,14 @@ function buildMessages(question, pageContext, history, customPrompt, images = []
 }
 
 // Gemini has one system_instruction field rather than a list of system
-// messages, so the base prompt, the user's custom prompt, and the
-// page-context instruction are combined into a single instruction block
-// instead. Claude's streamClaude() and OpenAI's streamOpenAI() above reuse
-// this same function for their own top-level `system`/`instructions` string
-// fields.
-function buildSystemInstruction(pageContext, customPrompt) {
+// messages, so the base prompt, the user's custom prompt, the output-language
+// requirement, and the page-context instruction are combined into a single
+// instruction block instead. Claude's streamClaude() and OpenAI's
+// streamOpenAI() above reuse this same function for their own top-level
+// `system`/`instructions` string fields.
+function buildSystemInstruction(pageContext, customPrompt, lang) {
   const text = customPrompt ? `${BASE_PROMPT}\n\nUser-defined instructions:\n${customPrompt}` : BASE_PROMPT;
-  return `${text}\n\n${pageContextInstruction(pageContext)}`;
+  return `${text}\n\n${outputLanguageInstruction(lang)}\n\n${pageContextInstruction(pageContext)}`;
 }
 
 function buildGeminiContents(question, history, images = []) {
