@@ -542,7 +542,7 @@ async function streamGemini(model, question, pageContext, history, images, ctx) 
       "x-goog-api-key": geminiApiKey,
     },
     body: JSON.stringify({
-      system_instruction: { parts: [{ text: buildSystemInstruction(pageContext, customPrompt) }] },
+      system_instruction: { parts: [{ text: buildSystemInstruction(pageContext, customPrompt, ctx.lang) }] },
       contents: buildGeminiContents(question, history, images),
     }),
     signal: ctx.signal,
@@ -590,7 +590,7 @@ async function streamClaude(model, question, pageContext, history, images, ctx) 
     body: JSON.stringify({
       model: model.apiModel,
       max_tokens: 8192,
-      system: buildSystemInstruction(pageContext, customPrompt),
+      system: buildSystemInstruction(pageContext, customPrompt, ctx.lang),
       messages: buildClaudeMessages(question, history, images),
       stream: true,
     }),
@@ -647,7 +647,7 @@ async function streamOpenAI(model, question, pageContext, history, images, ctx) 
     },
     body: JSON.stringify({
       model: model.apiModel,
-      instructions: buildSystemInstruction(pageContext, customPrompt),
+      instructions: buildSystemInstruction(pageContext, customPrompt, ctx.lang),
       input: buildOpenAIInput(question, history, images),
       store: false,
       stream: true,

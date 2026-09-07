@@ -308,3 +308,8 @@ Configure the Tavily Search API key and enable **Use online research for Fact Ch
 
 ## v1.10.36
 - Refined Fact Check Web Research settings layout: the online-research checkbox and label remain on one left-aligned row, the explanatory text follows directly beneath it, and Custom Prompt now uses the same section-title/divider styling as History Management.
+
+
+## Fixed: Gemini/Claude/ChatGPT ignored the display-language output requirement (v1.10.39)
+
+`background.js` sends an `outputLanguageInstruction()` string with every request so answers follow the UI language chosen in Settings, not just for Fact Check. For DeepSeek and OpenRouter this is built into the message list by `buildMessages(..., ctx.lang)`. `streamGemini()`, `streamClaude()`, and `streamOpenAI()` instead build a single system-instruction string via `buildSystemInstruction(pageContext, customPrompt)` — three arguments, but the function's third parameter is `lang`. Because it was never passed, `lang` was `undefined` inside `buildSystemInstruction()`, `outputLanguageName(undefined)` fell back to its `OUTPUT_LANGUAGE_NAMES.en` default, and the instruction sent to these three providers always said "Respond entirely in English," regardless of the selected display language (e.g. Japanese). Fixed by passing `ctx.lang` as the third argument at all three call sites.
