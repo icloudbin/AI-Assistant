@@ -292,3 +292,19 @@ Could not verify against a live Brave install from this sandbox (no browser avai
 ## Rich conversation rendering
 
 Assistant responses are stored as their original Markdown/plain text, but rendered in the side panel as sanitized HTML. Supported formatting includes headings, paragraphs, bold/italic text, links, lists, blockquotes, tables, horizontal rules, inline code, and fenced code blocks. Raw HTML from the model is escaped rather than executed. Normal browser selection/copy operates on the rendered DOM, so copying selected content copies readable text/rich text rather than HTML tags.
+
+
+## Web-grounded Fact Check (v1.10.33)
+
+Fact Check can optionally use Tavily Search to retrieve current web evidence before the selected AI model evaluates the claims. The workflow is intentionally bounded to reduce search cost: up to five candidate factual claims are selected from the current page or highlighted text, each claim gets a basic Tavily news search with up to four results, duplicate URLs are removed, and the resulting evidence is supplied to the AI model with strict instructions not to invent sources.
+
+Configure the Tavily Search API key and enable **Use online research for Fact Check** in Settings. Tavily currently provides a free monthly API-credit allowance; advanced search consumes more credits than basic search, so this implementation uses basic search for the bounded Fact Check workflow.
+
+
+## v1.10.34
+- Fixed Web Research / Fact Check Settings formatting and added a visual divider between the Tavily section and Custom Prompt.
+- Fact Check output is now explicitly required to use the user's selected display language, regardless of the language of the source material.
+
+
+## v1.10.36
+- Refined Fact Check Web Research settings layout: the online-research checkbox and label remain on one left-aligned row, the explanatory text follows directly beneath it, and Custom Prompt now uses the same section-title/divider styling as History Management.

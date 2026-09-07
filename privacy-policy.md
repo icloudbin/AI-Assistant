@@ -8,7 +8,7 @@ AI Assistant ("the Extension") is a browser extension that provides AI assistanc
 
 The Extension stores certain information locally in the user's browser using Chrome's local storage facilities. This may include:
 
-AI provider API keys entered by the user
+AI provider API keys entered by the user, including an optional Tavily Search API key for web-grounded Fact Check
 User-selected AI model and provider settings
 Custom prompts configured by the user
 Interface language and translation preferences
@@ -71,6 +71,7 @@ Custom prompts are stored locally in the user's browser and are not sent to the 
 The Extension does not provide its own AI inference server. Depending on the model selected by the user, requests may be sent directly from the Extension to one of the following third-party services:
 
 DeepSeek — https://api.deepseek.com
+- Tavily — https://api.tavily.com (only when the user enables online Fact Check)
 Google Gemini — https://generativelanguage.googleapis.com
 Anthropic Claude — https://api.anthropic.com
 OpenAI — https://api.openai.com
@@ -123,7 +124,7 @@ The Extension does not share user data with advertisers, data brokers, or analyt
 
 User information may be transmitted to the third-party AI provider explicitly selected by the user, as necessary to fulfill the user's AI request.
 
-The Extension developer does not operate a backend service that receives or stores the user's webpage content, conversations, attached files, or API keys.
+The Extension developer does not operate a backend service that receives or stores the user's webpage content, conversations, attached files, or API keys. When online Fact Check is enabled, selected factual claims are sent directly from the extension service worker to Tavily for web search; the returned search evidence is then sent to the selected AI provider for analysis.
 
 11. Browsing History and Tracking
 

@@ -197,7 +197,7 @@ chrome.runtime.onConnect.addListener((port) => {
     activeAbortController = abortController;
 
     try {
-      const { question, pageContext, includePageContext, history, images = [], modelId, provider, apiModel, thinking } = msg.payload;
+      const { question, pageContext, includePageContext, history, images = [], modelId, provider, apiModel, thinking, factCheck } = msg.payload;
       const lang = await getStoredLanguage();
       // Never trust a stale/accidental pageContext value when the user has
       // disabled "Read current page". This is the final privacy boundary
@@ -236,16 +236,27 @@ chrome.runtime.onConnect.addListener((port) => {
       const normalizedImages = Array.isArray(images) ? images.filter((img) => img && typeof img.dataUrl === "string" && /^data:image\/(jpeg|png|gif|webp);base64,/i.test(img.dataUrl)) : [];
       if (normalizedImages.length !== (Array.isArray(images) ? images.length : 0)) throw new Error(t(lang, "bg_error_imagesEncoding"));
 
+      let effectiveQuestion = question;
+      if (factCheck?.enabled) {
+        const research = await runTavilyFactCheckResearch({
+          question,
+          pageContext: requestPageContext,
+          ctx,
+          selectedText: factCheck.selectedText || "",
+        });
+        effectiveQuestion = research.prompt;
+      }
+
       if (model.provider === "gemini") {
-        await streamGemini(model, question, requestPageContext, history, normalizedImages, ctx);
+        await streamGemini(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "deepseek") {
-        await streamDeepSeek(model, question, requestPageContext, history, normalizedImages, ctx);
+        await streamDeepSeek(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "claude") {
-        await streamClaude(model, question, requestPageContext, history, normalizedImages, ctx);
+        await streamClaude(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "openai") {
-        await streamOpenAI(model, question, requestPageContext, history, normalizedImages, ctx);
+        await streamOpenAI(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "openrouter") {
-        await streamOpenRouter(model, question, requestPageContext, history, normalizedImages, ctx);
+        await streamOpenRouter(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       }
 
       port.postMessage({ type: "DONE", requestId });
@@ -266,6 +277,171 @@ chrome.runtime.onConnect.addListener((port) => {
     }
   });
 });
+
+
+// ---------- Tavily web research for Fact Check ----------
+const FACT_CHECK_MAX_CLAIMS = 5;
+const FACT_CHECK_RESULTS_PER_CLAIM = 4;
+const FACT_CHECK_MAX_EVIDENCE_CHARS = 18000;
+
+const FACT_CHECK_LANGUAGE_NAMES = {
+  "en": "English",
+  "zh-CN": "Simplified Chinese (简体中文)",
+  "zh-TW": "Traditional Chinese (繁體中文)",
+  "fr": "French (Français)",
+  "ja": "Japanese (日本語)",
+  "es": "Spanish (Español)",
+};
+
+function factCheckOutputLanguage(lang) {
+  return FACT_CHECK_LANGUAGE_NAMES[lang] || FACT_CHECK_LANGUAGE_NAMES.en;
+}
+
+function factCheckLanguageInstruction(lang) {
+  return `OUTPUT LANGUAGE REQUIREMENT: Respond entirely in ${factCheckOutputLanguage(lang)}. This applies to the claim text, verdict labels, explanations, overall assessment, and source descriptions. Do not switch to the language used by the webpage or sources. Keep source URLs unchanged.`;
+}
+
+function cleanResearchText(value, max = 800) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function candidateFactClaims(text, title = "") {
+  const sentences = String(text || "")
+    .replace(/\r/g, "\n")
+    .split(/(?<=[.!?。！？])\s+|\n+/)
+    .map((s) => cleanResearchText(s, 700))
+    .filter((s) => s.length >= 35);
+
+  const scored = sentences.map((s, index) => {
+    let score = 0;
+    if (/\b(19|20)\d{2}\b|\b\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}\b/.test(s)) score += 4;
+    if (/\d/.test(s)) score += 3;
+    if (/%|\bpercent\b|\bmillion\b|\bbillion\b|\bthousand\b/i.test(s)) score += 2;
+    if (/\b(according to|reported|announced|said|confirmed|found|study|research|data|official)\b/i.test(s)) score += 2;
+    if (/[“”"']/.test(s)) score += 1;
+    score += Math.max(0, 1 - index / 80);
+    return { text: s, score };
+  });
+
+  const claims = [];
+  if (title && title.length >= 15) claims.push(cleanResearchText(title, 500));
+  for (const item of scored.sort((a, b) => b.score - a.score)) {
+    if (claims.some((c) => c.toLowerCase() === item.text.toLowerCase())) continue;
+    claims.push(item.text);
+    if (claims.length >= FACT_CHECK_MAX_CLAIMS) break;
+  }
+  return claims;
+}
+
+async function tavilySearch(query, apiKey, signal, topic = "news") {
+  const resp = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      query: cleanResearchText(query, 900),
+      topic,
+      search_depth: "basic",
+      max_results: FACT_CHECK_RESULTS_PER_CLAIM,
+      include_answer: false,
+      include_raw_content: false,
+    }),
+    signal,
+  });
+  if (!resp.ok) {
+    const detail = await resp.text();
+    throw new Error(`Tavily HTTP ${resp.status}: ${detail.slice(0, 500)}`);
+  }
+  return resp.json();
+}
+
+async function runTavilyFactCheckResearch({ question, pageContext, ctx, selectedText = "" }) {
+  const stored = await chrome.storage.local.get(["tavilyApiKey", "factCheckWebResearch"]);
+  if (stored.factCheckWebResearch !== true) {
+    return {
+      prompt: `${question}\n\n${factCheckLanguageInstruction(ctx.lang)}\nIMPORTANT: Online web research is disabled in Settings. Do not claim that you verified this against current web sources. Clearly distinguish your own knowledge from verification.`,
+    };
+  }
+  const apiKey = String(stored.tavilyApiKey || "").trim();
+  if (!apiKey) throw new Error(t(ctx.lang, "bg_error_tavilyKeyMissing"));
+
+  const sourceText = selectedText || pageContext?.text || "";
+  const title = selectedText ? "" : (pageContext?.title || "");
+  const claims = selectedText && cleanResearchText(selectedText, 900).length >= 15
+    ? [cleanResearchText(selectedText, 900)]
+    : candidateFactClaims(sourceText, title);
+  if (!claims.length) throw new Error(t(ctx.lang, "bg_error_factCheckNoClaims"));
+
+  const topic = selectedText ? "general" : "news";
+  const settled = await Promise.allSettled(
+    claims.map((claim) => tavilySearch(claim, apiKey, ctx.signal, topic))
+  );
+  const evidence = [];
+  for (let i = 0; i < settled.length; i++) {
+    const result = settled[i];
+    if (result.status !== "fulfilled") {
+      if (result.reason?.name === "AbortError") throw result.reason;
+      continue;
+    }
+    for (const item of result.value?.results || []) {
+      const titleText = cleanResearchText(item.title, 220);
+      const content = cleanResearchText(item.content, 1000);
+      const url = String(item.url || "").trim();
+      if (!url || (!titleText && !content)) continue;
+      evidence.push({
+        claim: claims[i],
+        title: titleText,
+        url,
+        content,
+        published: item.published_date || item.publishedDate || "",
+        score: Number(item.score || 0),
+      });
+    }
+  }
+
+  const byUrl = new Map();
+  for (const item of evidence) {
+    const old = byUrl.get(item.url);
+    if (!old || item.score > old.score) byUrl.set(item.url, item);
+  }
+  const deduped = [...byUrl.values()].sort((a, b) => b.score - a.score);
+  if (!deduped.length) throw new Error(t(ctx.lang, "bg_error_factCheckNoResults"));
+
+  let evidenceText = "";
+  for (const item of deduped) {
+    const block =
+      `CLAIM: ${item.claim}\nSOURCE: ${item.title || item.url}\n` +
+      `PUBLISHED: ${item.published || "unknown"}\nURL: ${item.url}\n` +
+      `EVIDENCE: ${item.content}\n\n`;
+    if (evidenceText.length + block.length > FACT_CHECK_MAX_EVIDENCE_CHARS) break;
+    evidenceText += block;
+  }
+
+  return {
+    prompt: `${question}
+
+You are performing a web-grounded fact check. Fresh web evidence is supplied below by Tavily.
+
+${factCheckLanguageInstruction(ctx.lang)}
+
+Rules:
+1. Evaluate the claims using the supplied evidence, not pretraining knowledge, for time-sensitive facts.
+2. Do not treat a search-result snippet as proof by itself. Compare multiple independent sources when available.
+3. Prefer primary/official sources and reputable journalism over low-quality aggregators.
+4. Pay attention to publication dates and whether a source supports the exact claim.
+5. If evidence conflicts or is insufficient, say "Unverified" or "Conflicting evidence" rather than guessing.
+6. Never invent a source, URL, publication date, quote, or fact.
+7. For each important claim, give: Claim, Verdict (Confirmed / Partially supported / Misleading / False / Unverified), Explanation, and Sources.
+8. End with a short overall assessment of the article/selected text.
+9. Keep source URLs as plain URLs.
+10. The output language requirement above is mandatory even when the evidence or original claim is written in another language.
+
+TAVILY WEB EVIDENCE:
+${evidenceText}`,
+  };
+}
 
 async function streamDeepSeek(model, question, pageContext, history, images, ctx) {
   const { apiKey, customPrompt } = await chrome.storage.local.get(["apiKey", "customPrompt"]);

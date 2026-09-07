@@ -1799,7 +1799,7 @@ if (!SpeechRecognitionCtor) {
   });
 }
 
-async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null) {
+async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "") {
   e?.preventDefault?.();
   const question = forcedQuestion !== null ? String(forcedQuestion).trim() : questionInput.value.trim();
   const attachmentText = attachmentContextText();
@@ -1910,6 +1910,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       provider: selectedModel.provider,
       apiModel: selectedModel.apiModel,
       thinking: selectedModel.thinking,
+      factCheck: factCheck ? { enabled: true, selectedText: factCheckSelectedText } : null,
     },
   });
 
@@ -1969,7 +1970,7 @@ async function processContextAction(pending) {
   // actions display a short prompt rather than their full API wording.
   const preview = pending.text.length > 120 ? `${pending.text.slice(0, 120).trimEnd()}…` : pending.text;
   const displayQuestion = `${instruction}\n${t(lang, "contextAction_highlightedText_label")}:\n${preview}`;
-  await handleSubmit(null, prompt, false, displayQuestion);
+  await handleSubmit(null, prompt, false, displayQuestion, pending.action === "fact-check", pending.action === "fact-check" ? pending.text : "");
 }
 
 // The createdAt timestamp of the context-menu action most recently claimed by
@@ -2038,12 +2039,12 @@ chatForm.addEventListener("submit", handleSubmit);
 // Quick actions always operate on the page that is active at the moment the
 // button is clicked. They deliberately force page context on, so they still
 // work when the manual "Read current page" toggle is unchecked.
-async function runQuickPageAction(apiPromptKey, displayPromptKey) {
+async function runQuickPageAction(apiPromptKey, displayPromptKey, factCheck = false) {
   if (isStreaming) return;
   const lang = currentLang || await getStoredLanguage();
   const apiPrompt = t("en", apiPromptKey);
   const displayPrompt = t(lang, displayPromptKey);
-  await handleSubmit(null, apiPrompt, true, displayPrompt);
+  await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck);
 }
 
 quickSummarizeBtn?.addEventListener("click", () => {
@@ -2065,7 +2066,7 @@ quickKeyPointsBtn?.addEventListener("click", () => {
 quickFactCheckBtn?.addEventListener("click", () => {
   // Full detailed prompt goes to the API; the short `quickFactCheck_display`
   // string is what the user sees in the chat bubble, in the display language.
-  runQuickPageAction("quickFactCheck_prompt", "quickFactCheck_display");
+  runQuickPageAction("quickFactCheck_prompt", "quickFactCheck_display", true);
 });
 
 questionInput.addEventListener("keydown", (e) => {

@@ -141,3 +141,45 @@ button.secondary {
 .status.ok { color: #4ade80; }
 .status.error { color: #f55b5b; }
 
+
+/* Web Research / Fact Check */
+.web-research-section {
+  padding: 14px 0 18px;
+}
+
+.web-research-section .history-management-title {
+  margin-bottom: 2px;
+}
+
+.settings-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 0;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 0;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+}
+.checkbox-row input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
+
+.custom-prompt-section {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.custom-prompt-section .history-management-title {
+  margin-bottom: 8px;
+}
+.custom-prompt-field {
+  margin-bottom: 0;
+}

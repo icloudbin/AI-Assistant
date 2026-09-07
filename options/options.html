@@ -57,6 +57,57 @@
   .language-section select { margin-top: 6px; }
   .language-section label { margin-top: 14px; }
   .version-number { margin-top: 6px; font-size: 13px; color: var(--muted); }
+
+  /* Web Research / Fact Check */
+  .web-research-section {
+    padding: 14px 0 6px;
+  }
+  .web-research-section .history-management-title {
+    margin-bottom: 2px;
+  }
+  .web-research-section .field {
+    margin-bottom: 0;
+  }
+  /* Keep the checkbox and its wording on one left-aligned line. */
+  .checkbox-row {
+    display: grid !important;
+    grid-template-columns: 16px max-content;
+    align-items: center;
+    justify-content: start;
+    width: max-content !important;
+    max-width: 100%;
+    gap: 6px;
+    margin: 12px 0 0;
+    padding: 0;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.4;
+  }
+  .checkbox-row input[type="checkbox"] {
+    display: block !important;
+    width: 13px !important;
+    min-width: 13px !important;
+    max-width: 13px !important;
+    height: 13px;
+    min-height: 13px;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  .checkbox-row span {
+    display: block;
+    margin: 0;
+    padding: 0;
+    line-height: 1.4;
+    white-space: nowrap;
+  }
+  .web-research-section + .settings-divider {
+    margin: 0;
+  }
+  .custom-prompt-section {
+    margin-top: 0 !important;
+    padding-top: 12px !important;
+  }
   .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none; align-items: center; justify-content: center; z-index: 1000; }
   .modal-backdrop.show { display: flex; }
   .confirm-modal { width: 340px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: 0 18px 60px rgba(0,0,0,.45); }
@@ -99,10 +150,26 @@
       <label for="openrouterApiKey" data-i18n="apiKey_openrouter_label">OpenRouter API Key</label>
       <input id="openrouterApiKey" type="password" placeholder="sk-or-..." autocomplete="off" />
     </div>
-    <div class="field">
-      <label for="customPrompt" data-i18n="customPrompt_label">Custom Prompt</label>
-      <textarea id="customPrompt" placeholder="Example: You are a concise technical assistant. Always answer in English, use bullet points when helpful, and clearly distinguish facts from assumptions." data-i18n-placeholder="customPrompt_placeholder"></textarea>
-      <div class="hint" data-i18n="customPrompt_hint">This prompt is sent to the selected model (DeepSeek, Gemini, Claude, ChatGPT, or OpenRouter) as a system instruction and can customize how the assistant interprets requests and formats its responses.</div>
+    <div class="web-research-section">
+      <div class="history-management-title" data-i18n="webResearch_title">Web Research</div>
+      <div class="field">
+        <label for="tavilyApiKey" data-i18n="tavilyApiKey_label">Tavily Search API Key</label>
+        <input id="tavilyApiKey" type="password" placeholder="tvly-..." autocomplete="off" />
+      </div>
+      <label class="checkbox-row">
+        <input id="factCheckWebResearch" type="checkbox" />
+        <span data-i18n="factCheckWebResearch_label">Use online research for Fact Check</span>
+      </label>
+      <div class="hint backup-hint" data-i18n="webResearch_hint">When enabled, Fact Check sends claims to Tavily to retrieve current web sources, then sends the evidence to the selected AI model for analysis. The Tavily key is stored locally.</div>
+    </div>
+    <div class="settings-divider" aria-hidden="true"></div>
+
+    <div class="history-management custom-prompt-section">
+      <div class="history-management-title" data-i18n="customPrompt_label">Custom Prompt</div>
+      <div class="field custom-prompt-field">
+        <textarea id="customPrompt" placeholder="Example: You are a concise technical assistant. Always answer in English, use bullet points when helpful, and clearly distinguish facts from assumptions." data-i18n-placeholder="customPrompt_placeholder"></textarea>
+        <div class="hint backup-hint" data-i18n="customPrompt_hint">This prompt is sent to the selected model (DeepSeek, Gemini, Claude, ChatGPT, or OpenRouter) as a system instruction and can customize how the assistant interprets requests and formats its responses.</div>
+      </div>
     </div>
     <div class="actions">
       <button id="save" data-i18n="save_button">Save</button>

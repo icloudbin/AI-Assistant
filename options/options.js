@@ -14,6 +14,8 @@ const geminiApiKeyInput = document.getElementById("geminiApiKey");
 const claudeApiKeyInput = document.getElementById("claudeApiKey");
 const openaiApiKeyInput = document.getElementById("openaiApiKey");
 const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
+const tavilyApiKeyInput = document.getElementById("tavilyApiKey");
+const factCheckWebResearchInput = document.getElementById("factCheckWebResearch");
 const customPromptInput = document.getElementById("customPrompt");
 const msgEl = document.getElementById("msg");
 const backupHistoryBtn = document.getElementById("backupHistory");
@@ -101,13 +103,15 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 loadLanguage();
 
 chrome.storage.local.get(
-  ["apiKey", "geminiApiKey", "claudeApiKey", "openaiApiKey", "openrouterApiKey", "customPrompt"],
-  ({ apiKey, geminiApiKey, claudeApiKey, openaiApiKey, openrouterApiKey, customPrompt }) => {
+  ["apiKey", "geminiApiKey", "claudeApiKey", "openaiApiKey", "openrouterApiKey", "tavilyApiKey", "factCheckWebResearch", "customPrompt"],
+  ({ apiKey, geminiApiKey, claudeApiKey, openaiApiKey, openrouterApiKey, tavilyApiKey, factCheckWebResearch, customPrompt }) => {
     if (apiKey) apiKeyInput.value = apiKey;
     if (geminiApiKey) geminiApiKeyInput.value = geminiApiKey;
     if (claudeApiKey) claudeApiKeyInput.value = claudeApiKey;
     if (openaiApiKey) openaiApiKeyInput.value = openaiApiKey;
     if (openrouterApiKey) openrouterApiKeyInput.value = openrouterApiKey;
+    if (tavilyApiKey) tavilyApiKeyInput.value = tavilyApiKey;
+    factCheckWebResearchInput.checked = factCheckWebResearch === true;
     if (customPrompt) customPromptInput.value = customPrompt;
   }
 );
@@ -118,6 +122,8 @@ document.getElementById("save").addEventListener("click", async () => {
   const claudeKey = claudeApiKeyInput.value.trim();
   const openaiKey = openaiApiKeyInput.value.trim();
   const openrouterKey = openrouterApiKeyInput.value.trim();
+  const tavilyKey = tavilyApiKeyInput.value.trim();
+  const factCheckWebResearch = factCheckWebResearchInput.checked;
   const customPrompt = customPromptInput.value.trim();
   if (!key && !geminiKey && !claudeKey && !openaiKey && !openrouterKey) {
     msgEl.style.color = "#f55b5b";
@@ -130,6 +136,8 @@ document.getElementById("save").addEventListener("click", async () => {
     claudeApiKey: claudeKey,
     openaiApiKey: openaiKey,
     openrouterApiKey: openrouterKey,
+    tavilyApiKey: tavilyKey,
+    factCheckWebResearch,
     customPrompt,
   });
   msgEl.style.color = "#4ade80";
@@ -707,6 +715,8 @@ const SETTINGS_BACKUP_KEYS = [
   "claudeApiKey",
   "openaiApiKey",
   "openrouterApiKey",
+  "tavilyApiKey",
+  "factCheckWebResearch",
   "customPrompt",
   THEME_STORAGE_KEY,
   LANGUAGE_STORAGE_KEY,
