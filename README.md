@@ -25,6 +25,12 @@ AI-Assistant/
 3. Click the toolbar icon to open the side panel; click "Settings" to paste and save an API key
 4. After changing code: reload the extension card; reopen the side panel; refresh existing web pages
 
+## Fixed: complete Amazon product context (v1.10.40)
+
+The old 20,000-character page-context cap could discard product details located later in a long Amazon page. Page capture, side-panel forwarding, and the final provider prompt now consistently allow up to 120,000 characters.
+
+Amazon product pages additionally collect the title, feature bullets, product description, A+ content, overview, detail bullets, and product-detail tables before appending cleaned full-page text. This gives product information priority without excluding questions about other readable page content. Collapsed Amazon product modules are included deliberately, so their text is available without requiring the user to expand every panel.
+
 ## Updating to a newer version without losing settings (v1.10.26+)
 
 All user data (API keys, theme, language, custom prompt, saved model choice, conversation history) lives in `chrome.storage.local`, which Chrome persists per **extension ID**. Before v1.10.26, `manifest.json` had no `"key"` field, so for a "Load unpacked" install Chrome derived the extension ID from a hash of the **absolute folder path**. Loading each updated download from a new folder (e.g. `AI-Assistant-main`, then `AI-Assistant-main (2)`, ...) produced a *different* ID, so Chrome treated the update as a brand-new extension with empty storage — which is why every update appeared to reset all settings.

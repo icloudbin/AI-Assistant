@@ -3,7 +3,7 @@
 // Extract the current page context, tried in this order:
 //   1. Synology MailPlus - a dynamic ExtJS panel; the message body isn't
 //      reachable via plain document.body.innerText, and its mail list can
-//      be much larger than the extension's 20,000-character page-context
+//      be much larger than the extension's page-context
 //      limit (handled below).
 //   2. Proton Mail - the message body renders inside a sandboxed <iframe>,
 //      isolating any script embedded in the email's own HTML from the mail
@@ -154,10 +154,13 @@ function extractProtonMail() {
   };
 }
 
-// Page-context text is capped at this many characters everywhere below -
-// factored out since the reader-mode extractor now applies the same cap
-// the plain fallback always has.
-const PAGE_CONTEXT_CHAR_LIMIT = 20000;
+// Keep enough text to cover a complete ordinary webpage instead of keeping
+// only its first screenful. The former 20,000-character limit regularly cut
+// off content lower on ecommerce pages (including Amazon product bullets),
+// before it could reach the model. 120,000 characters is about 30,000 English
+// tokens: large enough for a full product page while still leaving room for
+// the user's question, instructions, and conversation history.
+const PAGE_CONTEXT_CHAR_LIMIT = 120000;
 
 // A result only counts as a usable "article" if it clears this much text -
 // otherwise extractReaderModeArticle() returns null and the caller falls
@@ -488,6 +491,84 @@ function extractReaderModeArticle() {
   };
 }
 
+// Amazon's product facts are distributed across several independent page
+// modules rather than one article-shaped container. Put every product module
+// before the cleaned full-page text so facts below a long navigation, offer,
+// or recommendation section are never lost merely because they appear late in
+// document order. textContent is intentional for these known product modules:
+// Amazon keeps some details in collapsed panels, which innerText omits until a
+// user expands them. Scripts, styles, and common page chrome are removed from
+// the clone before it is read.
+function extractAmazonProductPage() {
+  const host = String(location.hostname || '').toLowerCase();
+  if (!/(^|\.)amazon\.[a-z.]+$/.test(host)) return null;
+
+  const sectionSelectors = [
+    '#productTitle',
+    '#feature-bullets',
+    '#productDescription',
+    '#productDescription_feature_div',
+    '#aplus',
+    '#aplus_feature_div',
+    '#aplus3p_feature_div',
+    '#productOverview_feature_div',
+    '#detailBulletsWrapper_feature_div',
+    '#detailBullets_feature_div',
+    '#prodDetails',
+    '#productDetails_feature_div',
+    '#productDetails_db_sections',
+    '#productFactsDesktopExpander',
+    '#productFactsMobileExpander',
+  ];
+  const seen = new Set();
+  const sections = [];
+
+  for (const selector of sectionSelectors) {
+    for (const el of document.querySelectorAll(selector)) {
+      if (seen.has(el)) continue;
+      seen.add(el);
+      const clone = el.cloneNode(true);
+      readerModeStripNoise(clone);
+      const text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text) sections.push(text);
+    }
+  }
+  if (!sections.length) return null;
+
+  // Preserve a cleaned representation of the rest of the page as well. This
+  // lets questions about material outside the standard product modules still
+  // use the full page, while product facts remain at the front of the context.
+  const bodyClone = document.body?.cloneNode(true);
+  let fullPageText = '';
+  if (bodyClone) {
+    readerModeStripNoise(bodyClone);
+    const holder = document.createElement('div');
+    holder.style.cssText = 'position:absolute; left:-99999px; top:0;';
+    holder.appendChild(bodyClone);
+    document.body.appendChild(holder);
+    try {
+      fullPageText = (bodyClone.innerText || bodyClone.textContent || '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    } finally {
+      holder.remove();
+    }
+  }
+
+  const text = [
+    'AMAZON PRODUCT INFORMATION:',
+    sections.join('\n\n'),
+    fullPageText ? `FULL READABLE PAGE:\n${fullPageText}` : '',
+  ].filter(Boolean).join('\n\n');
+
+  return {
+    source: 'amazon-product',
+    title: document.title,
+    url: location.href,
+    text: text.slice(0, PAGE_CONTEXT_CHAR_LIMIT),
+  };
+}
+
 function extractPageContent() {
   const mailPlus = extractSynologyMailPlus();
   if (mailPlus) return mailPlus;
@@ -500,6 +581,9 @@ function extractPageContent() {
 
   const synologyCommunity = extractSynologyCommunity();
   if (synologyCommunity) return synologyCommunity;
+
+  const amazonProduct = extractAmazonProductPage();
+  if (amazonProduct) return amazonProduct;
 
   const readerMode = extractReaderModeArticle();
   if (readerMode) return readerMode;

@@ -907,6 +907,11 @@ function stopActiveRequest() {
   setStreaming(false);
 }
 
+// This must match content.js and background.js. Keeping the value here avoids
+// silently reintroducing a smaller truncation after the content script has
+// already captured the full readable page.
+const MAX_PAGE_CONTEXT_CHARS = 120000;
+
 async function getCurrentActiveTab() {
   // A side panel can remain alive while the user changes tabs. Do not use the
   // panel's window or a cached tab. Query all active tabs and select the active
@@ -958,7 +963,7 @@ async function getActivePageContext(retryCount = 0) {
       tabId: initialTabId,
       title: String(data?.title || tab.title || ""),
       url: String(data?.url || initialUrl || ""),
-      text: text.slice(0, 20000),
+      text: text.slice(0, MAX_PAGE_CONTEXT_CHARS),
     };
   };
 
