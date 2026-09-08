@@ -25,6 +25,10 @@ AI-Assistant/
 3. Click the toolbar icon to open the side panel; click "Settings" to paste and save an API key
 4. After changing code: reload the extension card; reopen the side panel; refresh existing web pages
 
+## Added: automatic web research for unanswered page questions (v1.10.41)
+
+The extension now checks whether the current page covers a question's important terms and requested years before calling the selected AI model. When it does not, it sends the user's question to Tavily Search and supplies the returned web evidence to the model. This is topic-independent: no product, make, model, or website is hard-coded. A configured Tavily Search API key remains required. The response language continues to follow the extension's display-language setting.
+
 ## Fixed: complete Amazon product context (v1.10.40)
 
 The old 20,000-character page-context cap could discard product details located later in a long Amazon page. Page capture, side-panel forwarding, and the final provider prompt now consistently allow up to 120,000 characters.

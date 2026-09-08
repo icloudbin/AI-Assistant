@@ -245,6 +245,16 @@ chrome.runtime.onConnect.addListener((port) => {
           selectedText: factCheck.selectedText || "",
         });
         effectiveQuestion = research.prompt;
+      } else {
+        // Normal questions use web research only when the current page cannot
+        // cover their key conditions. This avoids a separate mode switch while
+        // preserving local-only answers for questions the page already covers.
+        const research = await runTavilyQuestionResearch({
+          question,
+          pageContext: requestPageContext,
+          ctx,
+        });
+        if (research) effectiveQuestion = research.prompt;
       }
 
       if (model.provider === "gemini") {
@@ -354,7 +364,7 @@ function candidateFactClaims(text, title = "") {
   return claims;
 }
 
-async function tavilySearch(query, apiKey, signal, topic = "news") {
+async function tavilySearch(query, apiKey, signal, topic = "news", maxResults = FACT_CHECK_RESULTS_PER_CLAIM) {
   const resp = await fetch("https://api.tavily.com/search", {
     method: "POST",
     headers: {
@@ -365,7 +375,7 @@ async function tavilySearch(query, apiKey, signal, topic = "news") {
       query: cleanResearchText(query, 900),
       topic,
       search_depth: "basic",
-      max_results: FACT_CHECK_RESULTS_PER_CLAIM,
+      max_results: maxResults,
       include_answer: false,
       include_raw_content: false,
     }),
@@ -378,13 +388,92 @@ async function tavilySearch(query, apiKey, signal, topic = "news") {
   return resp.json();
 }
 
-async function runTavilyFactCheckResearch({ question, pageContext, ctx, selectedText = "" }) {
-  const stored = await chrome.storage.local.get(["tavilyApiKey", "factCheckWebResearch"]);
-  if (stored.factCheckWebResearch !== true) {
-    return {
-      prompt: `${question}\n\n${factCheckLanguageInstruction(ctx.lang)}\nIMPORTANT: Online web research is disabled in Settings. Do not claim that you verified this against current web sources. Clearly distinguish your own knowledge from verification.`,
-    };
+const ONLINE_RESEARCH_MAX_RESULTS = 6;
+const ONLINE_RESEARCH_MAX_EVIDENCE_CHARS = 18000;
+const ONLINE_RESEARCH_REQUEST_PATTERN =
+  /\b(search|research|look up|browse|latest|current|up[- ]to[- ]date|newest|official)\b|联网|搜索|检索|查找|最新|当前|官网|官方/i;
+const ONLINE_RESEARCH_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'can', 'do', 'does', 'for', 'how', 'i', 'in',
+  'is', 'it', 'of', 'on', 'or', 'the', 'to', 'what', 'when', 'where', 'which',
+  'who', 'why', 'with', '请问', '什么', '如何', '是否', '有', '和', '的', '了', '吗',
+]);
+
+// Decide before the model request whether the page can answer the question.
+// This is deliberately content-based, not topic-based: any missing year,
+// product name, version, or other key term can cause research, while a page
+// that already covers the question remains local. A streamed model reply
+// cannot be safely inspected and retried after it has already been shown, so
+// this preflight is the reliable point to make the automatic decision.
+function needsOnlineResearch(question, pageContext) {
+  const query = String(question || '').normalize('NFKC').toLowerCase();
+  if (query.length < 3) return false;
+
+  const pageText = String(pageContext?.text || '').normalize('NFKC').toLowerCase();
+  if (ONLINE_RESEARCH_REQUEST_PATTERN.test(query)) return true;
+
+  const years = [...new Set(query.match(/\b20\d{2}\b/g) || [])];
+  if (years.some((year) => !pageText.includes(year))) return true;
+
+  const terms = [...new Set(query.match(/[\p{L}\p{N}][\p{L}\p{N}-]{1,}/gu) || [])]
+    .filter((term) => !ONLINE_RESEARCH_STOP_WORDS.has(term));
+  if (!terms.length) return false;
+  if (!pageText) return true;
+
+  const covered = terms.filter((term) => pageText.includes(term)).length;
+  return covered / terms.length < 0.6;
+}
+
+async function runTavilyQuestionResearch({ question, pageContext, ctx }) {
+  if (!needsOnlineResearch(question, pageContext)) return null;
+
+  const stored = await chrome.storage.local.get(['tavilyApiKey']);
+  const apiKey = String(stored.tavilyApiKey || '').trim();
+  if (!apiKey) throw new Error(t(ctx.lang, 'bg_error_tavilyKeyMissing'));
+
+  // The user question is the query. Do not derive it from the open page, so
+  // a request for a newer version can discover sources that the old page has
+  // no reason to mention.
+  const result = await tavilySearch(question, apiKey, ctx.signal, 'general', ONLINE_RESEARCH_MAX_RESULTS);
+  const byUrl = new Map();
+  for (const item of result?.results || []) {
+    const url = String(item.url || '').trim();
+    const title = cleanResearchText(item.title, 220);
+    const content = cleanResearchText(item.content, 1400);
+    if (!url || (!title && !content)) continue;
+    const prior = byUrl.get(url);
+    if (!prior || Number(item.score || 0) > prior.score) {
+      byUrl.set(url, {
+        title,
+        url,
+        content,
+        published: item.published_date || item.publishedDate || '',
+        score: Number(item.score || 0),
+      });
+    }
   }
+
+  const sources = [...byUrl.values()].sort((a, b) => b.score - a.score);
+  if (!sources.length) throw new Error(t(ctx.lang, 'bg_error_factCheckNoResults'));
+
+  let evidenceText = '';
+  for (const source of sources) {
+    const block =
+      `SOURCE: ${source.title || source.url}\n` +
+      `PUBLISHED: ${source.published || 'unknown'}\n` +
+      `URL: ${source.url}\n` +
+      `EVIDENCE: ${source.content}\n\n`;
+    if (evidenceText.length + block.length > ONLINE_RESEARCH_MAX_EVIDENCE_CHARS) break;
+    evidenceText += block;
+  }
+  if (!evidenceText) throw new Error(t(ctx.lang, 'bg_error_factCheckNoResults'));
+
+  return {
+    prompt: `${question}\n\nONLINE RESEARCH EVIDENCE:\n${evidenceText}\nAnswer the user's question using the supplied evidence for time-sensitive or missing-page facts. Do not infer a newer version from an older page. Prefer official sources when the evidence identifies them. If the sources do not establish the answer, say that it is unverified. Cite the supplied source URLs and do not invent sources, dates, specifications, or quotes.`,
+  };
+}
+
+async function runTavilyFactCheckResearch({ question, pageContext, ctx, selectedText = "" }) {
+  const stored = await chrome.storage.local.get(["tavilyApiKey"]);
   const apiKey = String(stored.tavilyApiKey || "").trim();
   if (!apiKey) throw new Error(t(ctx.lang, "bg_error_tavilyKeyMissing"));
 

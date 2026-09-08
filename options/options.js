@@ -15,7 +15,6 @@ const claudeApiKeyInput = document.getElementById("claudeApiKey");
 const openaiApiKeyInput = document.getElementById("openaiApiKey");
 const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
 const tavilyApiKeyInput = document.getElementById("tavilyApiKey");
-const factCheckWebResearchInput = document.getElementById("factCheckWebResearch");
 const customPromptInput = document.getElementById("customPrompt");
 const msgEl = document.getElementById("msg");
 const backupHistoryBtn = document.getElementById("backupHistory");
@@ -103,15 +102,14 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 loadLanguage();
 
 chrome.storage.local.get(
-  ["apiKey", "geminiApiKey", "claudeApiKey", "openaiApiKey", "openrouterApiKey", "tavilyApiKey", "factCheckWebResearch", "customPrompt"],
-  ({ apiKey, geminiApiKey, claudeApiKey, openaiApiKey, openrouterApiKey, tavilyApiKey, factCheckWebResearch, customPrompt }) => {
+  ["apiKey", "geminiApiKey", "claudeApiKey", "openaiApiKey", "openrouterApiKey", "tavilyApiKey", "customPrompt"],
+  ({ apiKey, geminiApiKey, claudeApiKey, openaiApiKey, openrouterApiKey, tavilyApiKey, customPrompt }) => {
     if (apiKey) apiKeyInput.value = apiKey;
     if (geminiApiKey) geminiApiKeyInput.value = geminiApiKey;
     if (claudeApiKey) claudeApiKeyInput.value = claudeApiKey;
     if (openaiApiKey) openaiApiKeyInput.value = openaiApiKey;
     if (openrouterApiKey) openrouterApiKeyInput.value = openrouterApiKey;
     if (tavilyApiKey) tavilyApiKeyInput.value = tavilyApiKey;
-    factCheckWebResearchInput.checked = factCheckWebResearch === true;
     if (customPrompt) customPromptInput.value = customPrompt;
   }
 );
@@ -123,7 +121,6 @@ document.getElementById("save").addEventListener("click", async () => {
   const openaiKey = openaiApiKeyInput.value.trim();
   const openrouterKey = openrouterApiKeyInput.value.trim();
   const tavilyKey = tavilyApiKeyInput.value.trim();
-  const factCheckWebResearch = factCheckWebResearchInput.checked;
   const customPrompt = customPromptInput.value.trim();
   if (!key && !geminiKey && !claudeKey && !openaiKey && !openrouterKey) {
     msgEl.style.color = "#f55b5b";
@@ -137,7 +134,6 @@ document.getElementById("save").addEventListener("click", async () => {
     openaiApiKey: openaiKey,
     openrouterApiKey: openrouterKey,
     tavilyApiKey: tavilyKey,
-    factCheckWebResearch,
     customPrompt,
   });
   msgEl.style.color = "#4ade80";
@@ -806,7 +802,7 @@ async function importSettings() {
 
     // Only accept known keys with sane types; everything else in the file is
     // ignored. Numbers are legitimate only for composerHeight and booleans
-    // only for factCheckWebResearch (the type exportSettings writes) -
+    // only for legacy factCheckWebResearch backups (the type exportSettings writes) -
     // accepting them anywhere else would let a hand-edited file write, say,
     // a number over an API key. Downstream readers already tolerate
     // unexpected string values (the language/theme selects normalize unknown
@@ -826,8 +822,8 @@ async function importSettings() {
 
     await chrome.storage.local.set(restored);
 
-    // The API-key inputs, the prompt textarea, and the Fact Check checkbox
-    // are loaded once at page load and have no storage.onChanged listener,
+    // The API-key inputs and prompt textarea are loaded once at page load
+    // and have no storage.onChanged listener,
     // so refresh them by hand. Language, theme, and preferred translation
     // live-update through the listeners registered earlier in this file,
     // triggered by the set() above.
@@ -837,7 +833,6 @@ async function importSettings() {
     openaiApiKeyInput.value = restored.openaiApiKey || "";
     openrouterApiKeyInput.value = restored.openrouterApiKey || "";
     if (restored.customPrompt !== undefined) customPromptInput.value = restored.customPrompt;
-    if (restored.factCheckWebResearch !== undefined) factCheckWebResearchInput.checked = restored.factCheckWebResearch;
 
     msgEl.style.color = "#4ade80";
     msgEl.textContent = t(currentLang, "settingsBackup_import_success");

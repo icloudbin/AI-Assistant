@@ -160,11 +160,7 @@
         <label for="tavilyApiKey" data-i18n="tavilyApiKey_label">Tavily Search API Key</label>
         <input id="tavilyApiKey" type="password" placeholder="tvly-..." autocomplete="off" />
       </div>
-      <label class="checkbox-row">
-        <input id="factCheckWebResearch" type="checkbox" />
-        <span data-i18n="factCheckWebResearch_label">Use online research for Fact Check</span>
-      </label>
-      <div class="hint backup-hint" data-i18n="webResearch_hint">When enabled, Fact Check sends claims to Tavily to retrieve current web sources, then sends the evidence to the selected AI model for analysis. The Tavily key is stored locally.</div>
+      <div class="hint backup-hint" data-i18n="webResearch_hint">When the current webpage cannot answer a question, the extension automatically sends the question to Tavily to retrieve current web sources, then sends the evidence to the selected AI model. The Tavily key is stored locally.</div>
     </div>
     <div class="settings-divider" aria-hidden="true"></div>
 
