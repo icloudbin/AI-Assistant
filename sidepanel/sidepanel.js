@@ -1804,7 +1804,7 @@ if (!SpeechRecognitionCtor) {
   });
 }
 
-async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "") {
+async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "", noWebResearch = false) {
   e?.preventDefault?.();
   const question = forcedQuestion !== null ? String(forcedQuestion).trim() : questionInput.value.trim();
   const attachmentText = attachmentContextText();
@@ -1916,6 +1916,10 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       apiModel: selectedModel.apiModel,
       thinking: selectedModel.thinking,
       factCheck: factCheck ? { enabled: true, selectedText: factCheckSelectedText } : null,
+      // Predefined page/selection transforms (Summarize, Translate, Explain,
+      // Key Points and their context-menu equivalents) never need web
+      // research - background.js skips its automatic Tavily lookup for them.
+      noWebResearch,
     },
   });
 
@@ -1975,7 +1979,7 @@ async function processContextAction(pending) {
   // actions display a short prompt rather than their full API wording.
   const preview = pending.text.length > 120 ? `${pending.text.slice(0, 120).trimEnd()}…` : pending.text;
   const displayQuestion = `${instruction}\n${t(lang, "contextAction_highlightedText_label")}:\n${preview}`;
-  await handleSubmit(null, prompt, false, displayQuestion, pending.action === "fact-check", pending.action === "fact-check" ? pending.text : "");
+  await handleSubmit(null, prompt, false, displayQuestion, pending.action === "fact-check", pending.action === "fact-check" ? pending.text : "", pending.action !== "fact-check");
 }
 
 // The createdAt timestamp of the context-menu action most recently claimed by
@@ -2049,7 +2053,9 @@ async function runQuickPageAction(apiPromptKey, displayPromptKey, factCheck = fa
   const lang = currentLang || await getStoredLanguage();
   const apiPrompt = t("en", apiPromptKey);
   const displayPrompt = t(lang, displayPromptKey);
-  await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck);
+  // Fact Check keeps its own Tavily path (factCheck flag); the other quick
+  // actions are page-only transforms, so they suppress web research.
+  await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck, "", !factCheck);
 }
 
 quickSummarizeBtn?.addEventListener("click", () => {

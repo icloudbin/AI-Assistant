@@ -197,7 +197,7 @@ chrome.runtime.onConnect.addListener((port) => {
     activeAbortController = abortController;
 
     try {
-      const { question, pageContext, includePageContext, history, images = [], modelId, provider, apiModel, thinking, factCheck } = msg.payload;
+      const { question, pageContext, includePageContext, history, images = [], modelId, provider, apiModel, thinking, factCheck, noWebResearch = false } = msg.payload;
       const lang = await getStoredLanguage();
       // Never trust a stale/accidental pageContext value when the user has
       // disabled "Read current page". This is the final privacy boundary
@@ -245,10 +245,21 @@ chrome.runtime.onConnect.addListener((port) => {
           selectedText: factCheck.selectedText || "",
         });
         effectiveQuestion = research.prompt;
-      } else {
+      } else if (!noWebResearch) {
         // Normal questions use web research only when the current page cannot
         // cover their key conditions. This avoids a separate mode switch while
         // preserving local-only answers for questions the page already covers.
+        //
+        // noWebResearch is sent by the predefined page/selection transforms
+        // (quick actions Summarize/Translate/Explain/Key Points and their
+        // context-menu equivalents): those operate purely on the supplied
+        // page or selection text and never need web evidence, so Tavily is
+        // skipped entirely. Without this flag their fixed instruction prompts
+        // ("Summarize the CURRENT webpage...") match the "current" keyword in
+        // ONLINE_RESEARCH_REQUEST_PATTERN (context-menu text actions have no
+        // page context either, so needsOnlineResearch() returned true
+        // unconditionally) and fired a Tavily search on every click - and
+        // failed outright for users without a Tavily API key.
         const research = await runTavilyQuestionResearch({
           question,
           pageContext: requestPageContext,
