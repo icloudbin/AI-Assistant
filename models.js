@@ -1,21 +1,14 @@
 // models.js（root directory）
-// DeepSeek retired the legacy `deepseek-chat` / `deepseek-reasoner` API model
-// names in favor of explicit `deepseek-v4-flash` / `deepseek-v4-pro` names
-// (announced 2026-04-24, legacy names slated for removal 2026-07-24 — see
-// https://api-docs.deepseek.com/updates). `id` is kept as-is below purely as
-// the internal/storage key (so anyone's previously saved model choice still
-// matches); `apiModel` and `thinking` are what actually get sent to the API.
-// Thinking mode now defaults to "enabled" on both V4 models, so it has to be
-// explicitly turned off to reproduce the old deepseek-chat (non-thinking)
-// behavior - see https://api-docs.deepseek.com/guides/thinking_mode.
-//
-// `visionModel` (DeepSeek entries): the vision-capable endpoint swapped in
-// when a request carries attached images, because the regular deepseek-v4-*
-// chat models reject image inputs. streamDeepSeek() in background.js sends
-// it only for image requests; text-only requests still use the user's chosen
-// `apiModel`, and the `thinking` flag is only sent alongside `apiModel`
-// (the vision-exp endpoint does not take it). Previously this endpoint was
-// hard-coded inside streamDeepSeek, invisible in the model table.
+// DeepSeek: `deepseek-flash` is the current API model name for
+// DeepSeek-V4.1-Flash. The legacy names are all retired now: `deepseek-chat`
+// and `deepseek-reasoner` stopped working on 2026-07-24, and `deepseek-v4-pro`
+// is being retired (requests route to V4.1 Flash after 2026-09-14 Beijing
+// time). Unlike the earlier V4 line, `deepseek-flash` handles image/vision
+// input natively, so there is no separate vision model to swap in — see
+// streamDeepSeek() in background.js. Thinking is enabled by default on
+// V4.1 Flash; `thinking` below is sent explicitly to pin the behavior (set it
+// to "disabled" to reproduce the old non-thinking `deepseek-chat` behavior).
+// See https://api-docs.deepseek.com/guides/thinking_mode.
 //
 // `provider` picks which branch of background.js handles the request:
 // "deepseek" -> DeepSeek Chat Completions API, "gemini" -> Google's Gemini
@@ -47,7 +40,7 @@
 // "gemini-3.7-flash" no longer matches anything in MODELS; per the comments
 // on restoreSelectedModel()/findConversationModelId() in sidepanel.js, that
 // silently falls through, so a user who had Gemini selected will see the
-// model dropdown default back to the first MODELS entry (DeepSeek Chat)
+// model dropdown default back to the first MODELS entry (DeepSeek V4.1 Flash)
 // until they reselect it.
 //
 // Claude entries added 2026-08. apiModel values per
@@ -99,9 +92,7 @@
 // same Chat-Completions request/response shape as DeepSeek (messages array and
 // choices[0].delta.content while streaming).
 export const MODELS = [
-  { id: "deepseek-chat", label: "DeepSeek Chat", provider: "deepseek", apiModel: "deepseek-v4-flash", thinking: "disabled", visionModel: "deepseek-v4-flash-vision-exp" },
-  { id: "deepseek-reasoner", label: "DeepSeek Reasoner", provider: "deepseek", apiModel: "deepseek-v4-flash", thinking: "enabled", visionModel: "deepseek-v4-flash-vision-exp" },
-  { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", provider: "deepseek", apiModel: "deepseek-v4-pro", thinking: "enabled", visionModel: "deepseek-v4-flash-vision-exp" },
+  { id: "deepseek-flash", label: "DeepSeek V4.1 Flash", provider: "deepseek", apiModel: "deepseek-flash", thinking: "enabled" },
   { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", provider: "gemini", apiModel: "gemini-3.8-flash" },
   { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", provider: "gemini", apiModel: "gemini-3.1-pro-preview" },
   { id: "claude-fable-5", label: "Claude Fable 5", provider: "claude", apiModel: "claude-fable-5" },

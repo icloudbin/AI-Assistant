@@ -64,7 +64,7 @@ sidepanel/mic-permission.html / sidepanel/mic-permission.css / sidepanel/mic-per
 
 The side panel now has an Upload button below the question box. It accepts images, common text/code files, HTML, and ZIP/WinZip archives. Text and HTML files are read locally and included in the DeepSeek chat request. ZIP files are parsed locally and supported text/HTML entries are extracted and included.
 
-Image attachments are encoded locally as data URLs and sent with the current request. DeepSeek image requests automatically use deepseek-v4-flash-vision-exp; Gemini, Claude, OpenAI, and OpenRouter receive their provider-specific multimodal image content when the selected model/API supports vision.
+Image attachments are encoded locally as data URLs and sent with the current request. DeepSeek image requests are handled natively by `deepseek-flash`; Gemini, Claude, OpenAI, and OpenRouter receive their provider-specific multimodal image content when the selected model/API supports vision.
 
 
 Version 1.0.9 adds a Settings > Backup History button that exports all locally saved conversations as a standard ZIP file. API keys and custom prompts are not included.
@@ -77,11 +77,11 @@ This uses the browser's built-in Web Speech API, so it needs an internet connect
 
 **Known Brave limitation:** Brave's speech-recognition backend is unreliable — the classic cloud engine returns a "network" error because Brave doesn't have access to Google's private recognition service, and Brave's newer on-device engine has an open bug where the required language model never finishes installing. Voice input reliably works in Chrome; in Brave it depends on your version, and the extension shows an on-screen error rather than failing silently if it's blocked. If Brave fixes this, no code changes should be needed.
 
-## DeepSeek model IDs updated to V4 (v1.6.0)
+## DeepSeek models consolidated to deepseek-flash
 
-`deepseek-chat` and `deepseek-reasoner` were DeepSeek's standard API model names for about two years (the model behind each name was upgraded repeatedly, but the names themselves stayed stable) — that's why they were the names used here. DeepSeek introduced explicit `deepseek-v4-flash` / `deepseek-v4-pro` names on 2026-04-24 and announced the legacy names would stop working on 2026-07-24; that date has now passed, so the old IDs can no longer be relied on.
+DeepSeek's current API model is `deepseek-flash` (DeepSeek-V4.1-Flash). The legacy `deepseek-chat` / `deepseek-reasoner` names stopped working on 2026-07-24, and `deepseek-v4-pro` is being retired (requests route to V4.1 Flash after 2026-09-14 Beijing time). This version replaces the three previous DeepSeek options — DeepSeek Chat, DeepSeek Reasoner, and DeepSeek V4 Pro — with a single "DeepSeek V4.1 Flash" entry whose `apiModel` is `deepseek-flash`.
 
-`models.js` now sends `deepseek-v4-flash` / `deepseek-v4-pro` as the actual API model, while keeping the internal `id` values (`deepseek-chat`, `deepseek-reasoner`) unchanged so anyone's already-saved model preference still matches. A new "DeepSeek V4 Pro" option was added. One behavior change worth knowing: thinking mode is enabled by default on the V4 models (it previously only ran under the `deepseek-reasoner` name), so `models.js` now explicitly passes `thinking: {type: "disabled"}` for the Chat option to keep it fast/non-thinking like before - without that, Chat would silently start reasoning on every request. See DeepSeek's [Thinking Mode guide](https://api-docs.deepseek.com/guides/thinking_mode) for the underlying parameters.
+Unlike the earlier V4 line, `deepseek-flash` handles image/vision input natively, so the separate vision-exp endpoint is gone — image requests are sent to the same `deepseek-flash` model. Thinking mode is enabled by default on V4.1 Flash, and `models.js` sends `thinking: {type: "enabled"}` explicitly to pin that behavior (set it to "disabled" to reproduce the old non-thinking Chat behavior). See DeepSeek's [Thinking Mode guide](https://api-docs.deepseek.com/guides/thinking_mode) for the underlying parameters.
 
 
 ## Gemini support alongside DeepSeek (v1.7.0)

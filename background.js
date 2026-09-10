@@ -568,13 +568,10 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
   const { apiKey, customPrompt } = await chrome.storage.local.get(["apiKey", "customPrompt"]);
   if (!apiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "DeepSeek" }));
 
-  // Image requests swap in the entry's vision-capable model (the regular
-  // deepseek-v4-* chat models reject image inputs); the user's chosen
-  // apiModel is kept for text-only requests, and the `thinking` flag is
-  // only sent alongside apiModel - the vision-exp endpoint does not take
-  // it. See the `visionModel` note in models.js.
-  const useVision = images.length > 0 && !!model.visionModel;
-  const requestModel = useVision ? model.visionModel : model.apiModel;
+  // `deepseek-flash` (DeepSeek-V4.1-Flash) accepts image input directly, so
+  // the same `apiModel` is used for both text and image requests - there is
+  // no separate vision model to swap in (the old deepseek-v4-*-vision-exp
+  // endpoint is retired). See the `deepseek-flash` note in models.js.
   const resp = await fetch("https://api.deepseek.com/chat/completions", {
     method: "POST",
     headers: {
@@ -582,10 +579,10 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: requestModel,
+      model: model.apiModel,
       messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang),
       stream: true,
-      ...(useVision || !model.thinking ? {} : { thinking: { type: model.thinking } }),
+      ...(model.thinking ? { thinking: { type: model.thinking } } : {}),
     }),
     signal: ctx.signal,
   });
