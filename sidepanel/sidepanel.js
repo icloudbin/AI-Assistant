@@ -1973,12 +1973,17 @@ async function processContextAction(pending) {
   // A context-menu operation is scoped to the highlighted text. Do not add
   // the whole webpage as hidden context, even if "Read current page" is on.
   // The visible instruction prefix follows the language selected in Settings.
-  const prompt = `${instruction}\n\n${t(lang, "contextAction_highlightedText_label")}:\n${pending.text}`;
+  const isTranslation = pending.action === "translate";
+  const prompt = isTranslation
+    ? `${instruction} ${pending.text}`
+    : `${instruction}\n\n${t(lang, "contextAction_highlightedText_label")}:\n${pending.text}`;
   // Show a compact preview in the user bubble (the instruction plus the start
   // of the selection) instead of the entire raw prompt, matching how quick
   // actions display a short prompt rather than their full API wording.
   const preview = pending.text.length > 120 ? `${pending.text.slice(0, 120).trimEnd()}…` : pending.text;
-  const displayQuestion = `${instruction}\n${t(lang, "contextAction_highlightedText_label")}:\n${preview}`;
+  const displayQuestion = isTranslation
+    ? `${instruction} ${preview}`
+    : `${instruction}\n${t(lang, "contextAction_highlightedText_label")}:\n${preview}`;
   await handleSubmit(null, prompt, false, displayQuestion, pending.action === "fact-check", pending.action === "fact-check" ? pending.text : "", pending.action !== "fact-check");
 }
 
