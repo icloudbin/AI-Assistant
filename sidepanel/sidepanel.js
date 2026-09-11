@@ -911,6 +911,9 @@ function stopActiveRequest() {
 // silently reintroducing a smaller truncation after the content script has
 // already captured the full readable page.
 const MAX_PAGE_CONTEXT_CHARS = 120000;
+const MAX_AUTO_PAGE_IMAGE_URLS = 8;
+const PAGE_SCREENSHOT_MAX_DIMENSION = 1600;
+const PAGE_SCREENSHOT_MAX_BYTES = 2 * 1024 * 1024;
 
 async function getCurrentActiveTab() {
   // A side panel can remain alive while the user changes tabs. Do not use the
@@ -956,14 +959,23 @@ async function getActivePageContext(retryCount = 0) {
   const initialTabId = tab.id;
   const initialUrl = String(tab.url || "");
 
+  const hasExtractedPageContent = (data) => Boolean(
+    data?.text?.trim() ||
+    (Array.isArray(data?.imageUrls) && data.imageUrls.some((url) => typeof url === "string" && /^https?:\/\//i.test(url)))
+  );
+
   const makeContext = (data) => {
     const text = String(data?.text || "").trim();
-    if (!text) return null;
+    const imageUrls = Array.isArray(data?.imageUrls)
+      ? [...new Set(data.imageUrls.filter((url) => typeof url === "string" && /^https?:\/\//i.test(url)))].slice(0, MAX_AUTO_PAGE_IMAGE_URLS)
+      : [];
+    if (!text && !imageUrls.length) return null;
     return {
       tabId: initialTabId,
       title: String(data?.title || tab.title || ""),
       url: String(data?.url || initialUrl || ""),
       text: text.slice(0, MAX_PAGE_CONTEXT_CHARS),
+      imageUrls,
     };
   };
 
@@ -976,10 +988,10 @@ async function getActivePageContext(retryCount = 0) {
 
   const extractOnce = async () => {
     let response = await askExtractor();
-    if (!(response?.ok && response.data?.text?.trim())) {
-      // No reachable content script (or it answered with no text). Re-inject
-      // content.js and ask once more - content.js is written to be safely
-      // re-injectable, see its file-header note.
+    if (!(response?.ok && hasExtractedPageContent(response.data))) {
+      // No reachable content script (or it found neither readable text nor a
+      // usable image). Re-inject content.js and ask once more - content.js is
+      // written to be safely re-injectable, see its file-header note.
       if (!/^https?:\/\//i.test(initialUrl)) return null;
       try {
         await chrome.scripting.executeScript({
@@ -992,7 +1004,7 @@ async function getActivePageContext(retryCount = 0) {
       }
       response = await askExtractor();
     }
-    return response?.ok && response.data?.text?.trim() ? response.data : null;
+    return response?.ok && hasExtractedPageContent(response.data) ? response.data : null;
   };
 
   try {
@@ -1033,6 +1045,75 @@ async function getActivePageContext(retryCount = 0) {
     console.debug("[AI Assistant] Content script unavailable:", err);
   }
   return null;
+}
+
+async function fetchPageImages(imageUrls) {
+  if (!Array.isArray(imageUrls) || !imageUrls.length) return [];
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "FETCH_PAGE_IMAGES", urls: imageUrls });
+    if (!result?.ok || !Array.isArray(result.images)) return [];
+    return result.images.filter((img) => img && typeof img.dataUrl === "string" && /^data:image\/(jpeg|png|gif|webp);base64,/i.test(img.dataUrl));
+  } catch (err) {
+    console.debug("[AI Assistant] Unable to collect webpage images:", err);
+    return [];
+  }
+}
+
+function dataUrlByteLength(dataUrl) {
+  const encoded = String(dataUrl || "").split(",", 2)[1] || "";
+  return Math.floor((encoded.length * 3) / 4);
+}
+
+// URL-based extraction cannot cover CSS backgrounds, blob: URLs, or hosts
+// that reject an extension-origin download. A bounded screenshot of the
+// visible page gives quick actions a reliable visual input in those cases.
+async function compressPageScreenshot(dataUrl) {
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => {
+      try {
+        const sourceWidth = image.naturalWidth || image.width;
+        const sourceHeight = image.naturalHeight || image.height;
+        if (!sourceWidth || !sourceHeight) { resolve(null); return; }
+        const scale = Math.min(1, PAGE_SCREENSHOT_MAX_DIMENSION / Math.max(sourceWidth, sourceHeight));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+        canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+        const context = canvas.getContext("2d");
+        if (!context) { resolve(null); return; }
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        for (const quality of [0.82, 0.7, 0.58]) {
+          const compressed = canvas.toDataURL("image/jpeg", quality);
+          if (dataUrlByteLength(compressed) <= PAGE_SCREENSHOT_MAX_BYTES) {
+            resolve(compressed);
+            return;
+          }
+        }
+      } catch {
+        // The original URL/image can fail to decode. Treat the screenshot as
+        // optional so the user's requested operation still continues.
+      }
+      resolve(null);
+    };
+    image.onerror = () => resolve(null);
+    image.src = dataUrl;
+  });
+}
+
+async function captureVisiblePageScreenshot(expectedTabId, expectedUrl) {
+  if (!expectedTabId || !expectedUrl) return null;
+  try {
+    const beforeCapture = await getCurrentActiveTab();
+    if (beforeCapture?.id !== expectedTabId || String(beforeCapture?.url || "") !== expectedUrl) return null;
+    const screenshot = await chrome.tabs.captureVisibleTab(beforeCapture.windowId, { format: "jpeg", quality: 82 });
+    const afterCapture = await getCurrentActiveTab();
+    if (afterCapture?.id !== expectedTabId || String(afterCapture?.url || "") !== expectedUrl) return null;
+    const dataUrl = await compressPageScreenshot(screenshot);
+    return dataUrl ? { name: "Current page viewport", dataUrl } : null;
+  } catch (err) {
+    console.debug("[AI Assistant] Unable to capture webpage screenshot:", err);
+    return null;
+  }
 }
 function updateContextBar(pageContext) {
   if (!pageContext) {
@@ -1804,7 +1885,7 @@ if (!SpeechRecognitionCtor) {
   });
 }
 
-async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "", noWebResearch = false) {
+async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "", noWebResearch = false, includePageImages = false) {
   e?.preventDefault?.();
   const question = forcedQuestion !== null ? String(forcedQuestion).trim() : questionInput.value.trim();
   const attachmentText = attachmentContextText();
@@ -1829,8 +1910,8 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     ? `${displayQuestion}\n\n📎 ${readyAttachments.map((a) => a.name).join(", ")}`
     : displayQuestion;
   addBubble("user", displayContent);
-  const questionForApi = `${question || "Please analyze the attached files."}${attachmentText}`;
-  history.push({ role: "user", content: questionForApi, displayContent, modelLabel: "" });
+  const baseQuestionForApi = `${question || "Please analyze the attached files."}${attachmentText}`;
+  history.push({ role: "user", content: baseQuestionForApi, displayContent, modelLabel: "" });
   if (!currentConversationId) {
     currentConversationId = createConversation().id;
   }
@@ -1866,6 +1947,33 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     }
   }
 
+  const pageContextValid = !!pageContext && !pageContext.captureFailed;
+  let automaticPageImages = [];
+  let pageScreenshot = null;
+  if (includePageImages && pageContextValid) {
+    automaticPageImages = await fetchPageImages(pageContext.imageUrls);
+    const currentTab = await getCurrentActiveTab();
+    if (currentTab?.id !== pageContext.tabId || String(currentTab?.url || "") !== pageContext.url) {
+      automaticPageImages = [];
+    }
+  }
+  if (includePageImages) {
+    // Capture a visible-page image in addition to individually fetched <img>
+    // elements. This also covers pages whose text extraction failed but whose
+    // visible content is an image or canvas.
+    const screenshotTab = pageContextValid
+      ? { id: pageContext.tabId, url: pageContext.url }
+      : await getCurrentActiveTab();
+    pageScreenshot = await captureVisiblePageScreenshot(screenshotTab?.id, String(screenshotTab?.url || ""));
+  }
+  const pageVisualInputCount = automaticPageImages.length + (pageScreenshot ? 1 : 0);
+  // A visual input in the provider payload is not always enough to make a
+  // text-focused quick action discuss it. State explicitly that the attached
+  // current-page images are part of the requested analysis.
+  const questionForApi = pageVisualInputCount
+    ? `${baseQuestionForApi}\n\n[CURRENT PAGE VISUALS]\n${pageVisualInputCount} current-page visual input${pageVisualInputCount === 1 ? " is" : "s are"} attached. Analyze and incorporate the visible page images when they are relevant to the requested summary, translation, explanation, key points, or fact check. Do not describe images from earlier conversation turns.\n[/CURRENT PAGE VISUALS]`
+    : baseQuestionForApi;
+
   // Tell the model explicitly when the page has changed since its last
   // answer in this conversation. history[].pageContext (title/url only, set
   // below and persisted via toStoredMessage) records which page, if any, was
@@ -1877,7 +1985,6 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   // a much harder signal to miss. Only attached when a change is actually
   // detected (different URL), so a same-page follow-up ("tell me more")
   // isn't cluttered with an irrelevant note.
-  const pageContextValid = !!pageContext && !pageContext.captureFailed;
   const previousPageContext = history
     .slice(0, -1)
     .reverse()
@@ -1909,7 +2016,11 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       history: (pageContextValid && previousPageContext && pageContext.url !== previousPageContext.url)
         ? []
         : getApiHistory().slice(0, -1),
-      images: readyAttachments.filter((a) => a.kind === "image" && a.dataUrl).map((a) => ({ name: a.name, dataUrl: a.dataUrl })),
+      images: [
+        ...readyAttachments.filter((a) => a.kind === "image" && a.dataUrl).map((a) => ({ name: a.name, dataUrl: a.dataUrl })),
+        ...automaticPageImages,
+        ...(pageScreenshot ? [pageScreenshot] : []),
+      ],
       // Send the exact model selected at submit time.
       modelId: selectedModel.id,
       provider: selectedModel.provider,
@@ -2060,7 +2171,7 @@ async function runQuickPageAction(apiPromptKey, displayPromptKey, factCheck = fa
   const displayPrompt = t(lang, displayPromptKey);
   // Fact Check keeps its own Tavily path (factCheck flag); the other quick
   // actions are page-only transforms, so they suppress web research.
-  await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck, "", !factCheck);
+  await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck, "", !factCheck, true);
 }
 
 quickSummarizeBtn?.addEventListener("click", () => {

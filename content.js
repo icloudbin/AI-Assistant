@@ -161,6 +161,48 @@ function extractProtonMail() {
 // tokens: large enough for a full product page while still leaving room for
 // the user's question, instructions, and conversation history.
 const PAGE_CONTEXT_CHAR_LIMIT = 120000;
+const PAGE_IMAGE_URL_LIMIT = 8;
+const PAGE_IMAGE_MIN_DIMENSION = 120;
+const PAGE_IMAGE_MIN_AREA = 12000;
+const PAGE_IMAGE_NOISE_RE = /(?:^|[-_./])(?:ad|ads|advert|advertisement|banner|avatar|icon|logo|pixel|tracking|spacer)(?:[-_./]|$)/i;
+
+// Returns a bounded list of meaningful visible <img> sources. The actual
+// image bytes are fetched later by the extension service worker, where host
+// permissions and strict size/type limits can be applied. CSS backgrounds and
+// private/cookie-authenticated resources are deliberately not collected.
+function extractPageImageUrls() {
+  const urls = [];
+  const seen = new Set();
+  for (const img of document.images) {
+    if (!img || img.getAttribute('aria-hidden') === 'true') continue;
+    const style = getComputedStyle(img);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) continue;
+
+    const rect = img.getBoundingClientRect();
+    const width = Math.max(img.naturalWidth || 0, img.width || 0, Math.round(rect.width));
+    const height = Math.max(img.naturalHeight || 0, img.height || 0, Math.round(rect.height));
+    if (Math.max(width, height) < PAGE_IMAGE_MIN_DIMENSION || width * height < PAGE_IMAGE_MIN_AREA) continue;
+
+    const raw = img.currentSrc || img.dataset.src || img.dataset.original || img.dataset.lazySrc || img.src || '';
+    let url;
+    try {
+      url = new URL(raw, location.href);
+    } catch {
+      continue;
+    }
+    if (!/^https?:$/.test(url.protocol)) continue;
+    const hint = `${url.pathname} ${img.className || ''} ${img.id || ''}`;
+    if (PAGE_IMAGE_NOISE_RE.test(hint) || seen.has(url.href)) continue;
+    seen.add(url.href);
+    urls.push(url.href);
+    if (urls.length >= PAGE_IMAGE_URL_LIMIT) break;
+  }
+  return urls;
+}
+
+function withPageImages(result) {
+  return result ? { ...result, imageUrls: extractPageImageUrls() } : null;
+}
 
 // A result only counts as a usable "article" if it clears this much text -
 // otherwise extractReaderModeArticle() returns null and the caller falls
@@ -571,22 +613,22 @@ function extractAmazonProductPage() {
 
 function extractPageContent() {
   const mailPlus = extractSynologyMailPlus();
-  if (mailPlus) return mailPlus;
+  if (mailPlus) return withPageImages(mailPlus);
 
   const protonMail = extractProtonMail();
-  if (protonMail) return protonMail;
+  if (protonMail) return withPageImages(protonMail);
 
   const reddit = extractRedditArticle();
-  if (reddit) return reddit;
+  if (reddit) return withPageImages(reddit);
 
   const synologyCommunity = extractSynologyCommunity();
-  if (synologyCommunity) return synologyCommunity;
+  if (synologyCommunity) return withPageImages(synologyCommunity);
 
   const amazonProduct = extractAmazonProductPage();
-  if (amazonProduct) return amazonProduct;
+  if (amazonProduct) return withPageImages(amazonProduct);
 
   const readerMode = extractReaderModeArticle();
-  if (readerMode) return readerMode;
+  if (readerMode) return withPageImages(readerMode);
 
   // Last-resort extraction: still exclude common page chrome/noise rather
   // than returning document.body.innerText verbatim. This is important for
@@ -616,14 +658,28 @@ function extractPageContent() {
   } finally {
     holder.remove();
   }
-  if (!text) return null;
+  // A page can be meaningful even when it has no extractable text, such as
+  // an image gallery or a scanned document. Keep that page available to the
+  // quick actions when it contains eligible images, so they can still be
+  // fetched and included in the model request.
+  if (!text) {
+    const imageUrls = extractPageImageUrls();
+    if (!imageUrls.length) return null;
+    return {
+      source: 'generic-page-images',
+      title: document.title,
+      url: location.href,
+      text: '',
+      imageUrls,
+    };
+  }
 
-  return {
+  return withPageImages({
     source: 'generic-page-cleaned',
     title: document.title,
     url: location.href,
     text: text.slice(0, PAGE_CONTEXT_CHAR_LIMIT),
-  };
+  });
 }
 
   return { extractPageContent };
