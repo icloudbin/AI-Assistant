@@ -135,6 +135,40 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true;
 });
 
+// ---------- MV3 keep-alive for in-flight provider requests ----------
+// An MV3 service worker is terminated after ~30 seconds of inactivity, and
+// only dispatched events and extension API calls reset that idle timer -
+// an open fetch() or a silent stream does NOT. A provider request whose
+// stream produces no visible text for ~30s therefore gets its worker killed
+// mid-request: the port to the side panel drops with it, and the panel shows
+// "The connection to the AI service was interrupted" even though nothing
+// failed on the wire (any real HTTP error would have surfaced through the
+// ERROR path instead). Gemini hits this on essentially every request: the
+// the Gemini thinking model in MODELS (gemini-3.8-flash) can
+// spend well over 30s before their first visible text, thought summaries are
+// not requested, so literally zero bytes of interest arrive while they think
+// - see streamGemini(). DeepSeek/OpenRouter usually answer fast enough to
+// dodge it, which is why only Gemini looked "broken". A side-effect-free
+// extension API call every 20s (under the 30s idle threshold) keeps the
+// worker alive until DONE/ERROR/STOP. One timer per in-flight ASK, reset
+// alongside the activeRequestId/activeAbortController pair above.
+const KEEP_ALIVE_INTERVAL_MS = 20000;
+let keepAliveTimer = null;
+
+function startRequestKeepAlive() {
+  stopRequestKeepAlive();
+  keepAliveTimer = setInterval(() => {
+    void chrome.runtime.getPlatformInfo();
+  }, KEEP_ALIVE_INTERVAL_MS);
+}
+
+function stopRequestKeepAlive() {
+  if (keepAliveTimer !== null) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+  }
+}
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "ai-chat") return;
 
@@ -195,6 +229,10 @@ chrome.runtime.onConnect.addListener((port) => {
     const abortController = new AbortController();
     activeRequestId = requestId;
     activeAbortController = abortController;
+    // Keep the worker alive for the whole request (Tavily preflight included)
+    // - without this, any provider whose first visible chunk takes >30s
+    // (Gemini's thinking models, see above) loses the worker mid-request.
+    startRequestKeepAlive();
 
     try {
       const { question, pageContext, includePageContext, history, images = [], modelId, provider, apiModel, thinking, factCheck, noWebResearch = false } = msg.payload;
@@ -294,6 +332,7 @@ chrome.runtime.onConnect.addListener((port) => {
       if (activeRequestId === requestId) {
         activeRequestId = null;
         activeAbortController = null;
+        stopRequestKeepAlive();
       }
     }
   });
@@ -620,33 +659,46 @@ async function streamOpenRouter(model, question, pageContext, history, images, c
   await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx);
 }
 
-// Gemini uses a different host, auth header, request shape ({contents/parts}
-// instead of {messages/content}, plus a single top-level system_instruction
-// rather than a list of system messages), and response shape
-// (candidates[0].content.parts instead of choices[0].delta), but the same
-// alt=sse Server-Sent-Events streaming mechanics as DeepSeek - see
-// https://ai.google.dev/gemini-api/docs/text-generation and
-// https://ai.google.dev/gemini-api/docs/streaming (checked 2026-08-22).
+// Gemini uses Google's current Interactions API. It takes `input` content
+// blocks and a plain-string `system_instruction`; streamed output arrives as
+// typed SSE events, with visible text in `step.delta` events whose delta type
+// is `text`. `store: false` keeps the extension's existing local-only
+// conversation-history behavior instead of creating server-side conversations.
+// See https://ai.google.dev/gemini-api/docs/migrate-to-interactions and
+// https://ai.google.dev/gemini-api/docs/streaming.
 async function streamGemini(model, question, pageContext, history, images, ctx) {
   const { geminiApiKey, customPrompt } = await chrome.storage.local.get(["geminiApiKey", "customPrompt"]);
   if (!geminiApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "Gemini" }));
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model.apiModel}:streamGenerateContent?alt=sse`;
+  const url = "https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse";
   const resp = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      Accept: "text/event-stream",
       "x-goog-api-key": geminiApiKey,
     },
     body: JSON.stringify({
-      system_instruction: { parts: [{ text: buildSystemInstruction(pageContext, customPrompt, ctx.lang) }] },
-      contents: buildGeminiContents(question, history, images),
+      model: model.apiModel,
+      system_instruction: buildSystemInstruction(pageContext, customPrompt, ctx.lang),
+      input: buildGeminiInteractionInput(question, history, images),
+      store: false,
+      stream: true,
+      generation_config: { thinking_summaries: "none" },
     }),
     signal: ctx.signal,
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
 
-  await readSse(resp, (json) => (json.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join(""), ctx);
+  await readSse(
+    resp,
+    (json) => (json?.event_type === "step.delta" && json.delta?.type === "text" ? json.delta.text || "" : ""),
+    ctx,
+    (json) => {
+      if (json?.event_type !== "interaction.failed" && json?.interaction?.status !== "failed") return "";
+      return json?.error?.message || json?.interaction?.error?.message || "Gemini interaction failed.";
+    }
+  );
 }
 
 // Claude uses api.anthropic.com, authenticated with x-api-key + an
@@ -769,7 +821,7 @@ async function streamOpenAI(model, question, pageContext, history, images, ctx) 
 // lands (see stopActiveRequest() in sidepanel.js) - reader.read() itself
 // also naturally rejects once ctx.signal aborts, ending this loop via the
 // same AbortError path the initial fetch() would take.
-async function readSse(resp, extractDelta, ctx) {
+async function readSse(resp, extractDelta, ctx, extractError = null) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -784,11 +836,16 @@ async function readSse(resp, extractDelta, ctx) {
       if (!t.startsWith("data:")) continue;
       const data = t.slice(5).trim();
       if (!data || data === "[DONE]") continue;
+      let json;
       try {
-        const json = JSON.parse(data);
-        const delta = extractDelta(json);
-        if (delta) ctx.port.postMessage({ type: "CHUNK", delta, requestId: ctx.requestId });
-      } catch {}
+        json = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      const streamError = extractError?.(json);
+      if (streamError) throw new Error(streamError);
+      const delta = extractDelta(json);
+      if (delta) ctx.port.postMessage({ type: "CHUNK", delta, requestId: ctx.requestId });
     }
   }
 }
@@ -918,15 +975,18 @@ function buildSystemInstruction(pageContext, customPrompt, lang) {
   return `${text}\n\n${outputLanguageInstruction(lang)}\n\n${pageContextInstruction(pageContext)}`;
 }
 
-function buildGeminiContents(question, history, images = []) {
-  const contents = normalizeHistoryTurns(history).map((h) => ({ role: h.role === "assistant" ? "model" : "user", parts: [{ text: h.content }] }));
-  const parts = [{ text: question }];
+function buildGeminiInteractionInput(question, history, images = []) {
+  const input = normalizeHistoryTurns(history).map((h) => ({
+    type: h.role === "assistant" ? "model_output" : "user_input",
+    content: [{ type: "text", text: h.content }],
+  }));
+  const content = [{ type: "text", text: question }];
   for (const img of images) {
     const match = img.dataUrl.match(/^data:(image\/(?:jpeg|png|gif|webp));base64,(.+)$/i);
-    if (match) parts.push({ inline_data: { mime_type: match[1], data: match[2] } });
+    if (match) content.push({ type: "image", mime_type: match[1], data: match[2] });
   }
-  contents.push({ role: "user", parts });
-  return contents;
+  input.push({ type: "user_input", content });
+  return input;
 }
 
 function buildClaudeMessages(question, history, images = []) {

@@ -12,22 +12,16 @@
 //
 // `provider` picks which branch of background.js handles the request:
 // "deepseek" -> DeepSeek Chat Completions API, "gemini" -> Google's Gemini
-// streamGenerateContent API, "claude" -> Anthropic's Messages API. Existing
+// Interactions API, "claude" -> Anthropic's Messages API. Existing
 // DeepSeek entries default to "deepseek" implicitly in code that predates
 // this field, but it is listed explicitly below for clarity.
 //
 // Gemini entries added 2026-08. apiModel values per
 // https://ai.google.dev/gemini-api/docs/models (checked 2026-08-22; page
 // last updated 2026-08-14).
-// gemini-3.1-pro-preview is Preview-tier — Google can change preview model
-// IDs with as little as two weeks' notice, and its apiModel string carries
-// the "-preview" suffix Google currently requires for it; it is included
-// here anyway at explicit user request in favor of gemini-3.5-flash-lite,
-// which was dropped as redundant with gemini-3.7-flash. If Google promotes
-// this model to Stable under a different ID, apiModel below will need
-// updating. Gemini's own "thinking" (extended reasoning) is left at each
-// model's default and thought summaries are not requested, so no `thinking`
-// field is set for these entries.
+// Gemini's own "thinking" (extended reasoning) is left at the model's
+// default and thought summaries are not requested, so no `thinking` field is
+// set for the Gemini entry.
 //
 // 2026-09 update: gemini-3.7-flash replaced with gemini-3.8-flash below
 // (released 2026-09-02, Stable tier per
@@ -94,7 +88,6 @@
 export const MODELS = [
   { id: "deepseek-flash", label: "DeepSeek V4.1 Flash", provider: "deepseek", apiModel: "deepseek-flash", thinking: "enabled" },
   { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", provider: "gemini", apiModel: "gemini-3.8-flash" },
-  { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", provider: "gemini", apiModel: "gemini-3.1-pro-preview" },
   { id: "claude-fable-5", label: "Claude Fable 5", provider: "claude", apiModel: "claude-fable-5" },
   { id: "claude-opus-5", label: "Claude Opus 5", provider: "claude", apiModel: "claude-opus-5" },
   { id: "claude-sonnet-5", label: "Claude Sonnet 5", provider: "claude", apiModel: "claude-sonnet-5" },

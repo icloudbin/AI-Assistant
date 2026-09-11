@@ -91,13 +91,12 @@ The model dropdown now lists Google Gemini models next to the DeepSeek ones, and
 Model list as of this version (`models.js`):
 - DeepSeek Chat, DeepSeek Reasoner, DeepSeek V4 Pro — unchanged.
 - Gemini 3.7 Flash — latest stable Flash model, general-purpose default.
-- Gemini 3.1 Pro — Google's flagship Gemini 3 reasoning model, for harder reasoning/agentic tasks.
 - Gemini 2.5 Pro — Google's most capable stable (non-preview) model, for harder reasoning tasks.
 
-**v1.7.1:** Gemini 3.5 Flash-Lite was dropped (redundant with Gemini 3.7 Flash) and Gemini 3.1 Pro was added in its place, at explicit user request. Gemini 3.1 Pro's apiModel is `gemini-3.1-pro-preview` and it is currently Preview-tier per https://ai.google.dev/gemini-api/docs/models, not Stable like the other two Gemini entries — Google can change preview model IDs on two weeks' notice, so this ID is more likely to need updating later than the Stable ones.
+**v1.10.46:** Gemini 3.1 Pro was removed from the available model list. Existing conversations that reference its former model ID retain their saved messages but cannot select that model for new requests.
 
 Implementation notes:
-- `background.js` now branches on a `provider` field in each `models.js` entry ("deepseek" or "gemini") and calls one of two request functions, `streamDeepSeek` or `streamGemini`, both of which feed the same SSE-line reader. DeepSeek's request/response shape (OpenAI-style `messages`/`choices[0].delta`) is unchanged; Gemini uses its native `streamGenerateContent?alt=sse` endpoint with `contents`/`candidates[0].content.parts`, authenticated via an `x-goog-api-key` header rather than a bearer token.
+- `background.js` branches on a `provider` field in each `models.js` entry ("deepseek" or "gemini") and calls the provider-specific streaming function. DeepSeek's request/response shape (OpenAI-style `messages`/`choices[0].delta`) is unchanged. Gemini uses the current `interactions?alt=sse` endpoint with `input` content blocks and `step.delta` text events, authenticated via an `x-goog-api-key` header rather than a bearer token. Gemini requests set `store: false`, so conversation state remains in the extension's local history.
 - The internal message-passing port between the side panel and the background script was renamed from `"deepseek-chat"` to `"ai-chat"`, since it now carries requests for either provider. This is an internal channel name only and has no effect on stored data or on either provider's API.
 - The Gemini API key field's placeholder intentionally does not show a fixed prefix like "AIza...": Google has been transitioning newly issued Google AI Studio keys to a different "AQ." prefix since mid-2026 alongside the older "AIza" format, and both are accepted as-is by the raw `generativelanguage.googleapis.com` endpoint used here.
 - Gemini's "thinking" (extended reasoning before answering) is left at each model's own default, and thought summaries are not requested, so only the final answer streams into the chat — no chain-of-thought text should appear.
@@ -109,7 +108,7 @@ The model dropdown now also lists Anthropic Claude models, and Settings has a th
 
 Model list as of this version (`models.js`):
 - DeepSeek Chat, DeepSeek Reasoner, DeepSeek V4 Pro — unchanged.
-- Gemini 3.7 Flash, Gemini 3.1 Pro — unchanged.
+- Gemini 3.7 Flash — unchanged.
 - Claude Fable 5 — Anthropic's most capable widely released model, for the hardest tasks.
 - Claude Opus 5 — the current Opus-line flagship (supersedes Opus 4.8), for complex agentic/enterprise work.
 - Claude Sonnet 5 — Anthropic's recommended default: the best balance of speed and intelligence.
