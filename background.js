@@ -264,7 +264,7 @@ chrome.runtime.onConnect.addListener((port) => {
     startRequestKeepAlive();
 
     try {
-      const { question, pageContext, includePageContext, history, images = [], modelId, provider, apiModel, thinking, factCheck, noWebResearch = false } = msg.payload;
+      const { question, pageContext, includePageContext, history, images = [], modelId, provider, apiModel, thinking, factCheck, noWebResearch = false, forceWebResearch = false } = msg.payload;
       const lang = await getStoredLanguage();
       // Never trust a stale/accidental pageContext value when the user has
       // disabled "Read current page". This is the final privacy boundary
@@ -331,6 +331,7 @@ chrome.runtime.onConnect.addListener((port) => {
           question,
           pageContext: requestPageContext,
           ctx,
+          force: forceWebResearch,
         });
         if (research) effectiveQuestion = research.prompt;
       }
@@ -502,17 +503,27 @@ function needsOnlineResearch(question, pageContext) {
   return covered / terms.length < 0.6;
 }
 
-async function runTavilyQuestionResearch({ question, pageContext, ctx }) {
-  if (!needsOnlineResearch(question, pageContext)) return null;
+function pageResearchQuery(question, pageContext) {
+  const title = cleanResearchText(pageContext?.title, 280);
+  const excerpt = cleanResearchText(pageContext?.text, 620);
+  // A fixed quick-action instruction such as "Explain the current page" is
+  // not useful as a search query. Use the current page's own identifying
+  // information, while the original instruction remains the model prompt.
+  return cleanResearchText([title, excerpt].filter(Boolean).join("\n"), 900) || question;
+}
+
+async function runTavilyQuestionResearch({ question, pageContext, ctx, force = false }) {
+  if (!force && !needsOnlineResearch(question, pageContext)) return null;
 
   const stored = await chrome.storage.local.get(['tavilyApiKey']);
   const apiKey = String(stored.tavilyApiKey || '').trim();
   if (!apiKey) throw new Error(t(ctx.lang, 'bg_error_tavilyKeyMissing'));
 
-  // The user question is the query. Do not derive it from the open page, so
-  // a request for a newer version can discover sources that the old page has
-  // no reason to mention.
-  const result = await tavilySearch(question, apiKey, ctx.signal, 'general', ONLINE_RESEARCH_MAX_RESULTS);
+  // Ordinary questions use the user's wording. A forced Explain action has a
+  // fixed instruction, so it instead searches the current page's title and
+  // excerpt for relevant supporting sources.
+  const searchQuery = force ? pageResearchQuery(question, pageContext) : question;
+  const result = await tavilySearch(searchQuery, apiKey, ctx.signal, 'general', ONLINE_RESEARCH_MAX_RESULTS);
   const byUrl = new Map();
   for (const item of result?.results || []) {
     const url = String(item.url || '').trim();

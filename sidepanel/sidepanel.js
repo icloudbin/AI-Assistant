@@ -1885,7 +1885,7 @@ if (!SpeechRecognitionCtor) {
   });
 }
 
-async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "", noWebResearch = false, includePageImages = false) {
+async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "", noWebResearch = false, includePageImages = false, forceWebResearch = false) {
   e?.preventDefault?.();
   const question = forcedQuestion !== null ? String(forcedQuestion).trim() : questionInput.value.trim();
   const attachmentText = attachmentContextText();
@@ -2027,10 +2027,11 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       apiModel: selectedModel.apiModel,
       thinking: selectedModel.thinking,
       factCheck: factCheck ? { enabled: true, selectedText: factCheckSelectedText } : null,
-      // Predefined page/selection transforms (Summarize, Translate, Explain,
-      // Key Points and their context-menu equivalents) never need web
-      // research - background.js skips its automatic Tavily lookup for them.
+      // Summarize, Translate, and Key Points remain page-only transforms.
+      // Explain explicitly opts into Tavily research, while Fact Check uses
+      // its dedicated claim-verification research path.
       noWebResearch,
+      forceWebResearch,
     },
   });
 
@@ -2164,14 +2165,14 @@ chatForm.addEventListener("submit", handleSubmit);
 // Quick actions always operate on the page that is active at the moment the
 // button is clicked. They deliberately force page context on, so they still
 // work when the manual "Read current page" toggle is unchecked.
-async function runQuickPageAction(apiPromptKey, displayPromptKey, factCheck = false) {
+async function runQuickPageAction(apiPromptKey, displayPromptKey, factCheck = false, forceWebResearch = false) {
   if (isStreaming) return;
   const lang = currentLang || await getStoredLanguage();
   const apiPrompt = t("en", apiPromptKey);
   const displayPrompt = t(lang, displayPromptKey);
-  // Fact Check keeps its own Tavily path (factCheck flag); the other quick
-  // actions are page-only transforms, so they suppress web research.
-  await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck, "", !factCheck, true);
+  // Fact Check keeps its dedicated Tavily path. Explain performs Tavily
+  // research for supporting context; the remaining quick actions stay local.
+  await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck, "", !factCheck && !forceWebResearch, true, forceWebResearch);
 }
 
 quickSummarizeBtn?.addEventListener("click", () => {
@@ -2183,7 +2184,7 @@ quickTranslateBtn?.addEventListener("click", () => {
 });
 
 quickExplainBtn?.addEventListener("click", () => {
-  runQuickPageAction("quickExplain_prompt", "quickExplain_prompt");
+  runQuickPageAction("quickExplain_prompt", "quickExplain_prompt", false, true);
 });
 
 quickKeyPointsBtn?.addEventListener("click", () => {
