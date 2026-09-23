@@ -405,11 +405,11 @@ function factCheckOutputLanguage(lang) {
 // only the assistant's own prose is constrained, and an explicit translate
 // request always wins for the translated text itself.
 function outputLanguageInstruction(lang) {
-  return `OUTPUT LANGUAGE REQUIREMENT: Respond entirely in ${outputLanguageName(lang)}, the display language the user selected in this extension's settings. This applies to all of your own prose - explanations, summaries, verdicts, and list or table content. Keep source URLs, code, file paths, identifiers, and verbatim quotes in their original language. Do not switch to the language of the webpage, of earlier conversation turns, or of the question itself. The only exception: when the request explicitly asks for a translation into a specific language, the translated text itself must be in that requested target language.`;
+  return `OUTPUT LANGUAGE REQUIREMENT (MANDATORY): By default, the Settings > Language value is the authoritative language for your response. Respond entirely in ${outputLanguageName(lang)}, regardless of the language used in the user's question, typed input, webpage, attached files, previous conversation turns, or web research. Never infer the response language merely from the language of the user's input or source material. EXCEPTION — an explicit language request in the user's current message overrides the Settings > Language value. This includes direct requests such as \"Answer in English\", \"Please respond in Japanese\", \"用中文回答\", or similar clear instructions about which language to use for the answer. Treat only an explicit request in the current user message as this override; do not treat the language of the question itself, quoted text, webpage content, attached files, previous turns, or the Custom Prompt as an explicit override. When the user explicitly requests a response language, answer the response in that requested language. For a translation request, the translated text itself must use the requested target language, while any surrounding assistant prose should use the explicitly requested response language when one is stated, otherwise ${outputLanguageName(lang)}. Keep source URLs, code, file paths, identifiers, and verbatim quotes in their original language.`;
 }
 
 function factCheckLanguageInstruction(lang) {
-  return `OUTPUT LANGUAGE REQUIREMENT: Respond entirely in ${factCheckOutputLanguage(lang)}. This applies to the claim text, verdict labels, explanations, overall assessment, and source descriptions. Do not switch to the language used by the webpage or sources. Keep source URLs unchanged.`;
+  return `OUTPUT LANGUAGE REQUIREMENT: By default, respond entirely in ${factCheckOutputLanguage(lang)}. This applies to the claim text, verdict labels, explanations, overall assessment, and source descriptions. Do not switch to the language used by the webpage, selected text, search results, or sources merely because they use another language. An explicit request in the user's current message to answer in a specific language overrides this default. Keep source URLs unchanged.`;
 }
 
 function cleanResearchText(value, max = 800) {
@@ -998,6 +998,10 @@ function buildMessages(question, pageContext, history, customPrompt, images = []
   // conversational continuity. Older page information must never be treated
   // as current - see pageContextInstruction() above.
   messages.push({ role: "system", content: pageContextInstruction(pageContext) });
+  // Final, highest-priority language guard: keep the assistant response in the
+  // Settings > Language choice even when the current question, page content,
+  // conversation history, or custom prompt is written in another language.
+  messages.push({ role: "system", content: outputLanguageInstruction(lang) });
   const content = [{ type: "text", text: question }];
   for (const img of images) content.push({ type: "image_url", image_url: { url: img.dataUrl, detail: "auto" } });
   messages.push({ role: "user", content: images.length ? content : question });

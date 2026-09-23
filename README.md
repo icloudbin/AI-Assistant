@@ -1,3 +1,9 @@
+# Language output fix (2026-09-22)
+
+- The language selected in **Settings > Language** is now enforced as the authoritative response language for every AI request.
+- The extension sends a final language guard immediately before the current user message, so the model is less likely to follow the language of the user's typed question, webpage, conversation history, or custom prompt.
+- Explicit translation requests still use the requested target language for the translated text; surrounding assistant prose remains in the selected Settings language.
+
 <!-- README.md -->
 # Structure
 AI-Assistant/
