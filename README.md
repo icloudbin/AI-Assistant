@@ -31,6 +31,10 @@ AI-Assistant/
 3. Click the toolbar icon to open the side panel; click "Settings" to paste and save an API key
 4. After changing code: reload the extension card; reopen the side panel; refresh existing web pages
 
+## Fixed: Gemini/Claude/ChatGPT could still answer in English despite a different Settings > Language (v1.10.51)
+
+`buildMessages()` (DeepSeek/OpenRouter) already inserted the language guard twice - once at the top of the request and again as a system message immediately before the current user turn - but Gemini, Claude, and ChatGPT go through `buildSystemInstruction()` instead, whose output only ever appeared once, in the single top-level `system_instruction`/`system`/`instructions` field. In longer conversations, that one mention could lose out to several turns of history plus an English-language current question, and those three providers intermittently reverted to English regardless of the selected display language. `buildGeminiInteractionInput()`, `buildClaudeMessages()`, and `buildOpenAIInput()` now each append the same `outputLanguageInstruction(lang)` text as a trailing block on the current user turn, matching the reinforcement DeepSeek/OpenRouter already had.
+
 ## Added: automatic web research for unanswered page questions (v1.10.41)
 
 The extension now checks whether the current page covers a question's important terms and requested years before calling the selected AI model. When it does not, it sends the user's question to Tavily Search and supplies the returned web evidence to the model. This is topic-independent: no product, make, model, or website is hard-coded. A configured Tavily Search API key remains required. The response language continues to follow the extension's display-language setting.

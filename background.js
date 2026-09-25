@@ -721,7 +721,7 @@ async function streamGemini(model, question, pageContext, history, images, ctx) 
     body: JSON.stringify({
       model: model.apiModel,
       system_instruction: buildSystemInstruction(pageContext, customPrompt, ctx.lang),
-      input: buildGeminiInteractionInput(question, history, images),
+      input: buildGeminiInteractionInput(question, history, images, ctx.lang),
       store: false,
       stream: true,
       generation_config: { thinking_summaries: "none" },
@@ -780,7 +780,7 @@ async function streamClaude(model, question, pageContext, history, images, ctx) 
       model: model.apiModel,
       max_tokens: 8192,
       system: buildSystemInstruction(pageContext, customPrompt, ctx.lang),
-      messages: buildClaudeMessages(question, history, images),
+      messages: buildClaudeMessages(question, history, images, ctx.lang),
       stream: true,
     }),
     signal: ctx.signal,
@@ -837,7 +837,7 @@ async function streamOpenAI(model, question, pageContext, history, images, ctx) 
     body: JSON.stringify({
       model: model.apiModel,
       instructions: buildSystemInstruction(pageContext, customPrompt, ctx.lang),
-      input: buildOpenAIInput(question, history, images),
+      input: buildOpenAIInput(question, history, images, ctx.lang),
       store: false,
       stream: true,
     }),
@@ -1019,7 +1019,21 @@ function buildSystemInstruction(pageContext, customPrompt, lang) {
   return `${text}\n\n${outputLanguageInstruction(lang)}\n\n${pageContextInstruction(pageContext)}`;
 }
 
-function buildGeminiInteractionInput(question, history, images = []) {
+// Gemini/Claude/OpenAI each expose the system prompt as a single top-level
+// field (system_instruction/system/instructions - see buildSystemInstruction
+// above) rather than a message list, so unlike DeepSeek/OpenRouter's
+// buildMessages() - which re-inserts outputLanguageInstruction() a second
+// time as a system message immediately before the user turn - these three
+// providers previously carried the language requirement only once, at the
+// very top of the request. In longer conversations that one mention can get
+// out-weighed by several turns of history plus an English-language current
+// question, and the model reverts to English intermittently. Each of the
+// three builders below now appends outputLanguageInstruction(lang) as a
+// trailing text block on the CURRENT user turn - the same reinforcement
+// buildMessages() already gives DeepSeek/OpenRouter, just adapted to each
+// provider's own content-block shape - so the language guard is always the
+// last thing the model reads before it starts answering.
+function buildGeminiInteractionInput(question, history, images = [], lang) {
   const input = normalizeHistoryTurns(history).map((h) => ({
     type: h.role === "assistant" ? "model_output" : "user_input",
     content: [{ type: "text", text: h.content }],
@@ -1029,25 +1043,28 @@ function buildGeminiInteractionInput(question, history, images = []) {
     const match = img.dataUrl.match(/^data:(image\/(?:jpeg|png|gif|webp));base64,(.+)$/i);
     if (match) content.push({ type: "image", mime_type: match[1], data: match[2] });
   }
+  content.push({ type: "text", text: outputLanguageInstruction(lang) });
   input.push({ type: "user_input", content });
   return input;
 }
 
-function buildClaudeMessages(question, history, images = []) {
+function buildClaudeMessages(question, history, images = [], lang) {
   const messages = normalizeHistoryTurns(history).map((h) => ({ role: h.role, content: h.content }));
   const content = [{ type: "text", text: question }];
   for (const img of images) {
     const match = img.dataUrl.match(/^data:(image\/(?:jpeg|png|gif|webp));base64,(.+)$/i);
     if (match) content.push({ type: "image", source: { type: "base64", media_type: match[1], data: match[2] } });
   }
+  content.push({ type: "text", text: outputLanguageInstruction(lang) });
   messages.push({ role: "user", content });
   return messages;
 }
 
-function buildOpenAIInput(question, history, images = []) {
+function buildOpenAIInput(question, history, images = [], lang) {
   const input = normalizeHistoryTurns(history).map((h) => ({ role: h.role, content: h.content }));
   const content = [{ type: "input_text", text: question }];
   for (const img of images) content.push({ type: "input_image", image_url: img.dataUrl, detail: "auto" });
+  content.push({ type: "input_text", text: outputLanguageInstruction(lang) });
   input.push({ role: "user", content });
   return input;
 }
