@@ -2,6 +2,7 @@
 import { findModelById } from "./models.js";
 import { CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY } from "./storage-keys.js";
 import { getStoredLanguage, t } from "./i18n.js";
+import { restoreSettingsFromBackup } from "./settings-storage.js";
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.warn);
 
@@ -352,6 +353,10 @@ chrome.runtime.onConnect.addListener((port) => {
     startRequestKeepAlive();
 
     try {
+      // Recover user settings before reading provider keys or language. This
+      // makes the background service worker resilient if extension local
+      // storage was unexpectedly reset between browser sessions.
+      await restoreSettingsFromBackup();
       const { question, pageContext, includePageContext, history, images = [], modelId, factCheck, noWebResearch = false, forceWebResearch = false } = msg.payload;
       const lang = await getStoredLanguage();
       // Never trust a stale/accidental pageContext value when the user has
