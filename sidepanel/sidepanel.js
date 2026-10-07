@@ -1366,7 +1366,7 @@ async function selectConversation(id) {
     // the user's way out of a hung/unresponsive request.
     stopActiveRequest();
 
-    // New Topic is a fresh conversation (DeepSeek, Gemini, Claude, OpenAI,
+    // New Topic is a fresh conversation (DeepSeek, Claude, OpenAI,
     // or OpenRouter, depending on the selected model): discard the active conversation
     // state, clear the composer, and leave the API ready for the user's
     // first message. The new conversation is persisted only when that
