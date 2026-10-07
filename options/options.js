@@ -11,9 +11,8 @@ import { HISTORY_STORAGE_KEY, MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LAN
 
 const apiKeyInput = document.getElementById("apiKey");
 const geminiApiKeyInput = document.getElementById("geminiApiKey");
-const claudeApiKeyInput = document.getElementById("claudeApiKey");
-const openaiApiKeyInput = document.getElementById("openaiApiKey");
 const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
+const groqApiKeyInput = document.getElementById("groqApiKey");
 const zaiApiKeyInput = document.getElementById("zaiApiKey");
 const tavilyApiKeyInput = document.getElementById("tavilyApiKey");
 const customPromptInput = document.getElementById("customPrompt");
@@ -107,9 +106,8 @@ chrome.storage.local.get(
   ({ apiKey, geminiApiKey, claudeApiKey, openaiApiKey, openrouterApiKey, zaiApiKey, tavilyApiKey, customPrompt }) => {
     if (apiKey) apiKeyInput.value = apiKey;
     if (geminiApiKey) geminiApiKeyInput.value = geminiApiKey;
-    if (claudeApiKey) claudeApiKeyInput.value = claudeApiKey;
-    if (openaiApiKey) openaiApiKeyInput.value = openaiApiKey;
     if (openrouterApiKey) openrouterApiKeyInput.value = openrouterApiKey;
+    if (groqApiKey) groqApiKeyInput.value = groqApiKey;
     if (zaiApiKey) zaiApiKeyInput.value = zaiApiKey;
     if (tavilyApiKey) tavilyApiKeyInput.value = tavilyApiKey;
     if (customPrompt) customPromptInput.value = customPrompt;
@@ -119,9 +117,8 @@ chrome.storage.local.get(
 document.getElementById("save").addEventListener("click", async () => {
   const key = apiKeyInput.value.trim();
   const geminiKey = geminiApiKeyInput.value.trim();
-  const claudeKey = claudeApiKeyInput.value.trim();
-  const openaiKey = openaiApiKeyInput.value.trim();
   const openrouterKey = openrouterApiKeyInput.value.trim();
+  const groqKey = groqApiKeyInput.value.trim();
   const zaiKey = zaiApiKeyInput.value.trim();
   const tavilyKey = tavilyApiKeyInput.value.trim();
   const customPrompt = customPromptInput.value.trim();
@@ -133,9 +130,8 @@ document.getElementById("save").addEventListener("click", async () => {
   await chrome.storage.local.set({
     apiKey: key,
     geminiApiKey: geminiKey,
-    claudeApiKey: claudeKey,
-    openaiApiKey: openaiKey,
     openrouterApiKey: openrouterKey,
+    groqApiKey: groqKey,
     zaiApiKey: zaiKey,
     tavilyApiKey: tavilyKey,
     customPrompt,
@@ -722,10 +718,8 @@ loadTheme();
 const SETTINGS_BACKUP_KEYS = [
   "apiKey",
   "geminiApiKey",
-  "claudeApiKey",
-  "openaiApiKey",
   "openrouterApiKey",
-  "zaiApiKey",
+  "groqApiKey",
   "tavilyApiKey",
   "factCheckWebResearch",
   "customPrompt",
@@ -834,9 +828,8 @@ async function importSettings() {
     // triggered by the set() above.
     apiKeyInput.value = restored.apiKey || "";
     geminiApiKeyInput.value = restored.geminiApiKey || "";
-    claudeApiKeyInput.value = restored.claudeApiKey || "";
-    openaiApiKeyInput.value = restored.openaiApiKey || "";
     openrouterApiKeyInput.value = restored.openrouterApiKey || "";
+    groqApiKeyInput.value = restored.groqApiKey || "";
     zaiApiKeyInput.value = restored.zaiApiKey || "";
     if (restored.customPrompt !== undefined) customPromptInput.value = restored.customPrompt;
 
