@@ -11,7 +11,6 @@ const SETTINGS_RECORD_KEY = "user-settings";
 
 export const PERSISTED_SETTING_KEYS = [
   "apiKey",
-  "geminiApiKey",
   "openrouterApiKey",
   "groqApiKey",
   "groqKey",
