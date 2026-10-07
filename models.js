@@ -5,7 +5,6 @@ export const MODELS = [
   { id: "groq-gpt-oss-120b", label: "Groq: GPT-OSS 120B", provider: "groq", apiModel: "openai/gpt-oss-120b" },
   { id: "groq-qwen3.8-27b", label: "Groq: Qwen 3.8 27B", provider: "groq", apiModel: "qwen/qwen3.8-27b" },
   { id: "groq-gpt-oss-20b", label: "Groq: GPT-OSS 20B", provider: "groq", apiModel: "openai/gpt-oss-20b" },
-  { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", provider: "gemini", apiModel: "gemini-3.8-flash" },
 ];
 
 export function findModelById(id) {
@@ -16,7 +15,6 @@ export function findModelById(id) {
 const MODEL_ALIASES = {
   "deepseek-v4.1-flash": "deepseek-flash",
   "deepseek-v4-flash": "deepseek-flash",
-  "gemini-3.8-flash": "gemini-3.8-flash",
   "openrouter-free": "openrouter-free-auto",
 };
 export function resolveModelId(id) {
