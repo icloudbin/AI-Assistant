@@ -89,6 +89,7 @@ async function loadLanguage() {
 languageSelect.addEventListener("change", async () => {
   const lang = languageSelect.value;
   await chrome.storage.local.set({ [LANGUAGE_STORAGE_KEY]: lang });
+  await saveSettingsBackup({ language: lang });
   applyLanguage(lang);
 });
 
@@ -152,12 +153,6 @@ document.getElementById("save").addEventListener("click", async (event) => {
   const tavilyKey = tavilyApiKeyInput.value.trim();
   const customPrompt = customPromptInput.value.trim();
 
-  if (!key && !geminiKey && !openrouterKey && !groqKey) {
-    msgEl.style.color = "#f55b5b";
-    msgEl.textContent = t(currentLang, "save_error_noKey");
-    return;
-  }
-
   try {
     const settingsToSave = {
       apiKey: key,
@@ -174,9 +169,19 @@ document.getElementById("save").addEventListener("click", async (event) => {
 
     // Verify the write immediately. This makes a broken Save operation visible
     // instead of showing "Saved" when the value was not actually persisted.
-    const saved = await chrome.storage.local.get(["groqApiKey", "groqKey"]);
-    if (saved.groqApiKey !== groqKey || saved.groqKey !== groqKey) {
-      throw new Error("Groq API key was not persisted to extension storage.");
+    const saved = await chrome.storage.local.get([
+      "apiKey",
+      "geminiApiKey",
+      "openrouterApiKey",
+      "groqApiKey",
+      "groqKey",
+      "tavilyApiKey",
+      "customPrompt",
+    ]);
+    for (const [name, value] of Object.entries(settingsToSave)) {
+      if (saved[name] !== value) {
+        throw new Error(`Setting "${name}" was not persisted to extension storage.`);
+      }
     }
 
     msgEl.style.color = "#4ade80";
