@@ -11,7 +11,6 @@ import { HISTORY_STORAGE_KEY, MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LAN
 import { saveSettingsBackup, restoreSettingsFromBackup } from "../settings-storage.js";
 
 const apiKeyInput = document.getElementById("apiKey");
-const geminiApiKeyInput = document.getElementById("geminiApiKey");
 const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
 const groqApiKeyInput = document.getElementById("groqApiKey");
 const tavilyApiKeyInput = document.getElementById("tavilyApiKey");
@@ -117,7 +116,6 @@ async function loadSavedApiSettings() {
   await restoreSettingsFromBackup();
   const {
     apiKey,
-    geminiApiKey,
     openrouterApiKey,
     groqApiKey,
     groqKey,
@@ -125,7 +123,6 @@ async function loadSavedApiSettings() {
     customPrompt,
   } = await chrome.storage.local.get([
     "apiKey",
-    "geminiApiKey",
     "openrouterApiKey",
     "groqApiKey",
     "groqKey",
@@ -134,7 +131,6 @@ async function loadSavedApiSettings() {
   ]);
 
   apiKeyInput.value = apiKey || "";
-  geminiApiKeyInput.value = geminiApiKey || "";
   openrouterApiKeyInput.value = openrouterApiKey || "";
   groqApiKeyInput.value = groqApiKey || groqKey || "";
   tavilyApiKeyInput.value = tavilyApiKey || "";
@@ -147,7 +143,6 @@ document.getElementById("save").addEventListener("click", async (event) => {
   event.preventDefault();
 
   const key = apiKeyInput.value.trim();
-  const geminiKey = geminiApiKeyInput.value.trim();
   const openrouterKey = openrouterApiKeyInput.value.trim();
   const groqKey = groqApiKeyInput.value.trim();
   const tavilyKey = tavilyApiKeyInput.value.trim();
@@ -156,7 +151,6 @@ document.getElementById("save").addEventListener("click", async (event) => {
   try {
     const settingsToSave = {
       apiKey: key,
-      geminiApiKey: geminiKey,
       openrouterApiKey: openrouterKey,
       groqApiKey: groqKey,
       // Keep the legacy key name in sync so older installed builds can still read it.
@@ -170,9 +164,7 @@ document.getElementById("save").addEventListener("click", async (event) => {
     // Verify the write immediately. This makes a broken Save operation visible
     // instead of showing "Saved" when the value was not actually persisted.
     const saved = await chrome.storage.local.get([
-      "apiKey",
-      "geminiApiKey",
-      "openrouterApiKey",
+      "apiKey",      "openrouterApiKey",
       "groqApiKey",
       "groqKey",
       "tavilyApiKey",
@@ -770,9 +762,7 @@ loadTheme();
 // (currentConversationId, pendingContextAction), which are worthless on a
 // fresh install.
 const SETTINGS_BACKUP_KEYS = [
-  "apiKey",
-  "geminiApiKey",
-  "openrouterApiKey",
+  "apiKey",  "openrouterApiKey",
   "groqApiKey",
   "tavilyApiKey",
   "factCheckWebResearch",
