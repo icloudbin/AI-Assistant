@@ -8,6 +8,7 @@ import {
   LANGUAGE_STORAGE_KEY,
 } from "../i18n.js";
 import { HISTORY_STORAGE_KEY, MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
+import { saveSettingsBackup, restoreSettingsFromBackup } from "../settings-storage.js";
 
 const apiKeyInput = document.getElementById("apiKey");
 const geminiApiKeyInput = document.getElementById("geminiApiKey");
@@ -67,7 +68,9 @@ async function loadPreferredTranslationLanguage() {
 }
 
 preferredTranslationLanguageSelect.addEventListener("change", async () => {
-  await chrome.storage.local.set({ [PREFERRED_TRANSLATION_LANGUAGE_KEY]: preferredTranslationLanguageSelect.value });
+  const value = preferredTranslationLanguageSelect.value;
+  await chrome.storage.local.set({ [PREFERRED_TRANSLATION_LANGUAGE_KEY]: value });
+  await saveSettingsBackup({ preferredTranslationLanguage: value });
 });
 
 function applyLanguage(lang) {
@@ -98,7 +101,16 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-loadLanguage();
+async function initializeSettingsPage() {
+  // Recover settings before populating the controls. This protects against
+  // an unexpected browser/extension storage reset while keeping
+  // chrome.storage.local as the normal primary store.
+  await restoreSettingsFromBackup();
+  await loadLanguage();
+  await loadTheme();
+}
+
+void initializeSettingsPage();
 
 chrome.storage.local.get(
   ["apiKey", "geminiApiKey", "openrouterApiKey", "groqApiKey", "groqKey", "tavilyApiKey", "customPrompt"],
@@ -129,7 +141,7 @@ document.getElementById("save").addEventListener("click", async (event) => {
   }
 
   try {
-    await chrome.storage.local.set({
+    const settingsToSave = {
       apiKey: key,
       geminiApiKey: geminiKey,
       openrouterApiKey: openrouterKey,
@@ -138,7 +150,9 @@ document.getElementById("save").addEventListener("click", async (event) => {
       groqKey,
       tavilyApiKey: tavilyKey,
       customPrompt,
-    });
+    };
+    await chrome.storage.local.set(settingsToSave);
+    await saveSettingsBackup(settingsToSave);
 
     // Verify the write immediately. This makes a broken Save operation visible
     // instead of showing "Saved" when the value was not actually persisted.
@@ -698,6 +712,7 @@ themeButtons.forEach((button) => {
   button.addEventListener("click", async () => {
     const preference = button.dataset.themeChoice;
     await chrome.storage.local.set({ [THEME_STORAGE_KEY]: preference });
+    await saveSettingsBackup({ themePreference: preference });
     applyTheme(preference);
   });
 });
@@ -836,6 +851,7 @@ async function importSettings() {
     if (!Object.keys(restored).length) throw new Error(t(currentLang, "settingsBackup_error_notSettingsBackup"));
 
     await chrome.storage.local.set(restored);
+    await saveSettingsBackup(restored);
 
     // The API-key inputs and prompt textarea are loaded once at page load
     // and have no storage.onChanged listener,
