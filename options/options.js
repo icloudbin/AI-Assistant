@@ -112,31 +112,49 @@ chrome.storage.local.get(
   }
 );
 
-document.getElementById("save").addEventListener("click", async () => {
+document.getElementById("save").addEventListener("click", async (event) => {
+  event.preventDefault();
+
   const key = apiKeyInput.value.trim();
   const geminiKey = geminiApiKeyInput.value.trim();
   const openrouterKey = openrouterApiKeyInput.value.trim();
   const groqKey = groqApiKeyInput.value.trim();
   const tavilyKey = tavilyApiKeyInput.value.trim();
   const customPrompt = customPromptInput.value.trim();
+
   if (!key && !geminiKey && !openrouterKey && !groqKey) {
     msgEl.style.color = "#f55b5b";
     msgEl.textContent = t(currentLang, "save_error_noKey");
     return;
   }
-  await chrome.storage.local.set({
-    apiKey: key,
-    geminiApiKey: geminiKey,
-    openrouterApiKey: openrouterKey,
-    groqApiKey: groqKey,
-    // Keep the legacy key name in sync so an older background worker can still read it.
-    groqKey,
-    tavilyApiKey: tavilyKey,
-    customPrompt,
-  });
-  msgEl.style.color = "#4ade80";
-  msgEl.textContent = t(currentLang, "save_success");
-  setTimeout(() => (msgEl.textContent = ""), 1500);
+
+  try {
+    await chrome.storage.local.set({
+      apiKey: key,
+      geminiApiKey: geminiKey,
+      openrouterApiKey: openrouterKey,
+      groqApiKey: groqKey,
+      // Keep the legacy key name in sync so older installed builds can still read it.
+      groqKey,
+      tavilyApiKey: tavilyKey,
+      customPrompt,
+    });
+
+    // Verify the write immediately. This makes a broken Save operation visible
+    // instead of showing "Saved" when the value was not actually persisted.
+    const saved = await chrome.storage.local.get(["groqApiKey", "groqKey"]);
+    if (saved.groqApiKey !== groqKey || saved.groqKey !== groqKey) {
+      throw new Error("Groq API key was not persisted to extension storage.");
+    }
+
+    msgEl.style.color = "#4ade80";
+    msgEl.textContent = t(currentLang, "save_success");
+    setTimeout(() => (msgEl.textContent = ""), 1500);
+  } catch (err) {
+    console.error("[AI Assistant] Settings save failed:", err);
+    msgEl.style.color = "#f55b5b";
+    msgEl.textContent = err?.message || "Failed to save settings.";
+  }
 });
 
 // NOTE ON SCOPE: conversationToText()/makeBackupEntries() below build the
