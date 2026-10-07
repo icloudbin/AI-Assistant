@@ -72,7 +72,6 @@ The Extension does not provide its own AI inference server. Depending on the mod
 
 DeepSeek — https://api.deepseek.com
 - Tavily — https://api.tavily.com (only when the user enables online Fact Check)
-Google Gemini — https://generativelanguage.googleapis.com
 Anthropic Claude — https://api.anthropic.com
 OpenAI — https://api.openai.com
 OpenRouter — https://openrouter.ai
