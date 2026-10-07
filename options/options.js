@@ -13,7 +13,6 @@ const apiKeyInput = document.getElementById("apiKey");
 const geminiApiKeyInput = document.getElementById("geminiApiKey");
 const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
 const groqApiKeyInput = document.getElementById("groqApiKey");
-const zaiApiKeyInput = document.getElementById("zaiApiKey");
 const tavilyApiKeyInput = document.getElementById("tavilyApiKey");
 const customPromptInput = document.getElementById("customPrompt");
 const msgEl = document.getElementById("msg");
@@ -102,13 +101,12 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 loadLanguage();
 
 chrome.storage.local.get(
-  ["apiKey", "geminiApiKey", "claudeApiKey", "openaiApiKey", "openrouterApiKey", "zaiApiKey", "tavilyApiKey", "customPrompt"],
-  ({ apiKey, geminiApiKey, claudeApiKey, openaiApiKey, openrouterApiKey, zaiApiKey, tavilyApiKey, customPrompt }) => {
+  ["apiKey", "geminiApiKey", "openrouterApiKey", "groqApiKey", "tavilyApiKey", "customPrompt"],
+  ({ apiKey, geminiApiKey, openrouterApiKey, groqApiKey, tavilyApiKey, customPrompt }) => {
     if (apiKey) apiKeyInput.value = apiKey;
     if (geminiApiKey) geminiApiKeyInput.value = geminiApiKey;
     if (openrouterApiKey) openrouterApiKeyInput.value = openrouterApiKey;
     if (groqApiKey) groqApiKeyInput.value = groqApiKey;
-    if (zaiApiKey) zaiApiKeyInput.value = zaiApiKey;
     if (tavilyApiKey) tavilyApiKeyInput.value = tavilyApiKey;
     if (customPrompt) customPromptInput.value = customPrompt;
   }
@@ -119,10 +117,9 @@ document.getElementById("save").addEventListener("click", async () => {
   const geminiKey = geminiApiKeyInput.value.trim();
   const openrouterKey = openrouterApiKeyInput.value.trim();
   const groqKey = groqApiKeyInput.value.trim();
-  const zaiKey = zaiApiKeyInput.value.trim();
   const tavilyKey = tavilyApiKeyInput.value.trim();
   const customPrompt = customPromptInput.value.trim();
-  if (!key && !geminiKey && !claudeKey && !openaiKey && !openrouterKey && !zaiKey) {
+  if (!key && !geminiKey && !openrouterKey && !groqKey) {
     msgEl.style.color = "#f55b5b";
     msgEl.textContent = t(currentLang, "save_error_noKey");
     return;
@@ -132,7 +129,6 @@ document.getElementById("save").addEventListener("click", async () => {
     geminiApiKey: geminiKey,
     openrouterApiKey: openrouterKey,
     groqApiKey: groqKey,
-    zaiApiKey: zaiKey,
     tavilyApiKey: tavilyKey,
     customPrompt,
   });
@@ -830,7 +826,6 @@ async function importSettings() {
     geminiApiKeyInput.value = restored.geminiApiKey || "";
     openrouterApiKeyInput.value = restored.openrouterApiKey || "";
     groqApiKeyInput.value = restored.groqApiKey || "";
-    zaiApiKeyInput.value = restored.zaiApiKey || "";
     if (restored.customPrompt !== undefined) customPromptInput.value = restored.customPrompt;
 
     msgEl.style.color = "#4ade80";
