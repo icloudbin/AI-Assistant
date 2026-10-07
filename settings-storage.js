@@ -84,6 +84,8 @@ export async function getSettingsBackup() {
 // This means an intentional empty-string setting is never overwritten.
 export async function restoreSettingsFromBackup() {
   try {
+    // Remove the Gemini API key left by older builds; Gemini is no longer a supported provider.
+    await chrome.storage.local.remove(["geminiApiKey"]);
     const [local, backup] = await Promise.all([
       chrome.storage.local.get(PERSISTED_SETTING_KEYS),
       getSettingsBackup(),
