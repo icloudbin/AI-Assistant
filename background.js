@@ -758,9 +758,7 @@ async function streamZAI(model, question, pageContext, history, images, ctx) {
 // extension's background service worker rather than through a server-side
 // proxy or the Anthropic SDK - see
 // https://platform.claude.com/docs/en/api/overview (checked 2026-08-23).
-// Like Gemini, the system prompt is a single top-level field (`system`, a
-// plain string here) rather than a message with role "system", so
-// buildSystemInstruction is shared by providers that use a top-level system field.
+// Claude uses a single top-level `system` string; OpenAI uses `instructions`.
 // Unlike DeepSeek, `max_tokens` is required by the Messages API.
 // Modern adaptive-thinking Claude models share the same output budget between
 // thinking and visible output, so the model catalog supplies a larger budget.
@@ -1018,12 +1016,7 @@ function buildMessages(question, pageContext, history, customPrompt, images = []
   return messages;
 }
 
-// Gemini has one system_instruction field rather than a list of system
-// messages, so the base prompt, the user's custom prompt, the output-language
-// requirement, and the page-context instruction are combined into a single
-// instruction block instead. Claude's streamClaude() and OpenAI's
-// streamOpenAI() above reuse this same function for their own top-level
-// `system`/`instructions` string fields.
+// Claude and OpenAI reuse this helper for their top-level system/instructions fields.
 function buildSystemInstruction(pageContext, customPrompt, lang) {
   const text = customPrompt ? `${BASE_PROMPT}\n\nUser-defined instructions:\n${customPrompt}` : BASE_PROMPT;
   return `${text}\n\n${outputLanguageInstruction(lang)}\n\n${pageContextInstruction(pageContext)}`;
