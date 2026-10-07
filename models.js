@@ -11,3 +11,21 @@ export const MODELS = [
 export function findModelById(id) {
   return MODELS.find((m) => m.id === id) || MODELS[0];
 }
+
+// Keep compatibility with sidepanel.js and restored conversations from older builds.
+const MODEL_ALIASES = {
+  "deepseek-v4.1-flash": "deepseek-flash",
+  "deepseek-v4-flash": "deepseek-flash",
+  "gemini-3.8-flash": "gemini-3.8-flash",
+  "openrouter-free": "openrouter-free-auto",
+};
+export function resolveModelId(id) {
+  if (!id) return MODELS[0].id;
+  const resolved = MODEL_ALIASES[id] || id;
+  return MODELS.some((m) => m.id === resolved) ? resolved : MODELS[0].id;
+}
+export function findModelIdByLabel(label) {
+  if (!label) return null;
+  const model = MODELS.find((m) => m.label === label);
+  return model ? model.id : null;
+}
