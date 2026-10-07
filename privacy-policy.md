@@ -1,6 +1,6 @@
 Privacy Policy for AI Assistant
 
-Effective Date: September 3, 2026
+Effective Date: October 7, 2026
 
 AI Assistant ("the Extension") is a browser extension that provides AI assistance for webpages, selected webpage text, and user-provided files. This Privacy Policy explains what information the Extension processes, how it is used, and when it is shared with third-party services.
 
@@ -76,6 +76,7 @@ Google Gemini — https://generativelanguage.googleapis.com
 Anthropic Claude — https://api.anthropic.com
 OpenAI — https://api.openai.com
 OpenRouter — https://openrouter.ai
+Z.AI — https://api.z.ai
 
 The information sent to the selected provider may include the user's question, relevant conversation history, custom prompt, webpage context, selected webpage text, and attached images or extracted file content.
 

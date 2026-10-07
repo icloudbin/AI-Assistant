@@ -184,6 +184,94 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 const KEEP_ALIVE_INTERVAL_MS = 20000;
 let keepAliveTimer = null;
 
+// Gemini documents 503 UNAVAILABLE as a transient service-overload condition
+// and recommends exponential backoff with jitter for direct REST callers.
+// The previous build made exactly one Gemini request, so a temporary overload
+// immediately surfaced as a hard error even when the service recovered a
+// moment later. Keep retries inside the provider request itself so the higher
+// level request is not duplicated (and Tavily/page extraction are not repeated).
+const GEMINI_MAX_RETRIES = 4;
+const GEMINI_INITIAL_RETRY_DELAY_MS = 1000;
+const GEMINI_MAX_RETRY_DELAY_MS = 60000;
+
+function getRetryAfterMs(resp) {
+  const raw = resp?.headers?.get?.("retry-after");
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(GEMINI_MAX_RETRY_DELAY_MS, Math.round(seconds * 1000));
+  }
+  const when = Date.parse(raw);
+  if (Number.isFinite(when)) {
+    return Math.max(0, Math.min(GEMINI_MAX_RETRY_DELAY_MS, when - Date.now()));
+  }
+  return null;
+}
+
+function isGeminiTransientStatus(status) {
+  return status === 408 || status === 429 || (status >= 500 && status <= 599);
+}
+
+function sleepWithAbort(ms, signal) {
+  if (signal?.aborted) {
+    const err = new DOMException("The operation was aborted.", "AbortError");
+    return Promise.reject(err);
+  }
+  return new Promise((resolve, reject) => {
+    let timer = null;
+    const onAbort = () => {
+      if (timer !== null) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(new DOMException("The operation was aborted.", "AbortError"));
+    };
+    function done() {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(done, ms);
+  });
+}
+
+async function fetchGeminiWithRetry(url, options, ctx) {
+  let lastResponse = null;
+  let lastBody = "";
+
+  for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt += 1) {
+    if (ctx.signal?.aborted) {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    }
+
+    const resp = await fetch(url, options);
+    if (resp.ok) return resp;
+
+    lastResponse = resp;
+    lastBody = await resp.text();
+
+    // Only retry transient HTTP failures. Invalid keys, malformed requests,
+    // permission errors, etc. should fail immediately instead of generating
+    // repeated API traffic.
+    if (!isGeminiTransientStatus(resp.status) || attempt >= GEMINI_MAX_RETRIES) {
+      break;
+    }
+
+    const retryAfter = getRetryAfterMs(resp);
+    const exponential = Math.min(
+      GEMINI_MAX_RETRY_DELAY_MS,
+      GEMINI_INITIAL_RETRY_DELAY_MS * (2 ** attempt)
+    );
+    const jitter = Math.floor(Math.random() * Math.min(1000, Math.max(250, exponential * 0.25)));
+    const delay = retryAfter ?? Math.min(GEMINI_MAX_RETRY_DELAY_MS, exponential + jitter);
+
+    console.warn(
+      `[AI Assistant] Gemini HTTP ${resp.status}; retry ${attempt + 1}/${GEMINI_MAX_RETRIES} in ${delay}ms.`
+    );
+    await sleepWithAbort(delay, ctx.signal);
+  }
+
+  throw new Error(`HTTP ${lastResponse?.status ?? 500} ${lastBody}`);
+}
+
 function startRequestKeepAlive() {
   stopRequestKeepAlive();
   keepAliveTimer = setInterval(() => {
@@ -264,7 +352,7 @@ chrome.runtime.onConnect.addListener((port) => {
     startRequestKeepAlive();
 
     try {
-      const { question, pageContext, includePageContext, history, images = [], modelId, provider, apiModel, thinking, factCheck, noWebResearch = false, forceWebResearch = false } = msg.payload;
+      const { question, pageContext, includePageContext, history, images = [], modelId, factCheck, noWebResearch = false, forceWebResearch = false } = msg.payload;
       const lang = await getStoredLanguage();
       // Never trust a stale/accidental pageContext value when the user has
       // disabled "Read current page". This is the final privacy boundary
@@ -272,27 +360,23 @@ chrome.runtime.onConnect.addListener((port) => {
       // unaffected by, any attached images (see normalizedImages below),
       // which are sent whenever present regardless of this toggle.
       const requestPageContext = includePageContext === true ? pageContext : null;
-      const storedModel = findModelById(modelId);
+      const model = findModelById(modelId);
 
-      // Resolve the model for THIS request. Never reuse a previous request's
-      // provider/model or silently fall back to another provider.
-      if (!storedModel || storedModel.id !== modelId) {
+      // Resolve the model from the canonical catalog for THIS request.
+      // Never trust provider/apiModel/thinking values supplied by the UI and
+      // never silently fall back to another provider. Legacy IDs are handled
+      // by findModelById() so an upgrade does not break saved selections.
+      if (!model) {
         throw new Error(t(lang, "bg_error_unknownModel_template", { model: modelId || "(none)" }));
       }
-
-      const model = {
-        ...storedModel,
-        provider: provider || storedModel.provider,
-        apiModel: apiModel || storedModel.apiModel,
-        thinking: thinking ?? storedModel.thinking,
-      };
 
       if (
         model.provider !== "gemini" &&
         model.provider !== "deepseek" &&
         model.provider !== "claude" &&
         model.provider !== "openai" &&
-        model.provider !== "openrouter"
+        model.provider !== "openrouter" &&
+        model.provider !== "zai"
       ) {
         throw new Error(t(lang, "bg_error_unsupportedProvider_template", { provider: model.provider }));
       }
@@ -346,6 +430,8 @@ chrome.runtime.onConnect.addListener((port) => {
         await streamOpenAI(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "openrouter") {
         await streamOpenRouter(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
+      } else if (model.provider === "zai") {
+        await streamZAI(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       }
 
       port.postMessage({ type: "DONE", requestId });
@@ -395,7 +481,7 @@ function factCheckOutputLanguage(lang) {
   return outputLanguageName(lang);
 }
 
-// Sent with EVERY request (all five providers), not just Fact Check: the
+// Sent with EVERY request (all supported providers), not just Fact Check: the
 // answer language must follow the display language chosen in Settings.
 // Previously only Fact Check carried an explicit output-language
 // requirement, so with e.g. a Japanese UI a quick action - whose API prompt
@@ -662,6 +748,7 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
       messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang),
       stream: true,
       ...(model.thinking ? { thinking: { type: model.thinking } } : {}),
+      ...(model.reasoningEffort ? { reasoning_effort: model.reasoningEffort } : {}),
     }),
     signal: ctx.signal,
   });
@@ -699,6 +786,34 @@ async function streamOpenRouter(model, question, pageContext, history, images, c
   await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx);
 }
 
+// Z.AI's current documented API is OpenAI-compatible PaaS Chat Completions.
+// GLM-5.3-Flash supports multimodal message content, thinking, and the
+// reasoning_effort parameter. The extension therefore uses the same shared
+// message builder as DeepSeek/OpenRouter.
+async function streamZAI(model, question, pageContext, history, images, ctx) {
+  const { zaiApiKey, customPrompt } = await chrome.storage.local.get(["zaiApiKey", "customPrompt"]);
+  if (!zaiApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "Z.AI" }));
+
+  const resp = await fetch("https://api.z.ai/api/paas/v4/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${zaiApiKey}`,
+    },
+    body: JSON.stringify({
+      model: model.apiModel,
+      messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang),
+      stream: true,
+      ...(model.thinking ? { thinking: { type: model.thinking } } : {}),
+      ...(model.reasoningEffort ? { reasoning_effort: model.reasoningEffort } : {}),
+    }),
+    signal: ctx.signal,
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
+
+  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx);
+}
+
 // Gemini uses Google's current Interactions API. It takes `input` content
 // blocks and a plain-string `system_instruction`; streamed output arrives as
 // typed SSE events, with visible text in `step.delta` events whose delta type
@@ -711,7 +826,7 @@ async function streamGemini(model, question, pageContext, history, images, ctx) 
   if (!geminiApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "Gemini" }));
 
   const url = "https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse";
-  const resp = await fetch(url, {
+  const resp = await fetchGeminiWithRetry(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -727,8 +842,7 @@ async function streamGemini(model, question, pageContext, history, images, ctx) 
       generation_config: { thinking_summaries: "none" },
     }),
     signal: ctx.signal,
-  });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
+  }, ctx);
 
   await readSse(
     resp,
@@ -752,9 +866,8 @@ async function streamGemini(model, question, pageContext, history, images, ctx) 
 // plain string here) rather than a message with role "system", so
 // buildSystemInstruction is reused unchanged from the Gemini branch above.
 // Unlike DeepSeek/Gemini, `max_tokens` is required by the Messages API.
-// 8192 is requested because adaptive-thinking models draw from the same
-// output budget and 4096 could be consumed entirely by thinking, leaving no
-// visible answer.
+// Modern adaptive-thinking Claude models share the same output budget between
+// thinking and visible output, so the model catalog supplies a larger budget.
 // The SSE stream itself uses named events (message_start,
 // content_block_start, content_block_delta, content_block_stop,
 // message_delta, message_stop, plus periodic pings) instead of
@@ -778,7 +891,7 @@ async function streamClaude(model, question, pageContext, history, images, ctx) 
     },
     body: JSON.stringify({
       model: model.apiModel,
-      max_tokens: 8192,
+      max_tokens: model.maxTokens || 32768,
       system: buildSystemInstruction(pageContext, customPrompt, ctx.lang),
       messages: buildClaudeMessages(question, history, images, ctx.lang),
       stream: true,
@@ -826,7 +939,7 @@ async function streamClaude(model, question, pageContext, history, images, ctx) 
 // a direct request does turn out to be blocked.
 async function streamOpenAI(model, question, pageContext, history, images, ctx) {
   const { openaiApiKey, customPrompt } = await chrome.storage.local.get(["openaiApiKey", "customPrompt"]);
-  if (!openaiApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "ChatGPT" }));
+  if (!openaiApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "OpenAI" }));
 
   const resp = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -840,6 +953,7 @@ async function streamOpenAI(model, question, pageContext, history, images, ctx) 
       input: buildOpenAIInput(question, history, images, ctx.lang),
       store: false,
       stream: true,
+      ...(model.reasoningEffort ? { reasoning: { effort: model.reasoningEffort } } : {}),
     }),
     signal: ctx.signal,
   });

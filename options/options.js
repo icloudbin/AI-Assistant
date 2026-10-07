@@ -14,6 +14,7 @@ const geminiApiKeyInput = document.getElementById("geminiApiKey");
 const claudeApiKeyInput = document.getElementById("claudeApiKey");
 const openaiApiKeyInput = document.getElementById("openaiApiKey");
 const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
+const zaiApiKeyInput = document.getElementById("zaiApiKey");
 const tavilyApiKeyInput = document.getElementById("tavilyApiKey");
 const customPromptInput = document.getElementById("customPrompt");
 const msgEl = document.getElementById("msg");
@@ -102,13 +103,14 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 loadLanguage();
 
 chrome.storage.local.get(
-  ["apiKey", "geminiApiKey", "claudeApiKey", "openaiApiKey", "openrouterApiKey", "tavilyApiKey", "customPrompt"],
-  ({ apiKey, geminiApiKey, claudeApiKey, openaiApiKey, openrouterApiKey, tavilyApiKey, customPrompt }) => {
+  ["apiKey", "geminiApiKey", "claudeApiKey", "openaiApiKey", "openrouterApiKey", "zaiApiKey", "tavilyApiKey", "customPrompt"],
+  ({ apiKey, geminiApiKey, claudeApiKey, openaiApiKey, openrouterApiKey, zaiApiKey, tavilyApiKey, customPrompt }) => {
     if (apiKey) apiKeyInput.value = apiKey;
     if (geminiApiKey) geminiApiKeyInput.value = geminiApiKey;
     if (claudeApiKey) claudeApiKeyInput.value = claudeApiKey;
     if (openaiApiKey) openaiApiKeyInput.value = openaiApiKey;
     if (openrouterApiKey) openrouterApiKeyInput.value = openrouterApiKey;
+    if (zaiApiKey) zaiApiKeyInput.value = zaiApiKey;
     if (tavilyApiKey) tavilyApiKeyInput.value = tavilyApiKey;
     if (customPrompt) customPromptInput.value = customPrompt;
   }
@@ -120,9 +122,10 @@ document.getElementById("save").addEventListener("click", async () => {
   const claudeKey = claudeApiKeyInput.value.trim();
   const openaiKey = openaiApiKeyInput.value.trim();
   const openrouterKey = openrouterApiKeyInput.value.trim();
+  const zaiKey = zaiApiKeyInput.value.trim();
   const tavilyKey = tavilyApiKeyInput.value.trim();
   const customPrompt = customPromptInput.value.trim();
-  if (!key && !geminiKey && !claudeKey && !openaiKey && !openrouterKey) {
+  if (!key && !geminiKey && !claudeKey && !openaiKey && !openrouterKey && !zaiKey) {
     msgEl.style.color = "#f55b5b";
     msgEl.textContent = t(currentLang, "save_error_noKey");
     return;
@@ -133,6 +136,7 @@ document.getElementById("save").addEventListener("click", async () => {
     claudeApiKey: claudeKey,
     openaiApiKey: openaiKey,
     openrouterApiKey: openrouterKey,
+    zaiApiKey: zaiKey,
     tavilyApiKey: tavilyKey,
     customPrompt,
   });
@@ -721,6 +725,7 @@ const SETTINGS_BACKUP_KEYS = [
   "claudeApiKey",
   "openaiApiKey",
   "openrouterApiKey",
+  "zaiApiKey",
   "tavilyApiKey",
   "factCheckWebResearch",
   "customPrompt",
@@ -832,6 +837,7 @@ async function importSettings() {
     claudeApiKeyInput.value = restored.claudeApiKey || "";
     openaiApiKeyInput.value = restored.openaiApiKey || "";
     openrouterApiKeyInput.value = restored.openrouterApiKey || "";
+    zaiApiKeyInput.value = restored.zaiApiKey || "";
     if (restored.customPrompt !== undefined) customPromptInput.value = restored.customPrompt;
 
     msgEl.style.color = "#4ade80";

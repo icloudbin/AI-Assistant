@@ -1,5 +1,5 @@
 // sidepanel/sidepanel.js —— Fixed version: no trailing spaces; keeps import "../models.js"; API Key configuration moved to Settings
-import { MODELS, findModelById } from "../models.js";
+import { MODELS, findModelById, resolveModelId, findModelIdByLabel } from "../models.js";
 import { HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY, PENDING_CONTEXT_ACTION_KEY, PREFERRED_TRANSLATION_LANGUAGE_KEY, MAX_SAVED_CONVERSATIONS } from "../storage-keys.js";
 import { getStoredLanguage, applyStaticTranslations, t, LANGUAGE_STORAGE_KEY } from "../i18n.js";
 
@@ -803,8 +803,14 @@ function populateModelSelect() {
 
 async function restoreSelectedModel() {
   const { selectedModelId } = await chrome.storage.local.get("selectedModelId");
-  if (selectedModelId && MODELS.some((m) => m.id === selectedModelId)) {
-    modelSelect.value = selectedModelId;
+  const resolvedModelId = resolveModelId(selectedModelId);
+  if (resolvedModelId) {
+    modelSelect.value = resolvedModelId;
+    // Persist the canonical ID once so future requests are not dependent on
+    // legacy aliases.
+    if (resolvedModelId !== selectedModelId) {
+      await chrome.storage.local.set({ selectedModelId: resolvedModelId });
+    }
   }
 }
 
@@ -828,11 +834,10 @@ function findConversationModelId(messages) {
   for (let i = (messages || []).length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m.role !== "assistant") continue;
-    if (m.modelId && MODELS.some((model) => model.id === m.modelId)) return m.modelId;
-    if (m.modelLabel) {
-      const byLabel = MODELS.find((model) => model.label === m.modelLabel);
-      if (byLabel) return byLabel.id;
-    }
+    const resolvedId = resolveModelId(m.modelId);
+    if (resolvedId) return resolvedId;
+    const byLabelId = findModelIdByLabel(m.modelLabel);
+    if (byLabelId) return byLabelId;
   }
   return null;
 }
@@ -1361,7 +1366,7 @@ async function selectConversation(id) {
     // the user's way out of a hung/unresponsive request.
     stopActiveRequest();
 
-    // New Topic is a fresh conversation (DeepSeek, Gemini, Claude, ChatGPT,
+    // New Topic is a fresh conversation (DeepSeek, Gemini, Claude, OpenAI,
     // or OpenRouter, depending on the selected model): discard the active conversation
     // state, clear the composer, and leave the API ready for the user's
     // first message. The new conversation is persisted only when that
@@ -2023,9 +2028,6 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       ],
       // Send the exact model selected at submit time.
       modelId: selectedModel.id,
-      provider: selectedModel.provider,
-      apiModel: selectedModel.apiModel,
-      thinking: selectedModel.thinking,
       factCheck: factCheck ? { enabled: true, selectedText: factCheckSelectedText } : null,
       // Summarize, Translate, and Key Points remain page-only transforms.
       // Explain explicitly opts into Tavily research, while Fact Check uses

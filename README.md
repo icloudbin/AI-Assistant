@@ -1,3 +1,14 @@
+# AI model connection update (2026-10-07, v1.10.54)
+
+- DeepSeek: `deepseek-flash` remains the API ID for DeepSeek V4.1 Flash; reasoning effort is pinned to high.
+- Gemini: confirmed on `gemini-3.8-flash` using Google's Interactions API.
+- Gemini transient HTTP 408/429/5xx failures are retried with exponential backoff, jitter, and `Retry-After` support; `Gemini 3.7 Flash` is also available as a manual fallback.
+- Claude: updated to Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 4.5; the Messages API output budget is increased so modern adaptive/extended thinking has room to complete an answer.
+- OpenAI: replaced the stale GPT-5.6 entries with GPT-6 Astra, GPT-6.1 Sol, and GPT-6 Luna on the Responses API, with medium reasoning effort.
+- Z.AI: added `glm-5.3-flash` through the documented OpenAI-compatible PaaS Chat Completions endpoint. A dedicated Z.AI API-key field is included in Settings and Settings Backup.
+- Model selections saved by older builds are migrated through explicit legacy-ID/label aliases instead of silently falling back to the first model.
+- Background requests now resolve provider/model configuration only from the canonical model catalog; UI-supplied provider/API-model overrides are ignored.
+
 # Language output fix (2026-09-22)
 
 - The language selected in **Settings > Language** is now enforced as the authoritative response language for every AI request.
@@ -87,14 +98,14 @@ This uses the browser's built-in Web Speech API, so it needs an internet connect
 
 **Known Brave limitation:** Brave's speech-recognition backend is unreliable — the classic cloud engine returns a "network" error because Brave doesn't have access to Google's private recognition service, and Brave's newer on-device engine has an open bug where the required language model never finishes installing. Voice input reliably works in Chrome; in Brave it depends on your version, and the extension shows an on-screen error rather than failing silently if it's blocked. If Brave fixes this, no code changes should be needed.
 
-## DeepSeek models consolidated to deepseek-flash
+## Historical: DeepSeek models consolidated to deepseek-flash
 
 DeepSeek's current API model is `deepseek-flash` (DeepSeek-V4.1-Flash). The legacy `deepseek-chat` / `deepseek-reasoner` names stopped working on 2026-07-24, and `deepseek-v4-pro` is being retired (requests route to V4.1 Flash after 2026-09-14 Beijing time). This version replaces the three previous DeepSeek options — DeepSeek Chat, DeepSeek Reasoner, and DeepSeek V4 Pro — with a single "DeepSeek V4.1 Flash" entry whose `apiModel` is `deepseek-flash`.
 
 Unlike the earlier V4 line, `deepseek-flash` handles image/vision input natively, so the separate vision-exp endpoint is gone — image requests are sent to the same `deepseek-flash` model. Thinking mode is enabled by default on V4.1 Flash, and `models.js` sends `thinking: {type: "enabled"}` explicitly to pin that behavior (set it to "disabled" to reproduce the old non-thinking Chat behavior). See DeepSeek's [Thinking Mode guide](https://api-docs.deepseek.com/guides/thinking_mode) for the underlying parameters.
 
 
-## Gemini support alongside DeepSeek (v1.7.0)
+## Historical: Gemini support alongside DeepSeek (v1.7.0)
 
 The model dropdown now lists Google Gemini models next to the DeepSeek ones, and Settings has a second, independent "Gemini API Key" field below the DeepSeek one. Either key can be left blank, but Save now requires at least one of the two to be filled in (previously the DeepSeek key alone was required). Picking a Gemini entry from the dropdown and asking a question sends the request to Gemini using the Gemini key; picking a DeepSeek entry still uses the DeepSeek key exactly as before.
 
@@ -112,7 +123,7 @@ Implementation notes:
 - Gemini's "thinking" (extended reasoning before answering) is left at each model's own default, and thought summaries are not requested, so only the final answer streams into the chat — no chain-of-thought text should appear.
 - Image attachments are sent as image content with the current request using the selected provider's multimodal request format.
 
-## Claude support alongside DeepSeek and Gemini (v1.8.0)
+## Historical: Claude support added (v1.8.0)
 
 The model dropdown now also lists Anthropic Claude models, and Settings has a third, independent "Claude API Key" field below the Gemini one. Any of the three keys can be left blank, but Save now requires at least one of the three to be filled in. Picking a Claude entry from the dropdown and asking a question sends the request to Anthropic's Messages API using the Claude key; picking a DeepSeek or Gemini entry still behaves exactly as before.
 
@@ -183,9 +194,9 @@ Verified with a background.js-only test (no DOM needed): connecting a port and d
 
 If this still doesn't resolve it, that would point at the side panel's document genuinely persisting (not reloading) across whatever specific action is being used to "close" it, which needs to be pinned down before a further fix (e.g., the exact click target/menu used to close it) - happy to dig further with that detail.
 
-## ChatGPT support alongside DeepSeek, Gemini, and Claude (v1.9.0)
+## Historical: ChatGPT/OpenAI support added (v1.9.0) — superseded by v1.10.54
 
-The model dropdown now also lists OpenAI models, and Settings has a fourth, independent "ChatGPT API Key" field. Save still only requires at least one of the four keys to be filled in.
+The model dropdown now also lists OpenAI models, and Settings has an independent "OpenAI API Key" field. Save still only requires at least one of the supported provider keys to be filled in.
 
 Model list added (`models.js`), current as of 2026-08-24 per https://developers.openai.com/api/docs/models and https://developers.openai.com/api/docs/guides/latest-model:
 - GPT-5.6 Sol — the current OpenAI flagship, for complex reasoning and coding.
@@ -258,7 +269,7 @@ Investigation: simulated the exact reported sequence (tab active on Page A, requ
 
 Given that, the most likely remaining explanation is that the model doesn't reliably treat a change in page context as invalidating its own prior answer: on a same-conversation follow-up, the model sees both its own previous reply (built from Page A's actual content, sitting in `history`) and a fresh CURRENT PAGE CONTEXT block for Page B - the existing instruction to "ignore page content from a previous tab, a previous page, or an earlier turn" is a generic, always-present reminder, easy to under-weight against a detailed prior answer about a specific different page.
 
-Change: `sidepanel.js` now records which page (title/url only, never the page text) was used for each user message in `history` (persisted via `toStoredMessage`, so this survives conversation save/reload, not just the current session), and on each submission looks back for the most recent earlier page used in this conversation. When it differs from the current one, `pageContext` carries a `previousPage: {title, url}` hint; `background.js`'s `pageContextInstruction()` (shared by all five providers) turns that into an explicit, contrastive instruction - naming the earlier page directly and stating outright that the current one is different and the earlier answer should not be reused - instead of relying only on the generic reminder. A same-page follow-up ("tell me more") is unaffected, since no change is detected and no extra note is added.
+Change: `sidepanel.js` now records which page (title/url only, never the page text) was used for each user message in `history` (persisted via `toStoredMessage`, so this survives conversation save/reload, not just the current session), and on each submission looks back for the most recent earlier page used in this conversation. When it differs from the current one, `pageContext` carries a `previousPage: {title, url}` hint; `background.js`'s `pageContextInstruction()` (shared by all supported providers) turns that into an explicit, contrastive instruction - naming the earlier page directly and stating outright that the current one is different and the earlier answer should not be reused - instead of relying only on the generic reminder. A same-page follow-up ("tell me more") is unaffected, since no change is detected and no extra note is added.
 
 Verified with Node tests: the page-tracking/detection logic (extracted from the real `handleSubmit()` code) correctly identifies a page change across five scenarios - first message, same-page follow-up, an actual switch, a "Read current page" OFF turn, and switching back ON after an OFF turn (correctly looks past the OFF turn to the last real page) - and the updated `pageContextInstruction()` adds the contrastive note only when a change was detected, leaving the plain ON case, the OFF case, and image attachments all unaffected (re-ran the image/ON/OFF regression suite from the previous two fixes together with this one). Could not verify against an actual live model's response, or inside a real Brave side panel - if this doesn't fully resolve it, the next useful data point is whether the small page-context indicator bar in the side panel itself shows the wrong (old) page title after switching tabs (pointing to a still-undiscovered tracking bug) versus shows the correct new page while the written answer is still about the old one (consistent with the model-compliance explanation this change targets).
 
@@ -296,7 +307,7 @@ Verified by extending the same jsdom harness from v1.10.13 with three more cases
 
 Follow-up to the v1.10.26 stable-ID fix. That fix keeps settings across in-place *updates*, but clicking "Remove" on an extension permanently deletes its entire `chrome.storage.local` — Chrome does this for every extension by design, so a remove-then-reinstall cycle always starts empty no matter what the manifest contains.
 
-Settings (options page) now has a "Settings Backup" section: "Export settings" writes every settings key — the five API keys, custom prompt, theme, UI language, preferred translation language, selected model, voice-input language, and composer height — to a single plain-text JSON file, and "Import settings" restores them in one click (validating the file's format marker and accepting only known keys with sane types, so a wrong or hand-edited file can't break anything). Use it before removing/reinstalling the extension, resetting the browser profile, or moving to another machine. The file intentionally contains API keys in readable form (that is its purpose), so it should be stored like a password. Conversation history is excluded — the existing History Management ZIP backup/restore covers it — and the two backups together move everything a user has configured.
+Settings (options page) now has a "Settings Backup" section: "Export settings" writes every settings key — the supported AI API keys, custom prompt, theme, UI language, preferred translation language, selected model, voice-input language, and composer height — to a single plain-text JSON file, and "Import settings" restores them in one click (validating the file's format marker and accepting only known keys with sane types, so a wrong or hand-edited file can't break anything). Use it before removing/reinstalling the extension, resetting the browser profile, or moving to another machine. The file intentionally contains API keys in readable form (that is its purpose), so it should be stored like a password. Conversation history is excluded — the existing History Management ZIP backup/restore covers it — and the two backups together move everything a user has configured.
 
 ## Confirmed: context-menu actions are top-level, not nested under an "AI" submenu; removed the dead `contextMenu_ai` string (v1.10.32)
 

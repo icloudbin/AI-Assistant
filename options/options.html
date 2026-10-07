@@ -147,12 +147,16 @@
       <input id="claudeApiKey" type="password" placeholder="sk-ant-..." autocomplete="off" />
     </div>
     <div class="field">
-      <label for="openaiApiKey" data-i18n="apiKey_openai_label">ChatGPT API Key</label>
+      <label for="openaiApiKey" data-i18n="apiKey_openai_label">OpenAI API Key</label>
       <input id="openaiApiKey" type="password" placeholder="sk-..." autocomplete="off" />
     </div>
     <div class="field">
       <label for="openrouterApiKey" data-i18n="apiKey_openrouter_label">OpenRouter API Key</label>
       <input id="openrouterApiKey" type="password" placeholder="sk-or-..." autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="zaiApiKey" data-i18n="apiKey_zai_label">Z.AI API Key</label>
+      <input id="zaiApiKey" type="password" placeholder="Z.AI API key" autocomplete="off" data-i18n-placeholder="apiKey_zai_placeholder" />
     </div>
     <div class="web-research-section">
       <div class="history-management-title" data-i18n="webResearch_title">Web Research</div>
@@ -168,7 +172,7 @@
       <div class="history-management-title" data-i18n="customPrompt_label">Custom Prompt</div>
       <div class="field custom-prompt-field">
         <textarea id="customPrompt" placeholder="Example: You are a concise technical assistant. Always answer in English, use bullet points when helpful, and clearly distinguish facts from assumptions." data-i18n-placeholder="customPrompt_placeholder"></textarea>
-        <div class="hint backup-hint" data-i18n="customPrompt_hint">This prompt is sent to the selected model (DeepSeek, Gemini, Claude, ChatGPT, or OpenRouter) as a system instruction and can customize how the assistant interprets requests and formats its responses.</div>
+        <div class="hint backup-hint" data-i18n="customPrompt_hint">This prompt is sent to the selected model (DeepSeek, Gemini, Claude, OpenAI, OpenRouter, or Z.AI) as a system instruction and can customize how the assistant interprets requests and formats its responses.</div>
       </div>
     </div>
     <div class="actions">
