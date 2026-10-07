@@ -373,9 +373,8 @@ chrome.runtime.onConnect.addListener((port) => {
       if (
         model.provider !== "gemini" &&
         model.provider !== "deepseek" &&
-        model.provider !== "claude" &&
-        model.provider !== "openai" &&
         model.provider !== "openrouter" &&
+        model.provider !== "groq" &&
         model.provider !== "zai"
       ) {
         throw new Error(t(lang, "bg_error_unsupportedProvider_template", { provider: model.provider }));
@@ -424,12 +423,10 @@ chrome.runtime.onConnect.addListener((port) => {
         await streamGemini(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "deepseek") {
         await streamDeepSeek(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
-      } else if (model.provider === "claude") {
-        await streamClaude(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
-      } else if (model.provider === "openai") {
-        await streamOpenAI(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "openrouter") {
         await streamOpenRouter(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
+      } else if (model.provider === "groq") {
+        await streamGroq(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "zai") {
         await streamZAI(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       }
@@ -749,6 +746,29 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
       stream: true,
       ...(model.thinking ? { thinking: { type: model.thinking } } : {}),
       ...(model.reasoningEffort ? { reasoning_effort: model.reasoningEffort } : {}),
+    }),
+    signal: ctx.signal,
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
+
+  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx);
+}
+
+// Groq OpenAI-compatible Chat Completions API.
+async function streamGroq(model, question, pageContext, history, images, ctx) {
+  const { groqApiKey, customPrompt } = await chrome.storage.local.get(["groqApiKey", "customPrompt"]);
+  if (!groqApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "Groq" }));
+
+  const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${groqApiKey}`,
+    },
+    body: JSON.stringify({
+      model: model.apiModel,
+      messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang),
+      stream: true,
     }),
     signal: ctx.signal,
   });
