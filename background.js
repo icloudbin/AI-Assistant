@@ -760,8 +760,8 @@ async function streamZAI(model, question, pageContext, history, images, ctx) {
 // https://platform.claude.com/docs/en/api/overview (checked 2026-08-23).
 // Like Gemini, the system prompt is a single top-level field (`system`, a
 // plain string here) rather than a message with role "system", so
-// buildSystemInstruction is reused unchanged from the Gemini branch above.
-// Unlike DeepSeek/Gemini, `max_tokens` is required by the Messages API.
+// buildSystemInstruction is shared by providers that use a top-level system field.
+// Unlike DeepSeek, `max_tokens` is required by the Messages API.
 // Modern adaptive-thinking Claude models share the same output budget between
 // thinking and visible output, so the model catalog supplies a larger budget.
 // The SSE stream itself uses named events (message_start,
@@ -807,7 +807,7 @@ async function streamClaude(model, question, pageContext, history, images, ctx) 
 // (https://api.openai.com/v1/responses), not the older
 // /v1/chat/completions - see
 // https://platform.openai.com/docs/guides/migrate-to-responses (checked
-// 2026-08-24). Like Claude/Gemini, the system prompt is a single top-level
+// 2026-08-24). Like Claude, the system prompt is a single top-level
 // field (`instructions`, a plain string) rather than a message with role
 // "system" - unlike Claude, OpenAI's `input` array does technically also
 // accept a "system"/"developer" role turn, but `instructions` is used here
@@ -969,7 +969,7 @@ function condenseHistoryAttachments(text) {
 
 // Normalizes conversation history for providers that require strict
 // user/assistant alternation. Claude's Messages API rejects adjacent
-// same-role turns outright, and Gemini's contents have the same expectation.
+// same-role turns outright.
 // Adjacent same-role messages can genuinely occur in this extension: when a
 // request fails or is stopped, the user's question stays in history with no
 // assistant reply after it, so the next submission would send [..., user,
