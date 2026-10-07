@@ -101,12 +101,12 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 loadLanguage();
 
 chrome.storage.local.get(
-  ["apiKey", "geminiApiKey", "openrouterApiKey", "groqApiKey", "tavilyApiKey", "customPrompt"],
-  ({ apiKey, geminiApiKey, openrouterApiKey, groqApiKey, tavilyApiKey, customPrompt }) => {
+  ["apiKey", "geminiApiKey", "openrouterApiKey", "groqApiKey", "groqKey", "tavilyApiKey", "customPrompt"],
+  ({ apiKey, geminiApiKey, openrouterApiKey, groqApiKey, groqKey, tavilyApiKey, customPrompt }) => {
     if (apiKey) apiKeyInput.value = apiKey;
     if (geminiApiKey) geminiApiKeyInput.value = geminiApiKey;
     if (openrouterApiKey) openrouterApiKeyInput.value = openrouterApiKey;
-    if (groqApiKey) groqApiKeyInput.value = groqApiKey;
+    if (groqApiKey || groqKey) groqApiKeyInput.value = groqApiKey || groqKey;
     if (tavilyApiKey) tavilyApiKeyInput.value = tavilyApiKey;
     if (customPrompt) customPromptInput.value = customPrompt;
   }
@@ -129,6 +129,8 @@ document.getElementById("save").addEventListener("click", async () => {
     geminiApiKey: geminiKey,
     openrouterApiKey: openrouterKey,
     groqApiKey: groqKey,
+    // Keep the legacy key name in sync so an older background worker can still read it.
+    groqKey,
     tavilyApiKey: tavilyKey,
     customPrompt,
   });
@@ -825,7 +827,7 @@ async function importSettings() {
     apiKeyInput.value = restored.apiKey || "";
     geminiApiKeyInput.value = restored.geminiApiKey || "";
     openrouterApiKeyInput.value = restored.openrouterApiKey || "";
-    groqApiKeyInput.value = restored.groqApiKey || "";
+    groqApiKeyInput.value = restored.groqApiKey || restored.groqKey || "";
     if (restored.customPrompt !== undefined) customPromptInput.value = restored.customPrompt;
 
     msgEl.style.color = "#4ade80";
