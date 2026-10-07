@@ -12,6 +12,7 @@
 // what "select a language in Settings and have the UI update immediately"
 // requires.
 import { LANGUAGE_STORAGE_KEY } from "./storage-keys.js";
+import { restoreSettingsFromBackup } from "./settings-storage.js";
 
 export { LANGUAGE_STORAGE_KEY };
 
@@ -41,6 +42,7 @@ export function normalizeLanguage(lang) {
 // extension's unmodified/original language.
 export async function getStoredLanguage() {
   try {
+    await restoreSettingsFromBackup();
     const stored = await chrome.storage.local.get(LANGUAGE_STORAGE_KEY);
     return normalizeLanguage(stored[LANGUAGE_STORAGE_KEY]);
   } catch {
