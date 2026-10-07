@@ -872,7 +872,6 @@ async function importSettings() {
     // live-update through the listeners registered earlier in this file,
     // triggered by the set() above.
     apiKeyInput.value = restored.apiKey || "";
-    geminiApiKeyInput.value = restored.geminiApiKey || "";
     openrouterApiKeyInput.value = restored.openrouterApiKey || "";
     groqApiKeyInput.value = restored.groqApiKey || restored.groqKey || "";
     if (restored.customPrompt !== undefined) customPromptInput.value = restored.customPrompt;
