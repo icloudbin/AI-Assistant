@@ -112,17 +112,35 @@ async function initializeSettingsPage() {
 
 void initializeSettingsPage();
 
-chrome.storage.local.get(
-  ["apiKey", "geminiApiKey", "openrouterApiKey", "groqApiKey", "groqKey", "tavilyApiKey", "customPrompt"],
-  ({ apiKey, geminiApiKey, openrouterApiKey, groqApiKey, groqKey, tavilyApiKey, customPrompt }) => {
-    if (apiKey) apiKeyInput.value = apiKey;
-    if (geminiApiKey) geminiApiKeyInput.value = geminiApiKey;
-    if (openrouterApiKey) openrouterApiKeyInput.value = openrouterApiKey;
-    if (groqApiKey || groqKey) groqApiKeyInput.value = groqApiKey || groqKey;
-    if (tavilyApiKey) tavilyApiKeyInput.value = tavilyApiKey;
-    if (customPrompt) customPromptInput.value = customPrompt;
-  }
-);
+async function loadSavedApiSettings() {
+  await restoreSettingsFromBackup();
+  const {
+    apiKey,
+    geminiApiKey,
+    openrouterApiKey,
+    groqApiKey,
+    groqKey,
+    tavilyApiKey,
+    customPrompt,
+  } = await chrome.storage.local.get([
+    "apiKey",
+    "geminiApiKey",
+    "openrouterApiKey",
+    "groqApiKey",
+    "groqKey",
+    "tavilyApiKey",
+    "customPrompt",
+  ]);
+
+  apiKeyInput.value = apiKey || "";
+  geminiApiKeyInput.value = geminiApiKey || "";
+  openrouterApiKeyInput.value = openrouterApiKey || "";
+  groqApiKeyInput.value = groqApiKey || groqKey || "";
+  tavilyApiKeyInput.value = tavilyApiKey || "";
+  customPromptInput.value = customPrompt || "";
+}
+
+void loadSavedApiSettings();
 
 document.getElementById("save").addEventListener("click", async (event) => {
   event.preventDefault();
