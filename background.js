@@ -756,7 +756,12 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
 
 // Groq OpenAI-compatible Chat Completions API.
 async function streamGroq(model, question, pageContext, history, images, ctx) {
-  const { groqApiKey, customPrompt } = await chrome.storage.local.get(["groqApiKey", "customPrompt"]);
+  // Read the current Groq key directly from extension storage. The legacy
+  // groqKey fallback keeps keys saved by an intermediate build usable after
+  // the provider was standardized on the groqApiKey storage name.
+  const stored = await chrome.storage.local.get(["groqApiKey", "groqKey", "customPrompt"]);
+  const groqApiKey = String(stored.groqApiKey || stored.groqKey || "").trim();
+  const customPrompt = stored.customPrompt || "";
   if (!groqApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "Groq" }));
 
   const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
