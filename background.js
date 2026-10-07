@@ -4,6 +4,10 @@ import { CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_
 import { getStoredLanguage, t } from "./i18n.js";
 import { restoreSettingsFromBackup } from "./settings-storage.js";
 
+// Restore settings as soon as the service worker starts, before any request
+// arrives. Individual requests also retry this recovery as a safety net.
+void restoreSettingsFromBackup();
+
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.warn);
 
 // ---------- Webpage selection context menu ----------
