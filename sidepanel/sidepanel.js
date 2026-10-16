@@ -378,9 +378,7 @@ function inlineMarkdownToHtml(text) {
   s = s.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
 
   for (let i = 0; i < codeSpans.length; i++) {
-    // Function replacement: a string replacement would interpret "$$", "$&",
-    // "$'" and "$`" inside the code span itself (e.g. `echo $$`).
-    s = s.replace(`@@INLINECODE${i}@@`, () => codeSpans[i]);
+    s = s.replace(`@@INLINECODE${i}@@`, codeSpans[i]);
   }
   return s;
 }
@@ -1163,22 +1161,6 @@ function handlePortMessage(msg) {
       break;
     }
     case "DONE": {
-      // A stream that finished without any visible text (e.g. a thinking
-      // model that spent its whole output budget, or a provider-side block)
-      // must not become an empty assistant turn: it rendered as a blank
-      // bubble and, once re-sent as history, empty turns make the Claude API
-      // reject every later request in the same conversation.
-      if (!currentAssistantText.trim()) {
-        if (currentAssistantBubble) {
-          currentAssistantBubble.remove();
-          currentAssistantBubble = null;
-        }
-        currentAssistantText = "";
-        autoScrollEnabled = false;
-        addBubble("error", t(currentLang, "error_emptyResponse"));
-        setStreaming(false);
-        break;
-      }
       if (currentAssistantBubble) {
         currentAssistantBubble.classList.remove("pending");
       }
@@ -1230,10 +1212,7 @@ function makeTopicTitle(messages) {
   if (!userTexts.length) return "";
   const summarySource = userTexts.join(" ");
   const words = summarySource.split(/\s+/).filter(Boolean);
-  // CJK text has no spaces, so the 10-word cut alone left the whole message
-  // as the title; cap the length as well.
-  const title = Array.from(words.slice(0, 10).join(" ")).slice(0, 80).join("");
-  return title || t(currentLang, "historySelect_newTopic");
+  return words.slice(0, 10).join(" ") || t(currentLang, "historySelect_newTopic");
 }
 
 function toStoredMessage(message) {
@@ -1387,7 +1366,7 @@ async function selectConversation(id) {
     // the user's way out of a hung/unresponsive request.
     stopActiveRequest();
 
-    // New Topic is a fresh conversation (DeepSeek, Gemini, Claude, OpenAI,
+    // New Topic is a fresh conversation (DeepSeek, Claude, OpenAI,
     // or OpenRouter, depending on the selected model): discard the active conversation
     // state, clear the composer, and leave the API ready for the user's
     // first message. The new conversation is persisted only when that
@@ -1420,18 +1399,11 @@ function attachmentContextText() {
   if (!usable.length) return "";
   const textParts = [];
   const imageParts = [];
-  // MAX_TOTAL_EXTRACTED_CHARS is documented as the cap for the whole
-  // [ATTACHMENTS] block, but each file was only capped individually, so
-  // several large files could add up to many times that limit.
-  let textBudget = MAX_TOTAL_EXTRACTED_CHARS;
   for (const a of usable) {
     if (a.kind === "image") {
       imageParts.push(`- ${a.name} (image attachment; image data is included in the current request)`);
     } else if (a.text) {
-      const body = a.text.slice(0, Math.max(0, textBudget));
-      textBudget -= body.length;
-      const note = body.length < a.text.length ? "\n...[truncated: combined attachment size limit reached]" : "";
-      textParts.push(`\n===== FILE: ${a.name} =====\n${body}${note}`);
+      textParts.push(`\n===== FILE: ${a.name} =====\n${a.text}`);
     }
   }
   return [
@@ -1955,16 +1927,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   }
   convo.title = convo.title || makeTopicTitle(history);
   renderHistorySelect();
-  // A failed save (for example chrome.storage.local's 10 MB quota being
-  // exceeded by large stored attachments) used to reject handleSubmit here,
-  // after the user's bubble was shown but before any request was sent, so
-  // every later message failed silently the same way. Persisting is
-  // best-effort; the request itself must still go out.
-  try {
-    await saveConversations();
-  } catch (err) {
-    console.error("[AI Assistant] Unable to save conversation:", err);
-  }
+  await saveConversations();
   setStreaming(true);
 
   let pageContext = null;

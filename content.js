@@ -361,12 +361,7 @@ function extractRedditArticle() {
     seen.add(comment);
 
     // Skip comments that are clearly promoted/advertising containers.
-    // Substring selectors such as [id*="ad"] also match "header", "thread",
-    // "loading" and similar ancestors, which silently dropped every comment;
-    // only match ad-like tokens.
-    const wrapper = comment.closest(
-      'shreddit-comments-page-ad, [data-testid="ad"], [data-testid^="ad-"], [data-testid$="-ad"], [id="ad"], [id^="ad-"], [id$="-ad"]'
-    );
+    const wrapper = comment.closest('shreddit-comments-page-ad, [data-testid*="ad"], [id*="ad"]');
     if (wrapper) continue;
 
     const commentBody = comment.querySelector(

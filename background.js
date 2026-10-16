@@ -2,6 +2,11 @@
 import { findModelById } from "./models.js";
 import { CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY } from "./storage-keys.js";
 import { getStoredLanguage, t } from "./i18n.js";
+import { restoreSettingsFromBackup } from "./settings-storage.js";
+
+// Restore settings as soon as the service worker starts, before any request
+// arrives. Individual requests also retry this recovery as a safety net.
+void restoreSettingsFromBackup();
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.warn);
 
@@ -172,105 +177,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 // mid-request: the port to the side panel drops with it, and the panel shows
 // "The connection to the AI service was interrupted" even though nothing
 // failed on the wire (any real HTTP error would have surfaced through the
-// ERROR path instead). Gemini hits this on essentially every request: the
-// Gemini's thinking model in MODELS (gemini-3.8-flash) can
-// spend well over 30s before their first visible text, thought summaries are
-// not requested, so literally zero bytes of interest arrive while they think
-// - see streamGemini(). DeepSeek/OpenRouter usually answer fast enough to
-// dodge it, which is why only Gemini looked "broken". A side-effect-free
+// ERROR path instead). Some providers can spend more than 30 seconds before producing visible output, so the service worker needs a keep-alive during long-running requests. A side-effect-free
 // extension API call every 20s (under the 30s idle threshold) keeps the
 // worker alive until DONE/ERROR/STOP. One timer per in-flight ASK, reset
 // alongside the activeRequestId/activeAbortController pair above.
 const KEEP_ALIVE_INTERVAL_MS = 20000;
 let keepAliveTimer = null;
-
-// Gemini documents 503 UNAVAILABLE as a transient service-overload condition
-// and recommends exponential backoff with jitter for direct REST callers.
-// The previous build made exactly one Gemini request, so a temporary overload
-// immediately surfaced as a hard error even when the service recovered a
-// moment later. Keep retries inside the provider request itself so the higher
-// level request is not duplicated (and Tavily/page extraction are not repeated).
-const GEMINI_MAX_RETRIES = 4;
-const GEMINI_INITIAL_RETRY_DELAY_MS = 1000;
-const GEMINI_MAX_RETRY_DELAY_MS = 60000;
-
-function getRetryAfterMs(resp) {
-  const raw = resp?.headers?.get?.("retry-after");
-  if (!raw) return null;
-  const seconds = Number(raw);
-  if (Number.isFinite(seconds) && seconds >= 0) {
-    return Math.min(GEMINI_MAX_RETRY_DELAY_MS, Math.round(seconds * 1000));
-  }
-  const when = Date.parse(raw);
-  if (Number.isFinite(when)) {
-    return Math.max(0, Math.min(GEMINI_MAX_RETRY_DELAY_MS, when - Date.now()));
-  }
-  return null;
-}
-
-function isGeminiTransientStatus(status) {
-  return status === 408 || status === 429 || (status >= 500 && status <= 599);
-}
-
-function sleepWithAbort(ms, signal) {
-  if (signal?.aborted) {
-    const err = new DOMException("The operation was aborted.", "AbortError");
-    return Promise.reject(err);
-  }
-  return new Promise((resolve, reject) => {
-    let timer = null;
-    const onAbort = () => {
-      if (timer !== null) clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      reject(new DOMException("The operation was aborted.", "AbortError"));
-    };
-    function done() {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }
-    signal?.addEventListener("abort", onAbort, { once: true });
-    timer = setTimeout(done, ms);
-  });
-}
-
-async function fetchGeminiWithRetry(url, options, ctx) {
-  let lastResponse = null;
-  let lastBody = "";
-
-  for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt += 1) {
-    if (ctx.signal?.aborted) {
-      throw new DOMException("The operation was aborted.", "AbortError");
-    }
-
-    const resp = await fetch(url, options);
-    if (resp.ok) return resp;
-
-    lastResponse = resp;
-    lastBody = await resp.text();
-
-    // Only retry transient HTTP failures. Invalid keys, malformed requests,
-    // permission errors, etc. should fail immediately instead of generating
-    // repeated API traffic.
-    if (!isGeminiTransientStatus(resp.status) || attempt >= GEMINI_MAX_RETRIES) {
-      break;
-    }
-
-    const retryAfter = getRetryAfterMs(resp);
-    const exponential = Math.min(
-      GEMINI_MAX_RETRY_DELAY_MS,
-      GEMINI_INITIAL_RETRY_DELAY_MS * (2 ** attempt)
-    );
-    const jitter = Math.floor(Math.random() * Math.min(1000, Math.max(250, exponential * 0.25)));
-    const delay = retryAfter ?? Math.min(GEMINI_MAX_RETRY_DELAY_MS, exponential + jitter);
-
-    console.warn(
-      `[AI Assistant] Gemini HTTP ${resp.status}; retry ${attempt + 1}/${GEMINI_MAX_RETRIES} in ${delay}ms.`
-    );
-    await sleepWithAbort(delay, ctx.signal);
-  }
-
-  throw new Error(`HTTP ${lastResponse?.status ?? 500} ${lastBody}`);
-}
 
 function startRequestKeepAlive() {
   stopRequestKeepAlive();
@@ -348,10 +260,14 @@ chrome.runtime.onConnect.addListener((port) => {
     activeAbortController = abortController;
     // Keep the worker alive for the whole request (Tavily preflight included)
     // - without this, any provider whose first visible chunk takes >30s
-    // (Gemini's thinking models, see above) loses the worker mid-request.
+    // (providers with long-running requests) loses the worker mid-request.
     startRequestKeepAlive();
 
     try {
+      // Recover user settings before reading provider keys or language. This
+      // makes the background service worker resilient if extension local
+      // storage was unexpectedly reset between browser sessions.
+      await restoreSettingsFromBackup();
       const { question, pageContext, includePageContext, history, images = [], modelId, factCheck, noWebResearch = false, forceWebResearch = false } = msg.payload;
       const lang = await getStoredLanguage();
       // Never trust a stale/accidental pageContext value when the user has
@@ -371,11 +287,9 @@ chrome.runtime.onConnect.addListener((port) => {
       }
 
       if (
-        model.provider !== "gemini" &&
         model.provider !== "deepseek" &&
-        model.provider !== "claude" &&
-        model.provider !== "openai" &&
         model.provider !== "openrouter" &&
+        model.provider !== "groq" &&
         model.provider !== "zai"
       ) {
         throw new Error(t(lang, "bg_error_unsupportedProvider_template", { provider: model.provider }));
@@ -408,7 +322,7 @@ chrome.runtime.onConnect.addListener((port) => {
         // skipped entirely. Without this flag their fixed instruction prompts
         // ("Summarize the CURRENT webpage...") match the "current" keyword in
         // ONLINE_RESEARCH_REQUEST_PATTERN (context-menu text actions have no
-        // page context either, so onlineResearchReason() returned non-null
+        // page context either, so needsOnlineResearch() returned true
         // unconditionally) and fired a Tavily search on every click - and
         // failed outright for users without a Tavily API key.
         const research = await runTavilyQuestionResearch({
@@ -419,17 +333,12 @@ chrome.runtime.onConnect.addListener((port) => {
         });
         if (research) effectiveQuestion = research.prompt;
       }
-
-      if (model.provider === "gemini") {
-        await streamGemini(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
-      } else if (model.provider === "deepseek") {
+      if (model.provider === "deepseek") {
         await streamDeepSeek(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
-      } else if (model.provider === "claude") {
-        await streamClaude(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
-      } else if (model.provider === "openai") {
-        await streamOpenAI(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "openrouter") {
         await streamOpenRouter(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
+      } else if (model.provider === "groq") {
+        await streamGroq(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "zai") {
         await streamZAI(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       }
@@ -564,59 +473,29 @@ const ONLINE_RESEARCH_STOP_WORDS = new Set([
   'who', 'why', 'with', '请问', '什么', '如何', '是否', '有', '和', '的', '了', '吗',
 ]);
 
-// CJK text has no spaces, so the word regex used for Latin text would treat a
-// whole Chinese/Japanese sentence as ONE "term" that can never appear verbatim
-// in the page: every CJK question then looked "uncovered" and triggered web
-// research (or a missing-Tavily-key error) even when the page answered it.
-// CJK runs are therefore split at common function characters (particles,
-// question words, pronouns) and compared as character bigrams instead.
-const CJK_RUN_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]+/gu;
-const CJK_SEPARATOR_RE = /[\p{Script=Hiragana}的了吗呢吧啊嘛么什是有和与及或在对于把被让请问如何怎样为这那哪些个我你他她它们该本其也都就还又很并而但]+/gu;
-// A question that explicitly points at the page itself ("this article", "the
-// page") is answered from the page and never needs web evidence.
-const PAGE_REFERENCE_CJK_RE = /这篇|本文|此文|该文|这个页面|这个网页|本页|此页|该网页|本网页|当前页|页面|网页|文章|选中|这段/u;
-
-function cjkSearchTerms(text) {
-  const terms = new Set();
-  for (const run of text.match(CJK_RUN_RE) || []) {
-    for (const fragment of run.split(CJK_SEPARATOR_RE)) {
-      const chars = Array.from(fragment);
-      for (let i = 0; i + 1 < chars.length; i++) terms.add(chars[i] + chars[i + 1]);
-    }
-  }
-  return [...terms];
-}
-
 // Decide before the model request whether the page can answer the question.
 // This is deliberately content-based, not topic-based: any missing year,
 // product name, version, or other key term can cause research, while a page
 // that already covers the question remains local. A streamed model reply
 // cannot be safely inspected and retried after it has already been shown, so
 // this preflight is the reliable point to make the automatic decision.
-//
-// Returns "explicit" when the wording itself asks for the web (search,
-// latest, official, ...), "heuristic" when only the page-coverage check
-// decided that research is needed, or null when the page is sufficient.
-function onlineResearchReason(question, pageContext) {
+function needsOnlineResearch(question, pageContext) {
   const query = String(question || '').normalize('NFKC').toLowerCase();
-  if (query.length < 3) return null;
+  if (query.length < 3) return false;
 
   const pageText = String(pageContext?.text || '').normalize('NFKC').toLowerCase();
-  if (ONLINE_RESEARCH_REQUEST_PATTERN.test(query)) return 'explicit';
+  if (ONLINE_RESEARCH_REQUEST_PATTERN.test(query)) return true;
 
   const years = [...new Set(query.match(/\b20\d{2}\b/g) || [])];
-  if (years.some((year) => !pageText.includes(year))) return 'heuristic';
+  if (years.some((year) => !pageText.includes(year))) return true;
 
-  if (pageText && PAGE_REFERENCE_CJK_RE.test(query)) return null;
-
-  const latinTerms = [...new Set(query.replace(CJK_RUN_RE, ' ').match(/[\p{L}\p{N}][\p{L}\p{N}-]{1,}/gu) || [])]
+  const terms = [...new Set(query.match(/[\p{L}\p{N}][\p{L}\p{N}-]{1,}/gu) || [])]
     .filter((term) => !ONLINE_RESEARCH_STOP_WORDS.has(term));
-  const terms = [...latinTerms, ...cjkSearchTerms(query)];
-  if (!terms.length) return null;
-  if (!pageText) return 'heuristic';
+  if (!terms.length) return false;
+  if (!pageText) return true;
 
   const covered = terms.filter((term) => pageText.includes(term)).length;
-  return covered / terms.length < 0.6 ? 'heuristic' : null;
+  return covered / terms.length < 0.6;
 }
 
 function pageResearchQuery(question, pageContext) {
@@ -629,20 +508,11 @@ function pageResearchQuery(question, pageContext) {
 }
 
 async function runTavilyQuestionResearch({ question, pageContext, ctx, force = false }) {
-  const reason = force ? 'explicit' : onlineResearchReason(question, pageContext);
-  if (!reason) return null;
+  if (!force && !needsOnlineResearch(question, pageContext)) return null;
 
   const stored = await chrome.storage.local.get(['tavilyApiKey']);
   const apiKey = String(stored.tavilyApiKey || '').trim();
-  if (!apiKey) {
-    // Research that was only suggested by the page-coverage heuristic must
-    // not turn an ordinary question into a hard error for a user who never
-    // configured Tavily: answer from the page instead. An explicit request
-    // (wording such as "search"/"latest", or the Explain action) still
-    // reports the missing key.
-    if (reason === 'heuristic') return null;
-    throw new Error(t(ctx.lang, 'bg_error_tavilyKeyMissing'));
-  }
+  if (!apiKey) throw new Error(t(ctx.lang, 'bg_error_tavilyKeyMissing'));
 
   // Ordinary questions use the user's wording. A forced Explain action has a
   // fixed instruction, so it instead searches the current page's title and
@@ -796,6 +666,34 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
   await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx);
 }
 
+// Groq OpenAI-compatible Chat Completions API.
+async function streamGroq(model, question, pageContext, history, images, ctx) {
+  // Read the current Groq key directly from extension storage. The legacy
+  // groqKey fallback keeps keys saved by an intermediate build usable after
+  // the provider was standardized on the groqApiKey storage name.
+  const stored = await chrome.storage.local.get(["groqApiKey", "groqKey", "customPrompt"]);
+  const groqApiKey = String(stored.groqApiKey || stored.groqKey || "").trim();
+  const customPrompt = stored.customPrompt || "";
+  if (!groqApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "Groq" }));
+
+  const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${groqApiKey}`,
+    },
+    body: JSON.stringify({
+      model: model.apiModel,
+      messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang),
+      stream: true,
+    }),
+    signal: ctx.signal,
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
+
+  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx);
+}
+
 // OpenRouter (https://openrouter.ai) is a third-party router, not a model's
 // own native API. The extension uses OpenRouter's Free Models Router via
 // `openrouter/free`, which automatically selects an available free model.
@@ -853,47 +751,6 @@ async function streamZAI(model, question, pageContext, history, images, ctx) {
   await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx);
 }
 
-// Gemini uses Google's current Interactions API. It takes `input` content
-// blocks and a plain-string `system_instruction`; streamed output arrives as
-// typed SSE events, with visible text in `step.delta` events whose delta type
-// is `text`. `store: false` keeps the extension's existing local-only
-// conversation-history behavior instead of creating server-side conversations.
-// See https://ai.google.dev/gemini-api/docs/migrate-to-interactions and
-// https://ai.google.dev/gemini-api/docs/streaming.
-async function streamGemini(model, question, pageContext, history, images, ctx) {
-  const { geminiApiKey, customPrompt } = await chrome.storage.local.get(["geminiApiKey", "customPrompt"]);
-  if (!geminiApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "Gemini" }));
-
-  const url = "https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse";
-  const resp = await fetchGeminiWithRetry(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-      "x-goog-api-key": geminiApiKey,
-    },
-    body: JSON.stringify({
-      model: model.apiModel,
-      system_instruction: buildSystemInstruction(pageContext, customPrompt, ctx.lang),
-      input: buildGeminiInteractionInput(question, history, images, ctx.lang),
-      store: false,
-      stream: true,
-      generation_config: { thinking_summaries: "none" },
-    }),
-    signal: ctx.signal,
-  }, ctx);
-
-  await readSse(
-    resp,
-    (json) => (json?.event_type === "step.delta" && json.delta?.type === "text" ? json.delta.text || "" : ""),
-    ctx,
-    (json) => {
-      if (json?.event_type !== "interaction.failed" && json?.interaction?.status !== "failed") return "";
-      return json?.error?.message || json?.interaction?.error?.message || "Gemini interaction failed.";
-    }
-  );
-}
-
 // Claude uses api.anthropic.com, authenticated with x-api-key + an
 // anthropic-version header (both required), plus
 // anthropic-dangerous-direct-browser-access: true - without that header the
@@ -901,16 +758,14 @@ async function streamGemini(model, question, pageContext, history, images, ctx) 
 // extension's background service worker rather than through a server-side
 // proxy or the Anthropic SDK - see
 // https://platform.claude.com/docs/en/api/overview (checked 2026-08-23).
-// Like Gemini, the system prompt is a single top-level field (`system`, a
-// plain string here) rather than a message with role "system", so
-// buildSystemInstruction is reused unchanged from the Gemini branch above.
-// Unlike DeepSeek/Gemini, `max_tokens` is required by the Messages API.
+// Claude uses a single top-level `system` string; OpenAI uses `instructions`.
+// Unlike DeepSeek, `max_tokens` is required by the Messages API.
 // Modern adaptive-thinking Claude models share the same output budget between
 // thinking and visible output, so the model catalog supplies a larger budget.
 // The SSE stream itself uses named events (message_start,
 // content_block_start, content_block_delta, content_block_stop,
 // message_delta, message_stop, plus periodic pings) instead of
-// DeepSeek/Gemini's unnamed alt=sse chunks, but readSse only ever looks at
+// DeepSeek's unnamed alt=sse chunks, but readSse only ever looks at
 // "data:" lines regardless of the preceding "event:" line, so the same
 // reader still applies; only content_block_delta events whose delta.type is
 // "text_delta" carry answer text, everything else is ignored - see
@@ -950,7 +805,7 @@ async function streamClaude(model, question, pageContext, history, images, ctx) 
 // (https://api.openai.com/v1/responses), not the older
 // /v1/chat/completions - see
 // https://platform.openai.com/docs/guides/migrate-to-responses (checked
-// 2026-08-24). Like Claude/Gemini, the system prompt is a single top-level
+// 2026-08-24). Like Claude, the system prompt is a single top-level
 // field (`instructions`, a plain string) rather than a message with role
 // "system" - unlike Claude, OpenAI's `input` array does technically also
 // accept a "system"/"developer" role turn, but `instructions` is used here
@@ -1001,7 +856,7 @@ async function streamOpenAI(model, question, pageContext, history, images, ctx) 
   await readSse(resp, (json) => (json?.type === "response.output_text.delta" ? json.delta || "" : ""), ctx);
 }
 
-// Shared SSE reader: DeepSeek, Gemini, Claude, OpenAI, and OpenRouter all
+// Shared SSE reader: DeepSeek, Claude, OpenAI, and OpenRouter all
 // send
 // "data: {...}\n\n"
 // lines (Claude's are additionally preceded by a named "event:" line, which
@@ -1014,61 +869,33 @@ async function streamOpenAI(model, question, pageContext, history, images, ctx) 
 // lands (see stopActiveRequest() in sidepanel.js) - reader.read() itself
 // also naturally rejects once ctx.signal aborts, ending this loop via the
 // same AbortError path the initial fetch() would take.
-// In-stream failures that every provider can report after HTTP 200 has been
-// returned: Claude sends `event: error` (data.type "error", e.g.
-// overloaded_error), the OpenAI Responses API sends `error` / `response.failed`
-// events, and OpenAI-compatible Chat Completions providers (OpenRouter, Z.AI,
-// DeepSeek) can send a chunk carrying a top-level `error` object. Without this
-// the stream simply ended and the panel showed an empty or truncated answer
-// with no explanation.
-function genericStreamError(json) {
-  if (!json || typeof json !== "object") return "";
-  if (json.type === "error") {
-    return json.error?.message || json.message || "The AI service reported a streaming error.";
-  }
-  if (json.type === "response.failed") {
-    return json.response?.error?.message || "The AI service reported that the response failed.";
-  }
-  if (json.error) {
-    if (typeof json.error === "string") return json.error.slice(0, 500);
-    if (typeof json.error === "object") return String(json.error.message || JSON.stringify(json.error)).slice(0, 500);
-  }
-  return "";
-}
-
 async function readSse(resp, extractDelta, ctx, extractError = null) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-
-  const processLine = (line) => {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("data:")) return;
-    const data = trimmed.slice(5).trim();
-    if (!data || data === "[DONE]") return;
-    let json;
-    try {
-      json = JSON.parse(data);
-    } catch {
-      return;
-    }
-    const streamError = extractError?.(json) || genericStreamError(json);
-    if (streamError) throw new Error(streamError);
-    const delta = extractDelta(json);
-    if (delta) ctx.port.postMessage({ type: "CHUNK", delta, requestId: ctx.requestId });
-  };
-
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split("\n");
     buffer = lines.pop() || "";
-    for (const line of lines) processLine(line);
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t.startsWith("data:")) continue;
+      const data = t.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      let json;
+      try {
+        json = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      const streamError = extractError?.(json);
+      if (streamError) throw new Error(streamError);
+      const delta = extractDelta(json);
+      if (delta) ctx.port.postMessage({ type: "CHUNK", delta, requestId: ctx.requestId });
+    }
   }
-  // A final "data:" line that is not newline-terminated used to be dropped.
-  buffer += decoder.decode();
-  if (buffer.trim()) processLine(buffer);
 }
 
 // Shared base prompt, kept provider-agnostic and toggle-agnostic. Previously
@@ -1140,7 +967,7 @@ function condenseHistoryAttachments(text) {
 
 // Normalizes conversation history for providers that require strict
 // user/assistant alternation. Claude's Messages API rejects adjacent
-// same-role turns outright, and Gemini's contents have the same expectation.
+// same-role turns outright.
 // Adjacent same-role messages can genuinely occur in this extension: when a
 // request fails or is stopped, the user's question stays in history with no
 // assistant reply after it, so the next submission would send [..., user,
@@ -1155,10 +982,6 @@ function normalizeHistoryTurns(history) {
   for (const h of history || []) {
     if (!h || (h.role !== "user" && h.role !== "assistant") || typeof h.content !== "string") continue;
     const content = h.role === "user" ? condenseHistoryAttachments(h.content) : h.content;
-    // Empty turns (e.g. an assistant reply that streamed no text, stored by an
-    // earlier build) are rejected by the Claude Messages API for any message
-    // that is not the final one, so they are never forwarded.
-    if (!content.trim()) continue;
     const prev = out[out.length - 1];
     if (prev && prev.role === h.role) {
       prev.content = `${prev.content}\n\n${content}`;
@@ -1193,18 +1016,13 @@ function buildMessages(question, pageContext, history, customPrompt, images = []
   return messages;
 }
 
-// Gemini has one system_instruction field rather than a list of system
-// messages, so the base prompt, the user's custom prompt, the output-language
-// requirement, and the page-context instruction are combined into a single
-// instruction block instead. Claude's streamClaude() and OpenAI's
-// streamOpenAI() above reuse this same function for their own top-level
-// `system`/`instructions` string fields.
+// Claude and OpenAI reuse this helper for their top-level system/instructions fields.
 function buildSystemInstruction(pageContext, customPrompt, lang) {
   const text = customPrompt ? `${BASE_PROMPT}\n\nUser-defined instructions:\n${customPrompt}` : BASE_PROMPT;
   return `${text}\n\n${outputLanguageInstruction(lang)}\n\n${pageContextInstruction(pageContext)}`;
 }
 
-// Gemini/Claude/OpenAI each expose the system prompt as a single top-level
+// Claude/OpenAI each expose the system prompt as a single top-level
 // field (system_instruction/system/instructions - see buildSystemInstruction
 // above) rather than a message list, so unlike DeepSeek/OpenRouter's
 // buildMessages() - which re-inserts outputLanguageInstruction() a second
@@ -1218,20 +1036,6 @@ function buildSystemInstruction(pageContext, customPrompt, lang) {
 // buildMessages() already gives DeepSeek/OpenRouter, just adapted to each
 // provider's own content-block shape - so the language guard is always the
 // last thing the model reads before it starts answering.
-function buildGeminiInteractionInput(question, history, images = [], lang) {
-  const input = normalizeHistoryTurns(history).map((h) => ({
-    type: h.role === "assistant" ? "model_output" : "user_input",
-    content: [{ type: "text", text: h.content }],
-  }));
-  const content = [{ type: "text", text: question }];
-  for (const img of images) {
-    const match = img.dataUrl.match(/^data:(image\/(?:jpeg|png|gif|webp));base64,(.+)$/i);
-    if (match) content.push({ type: "image", mime_type: match[1], data: match[2] });
-  }
-  content.push({ type: "text", text: outputLanguageInstruction(lang) });
-  input.push({ type: "user_input", content });
-  return input;
-}
 
 function buildClaudeMessages(question, history, images = [], lang) {
   const messages = normalizeHistoryTurns(history).map((h) => ({ role: h.role, content: h.content }));

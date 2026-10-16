@@ -1,18 +1,3 @@
-# Fixes (2026-10-16, v1.10.56)
-
-- **Chinese/Japanese questions always triggered web research.** `needsOnlineResearch()` split text with a Latin word regex, so a whole CJK sentence became one "term" that could never be found in the page; every such question was treated as unanswered by the page and went to Tavily (or failed with the missing-key error). It is now `onlineResearchReason()`: CJK runs are split at function characters and compared as bigrams, and questions that refer to the page itself (这篇/本文/页面/文章 ...) stay local.
-- **Missing Tavily key no longer blocks ordinary questions.** When research was suggested only by the page-coverage heuristic and no Tavily key is configured, the question is answered from the page. Explicit requests (wording such as search/latest/official, and the Explain action) still report the missing key.
-- **Silent stream failures.** Claude `error` events (e.g. `overloaded_error`), OpenAI Responses `error`/`response.failed` events and OpenAI-compatible `error` chunks are now raised as errors instead of ending the answer silently; a final `data:` line without a trailing newline is no longer dropped.
-- **Empty replies.** A stream that finishes with no text now shows an error bubble and is not stored as an empty assistant turn; empty turns already stored are filtered out before any request (the Claude Messages API rejects empty non-final messages).
-- **Inline code containing `$$`, `$&`, `$'` or `` $` `` was mangled** by `String.replace` special replacement patterns; now rendered verbatim.
-- **Save failure no longer blocks sending.** If `chrome.storage.local` rejects the conversation save (e.g. quota), the request is still sent.
-- **Combined attachment cap.** `MAX_TOTAL_EXTRACTED_CHARS` now bounds the whole `[ATTACHMENTS]` block, not each file separately.
-- **Settings import** refreshes the Tavily key field and all key fields from storage; previously a following Save overwrote the imported Tavily key.
-- **File picker** `accept` list now covers every extension the reader supports (.go, .rs, .kt, .sh, .toml, ...).
-- **Conversation titles** are capped at 80 characters (CJK text has no spaces, so the 10-word cut did not shorten it).
-- **Reddit comments**: ad-container selector `[id*="ad"]` also matched ancestors such as "header"/"thread"; narrowed to ad-like tokens (not tested against the live Reddit DOM).
-- Added `Claude Haiku 5.5` (`claude-haiku-5-5`); Haiku 4.5 remains selectable.
-
 # AI model connection update (2026-10-07, v1.10.54)
 
 - DeepSeek: `deepseek-flash` remains the API ID for DeepSeek V4.1 Flash; reasoning effort is pinned to high.
