@@ -8,11 +8,13 @@ import {
   LANGUAGE_STORAGE_KEY,
 } from "../i18n.js";
 import { HISTORY_STORAGE_KEY, MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
-import { saveSettingsBackup, restoreSettingsFromBackup } from "../settings-storage.js";
 
 const apiKeyInput = document.getElementById("apiKey");
+const geminiApiKeyInput = document.getElementById("geminiApiKey");
+const claudeApiKeyInput = document.getElementById("claudeApiKey");
+const openaiApiKeyInput = document.getElementById("openaiApiKey");
 const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
-const groqApiKeyInput = document.getElementById("groqApiKey");
+const zaiApiKeyInput = document.getElementById("zaiApiKey");
 const tavilyApiKeyInput = document.getElementById("tavilyApiKey");
 const customPromptInput = document.getElementById("customPrompt");
 const msgEl = document.getElementById("msg");
@@ -67,9 +69,7 @@ async function loadPreferredTranslationLanguage() {
 }
 
 preferredTranslationLanguageSelect.addEventListener("change", async () => {
-  const value = preferredTranslationLanguageSelect.value;
-  await chrome.storage.local.set({ [PREFERRED_TRANSLATION_LANGUAGE_KEY]: value });
-  await saveSettingsBackup({ preferredTranslationLanguage: value });
+  await chrome.storage.local.set({ [PREFERRED_TRANSLATION_LANGUAGE_KEY]: preferredTranslationLanguageSelect.value });
 });
 
 function applyLanguage(lang) {
@@ -88,7 +88,6 @@ async function loadLanguage() {
 languageSelect.addEventListener("change", async () => {
   const lang = languageSelect.value;
   await chrome.storage.local.set({ [LANGUAGE_STORAGE_KEY]: lang });
-  await saveSettingsBackup({ language: lang });
   applyLanguage(lang);
 });
 
@@ -101,89 +100,49 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-async function initializeSettingsPage() {
-  // Recover settings before populating the controls. This protects against
-  // an unexpected browser/extension storage reset while keeping
-  // chrome.storage.local as the normal primary store.
-  await restoreSettingsFromBackup();
-  await loadLanguage();
-  await loadTheme();
-}
+loadLanguage();
 
-void initializeSettingsPage();
+chrome.storage.local.get(
+  ["apiKey", "geminiApiKey", "claudeApiKey", "openaiApiKey", "openrouterApiKey", "zaiApiKey", "tavilyApiKey", "customPrompt"],
+  ({ apiKey, geminiApiKey, claudeApiKey, openaiApiKey, openrouterApiKey, zaiApiKey, tavilyApiKey, customPrompt }) => {
+    if (apiKey) apiKeyInput.value = apiKey;
+    if (geminiApiKey) geminiApiKeyInput.value = geminiApiKey;
+    if (claudeApiKey) claudeApiKeyInput.value = claudeApiKey;
+    if (openaiApiKey) openaiApiKeyInput.value = openaiApiKey;
+    if (openrouterApiKey) openrouterApiKeyInput.value = openrouterApiKey;
+    if (zaiApiKey) zaiApiKeyInput.value = zaiApiKey;
+    if (tavilyApiKey) tavilyApiKeyInput.value = tavilyApiKey;
+    if (customPrompt) customPromptInput.value = customPrompt;
+  }
+);
 
-async function loadSavedApiSettings() {
-  await restoreSettingsFromBackup();
-  const {
-    apiKey,
-    openrouterApiKey,
-    groqApiKey,
-    groqKey,
-    tavilyApiKey,
-    customPrompt,
-  } = await chrome.storage.local.get([
-    "apiKey",
-    "openrouterApiKey",
-    "groqApiKey",
-    "groqKey",
-    "tavilyApiKey",
-    "customPrompt",
-  ]);
-
-  apiKeyInput.value = apiKey || "";
-  openrouterApiKeyInput.value = openrouterApiKey || "";
-  groqApiKeyInput.value = groqApiKey || groqKey || "";
-  tavilyApiKeyInput.value = tavilyApiKey || "";
-  customPromptInput.value = customPrompt || "";
-}
-
-void loadSavedApiSettings();
-
-document.getElementById("save").addEventListener("click", async (event) => {
-  event.preventDefault();
-
+document.getElementById("save").addEventListener("click", async () => {
   const key = apiKeyInput.value.trim();
+  const geminiKey = geminiApiKeyInput.value.trim();
+  const claudeKey = claudeApiKeyInput.value.trim();
+  const openaiKey = openaiApiKeyInput.value.trim();
   const openrouterKey = openrouterApiKeyInput.value.trim();
-  const groqKey = groqApiKeyInput.value.trim();
+  const zaiKey = zaiApiKeyInput.value.trim();
   const tavilyKey = tavilyApiKeyInput.value.trim();
   const customPrompt = customPromptInput.value.trim();
-
-  try {
-    const settingsToSave = {
-      apiKey: key,
-      openrouterApiKey: openrouterKey,
-      groqApiKey: groqKey,
-      // Keep the legacy key name in sync so older installed builds can still read it.
-      groqKey,
-      tavilyApiKey: tavilyKey,
-      customPrompt,
-    };
-    await chrome.storage.local.set(settingsToSave);
-    await saveSettingsBackup(settingsToSave);
-
-    // Verify the write immediately. This makes a broken Save operation visible
-    // instead of showing "Saved" when the value was not actually persisted.
-    const saved = await chrome.storage.local.get([
-      "apiKey",      "openrouterApiKey",
-      "groqApiKey",
-      "groqKey",
-      "tavilyApiKey",
-      "customPrompt",
-    ]);
-    for (const [name, value] of Object.entries(settingsToSave)) {
-      if (saved[name] !== value) {
-        throw new Error(`Setting "${name}" was not persisted to extension storage.`);
-      }
-    }
-
-    msgEl.style.color = "#4ade80";
-    msgEl.textContent = t(currentLang, "save_success");
-    setTimeout(() => (msgEl.textContent = ""), 1500);
-  } catch (err) {
-    console.error("[AI Assistant] Settings save failed:", err);
+  if (!key && !geminiKey && !claudeKey && !openaiKey && !openrouterKey && !zaiKey) {
     msgEl.style.color = "#f55b5b";
-    msgEl.textContent = err?.message || "Failed to save settings.";
+    msgEl.textContent = t(currentLang, "save_error_noKey");
+    return;
   }
+  await chrome.storage.local.set({
+    apiKey: key,
+    geminiApiKey: geminiKey,
+    claudeApiKey: claudeKey,
+    openaiApiKey: openaiKey,
+    openrouterApiKey: openrouterKey,
+    zaiApiKey: zaiKey,
+    tavilyApiKey: tavilyKey,
+    customPrompt,
+  });
+  msgEl.style.color = "#4ade80";
+  msgEl.textContent = t(currentLang, "save_success");
+  setTimeout(() => (msgEl.textContent = ""), 1500);
 });
 
 // NOTE ON SCOPE: conversationToText()/makeBackupEntries() below build the
@@ -509,7 +468,7 @@ function makeRestoredTopicTitle(messages) {
     .filter(Boolean);
   if (!userTexts.length) return t(currentLang, "restoredConversationTitle");
   const words = userTexts.join(" ").split(/\s+/).filter(Boolean);
-  const title = words.slice(0, 10).join(" ");
+  const title = Array.from(words.slice(0, 10).join(" ")).slice(0, 80).join("");
   return title || t(currentLang, "restoredConversationTitle");
 }
 
@@ -727,7 +686,6 @@ themeButtons.forEach((button) => {
   button.addEventListener("click", async () => {
     const preference = button.dataset.themeChoice;
     await chrome.storage.local.set({ [THEME_STORAGE_KEY]: preference });
-    await saveSettingsBackup({ themePreference: preference });
     applyTheme(preference);
   });
 });
@@ -762,8 +720,12 @@ loadTheme();
 // (currentConversationId, pendingContextAction), which are worthless on a
 // fresh install.
 const SETTINGS_BACKUP_KEYS = [
-  "apiKey",  "openrouterApiKey",
-  "groqApiKey",
+  "apiKey",
+  "geminiApiKey",
+  "claudeApiKey",
+  "openaiApiKey",
+  "openrouterApiKey",
+  "zaiApiKey",
   "tavilyApiKey",
   "factCheckWebResearch",
   "customPrompt",
@@ -864,17 +826,28 @@ async function importSettings() {
     if (!Object.keys(restored).length) throw new Error(t(currentLang, "settingsBackup_error_notSettingsBackup"));
 
     await chrome.storage.local.set(restored);
-    await saveSettingsBackup(restored);
 
     // The API-key inputs and prompt textarea are loaded once at page load
     // and have no storage.onChanged listener,
     // so refresh them by hand. Language, theme, and preferred translation
     // live-update through the listeners registered earlier in this file,
     // triggered by the set() above.
-    apiKeyInput.value = restored.apiKey || "";
-    openrouterApiKeyInput.value = restored.openrouterApiKey || "";
-    groqApiKeyInput.value = restored.groqApiKey || restored.groqKey || "";
-    if (restored.customPrompt !== undefined) customPromptInput.value = restored.customPrompt;
+    // Re-read from storage rather than from `restored`: keys absent from the
+    // backup file keep their stored value, and the Tavily key field was
+    // previously not refreshed at all, so a following "Save" click wrote the
+    // stale (often empty) field contents over the freshly imported key.
+    const current = await chrome.storage.local.get([
+      "apiKey", "geminiApiKey", "claudeApiKey", "openaiApiKey",
+      "openrouterApiKey", "zaiApiKey", "tavilyApiKey", "customPrompt",
+    ]);
+    apiKeyInput.value = current.apiKey || "";
+    geminiApiKeyInput.value = current.geminiApiKey || "";
+    claudeApiKeyInput.value = current.claudeApiKey || "";
+    openaiApiKeyInput.value = current.openaiApiKey || "";
+    openrouterApiKeyInput.value = current.openrouterApiKey || "";
+    zaiApiKeyInput.value = current.zaiApiKey || "";
+    tavilyApiKeyInput.value = current.tavilyApiKey || "";
+    customPromptInput.value = current.customPrompt || "";
 
     msgEl.style.color = "#4ade80";
     msgEl.textContent = t(currentLang, "settingsBackup_import_success");
