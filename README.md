@@ -1,3 +1,18 @@
+# Page size budget per model + clearer too-large errors (v1.10.75)
+
+- **Per-model cap:** `models.js` now has `maxPageChars` (DeepSeek 120,000 chars; Groq and OpenRouter-free 24,000, roughly 6k tokens). Longer page text is cut at a line boundary in the worker and the panel shows a "page shortened" notice bubble.
+- **Translation is not truncated** (a cut translation would silently miss the rest); it relies on the error hint.
+- **Clear error:** when a request that carried page text fails with HTTP 413/429, "too large", rate-limit or context-length errors, the provider message is followed by a hint to turn off "Read current page", select just the text needed, wait, or switch model.
+- Build bumped to 1.10.75.
+
+# Blocked http images show a placeholder (v1.10.74)
+
+- Plain `http:` images are still blocked by the CSP (no security change). When the https retry also fails (http-only hosts such as a NAS, LAN device or localhost), the broken-image icon is replaced by "Image blocked (http)" plus the alt text and an Open link to the original URL, instead of an unexplained broken icon. https image failures are unchanged.
+
+# Fix: message listeners piled up on re-injection (v1.10.73)
+
+- `content.js` is injected on demand, and each injection into a tab ran in the same isolated world and added another `onMessage` listener; after N injections one request ran the extractor N times. The previous listener (kept on `globalThis.__aiAssistantMessageListener`) is now removed before the new one is added, and the stale comment (which still described a manifest content script) was rewritten.
+
 # Translation: the format was being lost BEFORE the model (v1.10.72)
 
 - **Real root cause:** the page extractor (`content.js`) flattened the page to plain text: heading levels, bullets/numbering, tables, links, bold and code blocks were gone before the text reached the model, and the noise filter even dropped titles inside `<header>`. No prompt or renderer could restore that.

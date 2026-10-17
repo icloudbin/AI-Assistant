@@ -714,10 +714,38 @@ async function fallbackRemoteImage(img) {
     const result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src.replace(/^http:/i, "https:"), pageUrl: String(activeTab?.url || "") });
     if (result?.ok && result.dataUrl) {
       img.src = result.dataUrl;
+      return;
     }
   } catch (_) {
-    // Keep the browser's normal broken-image state if the fallback fails.
+    // Fall through to the placeholder below.
   }
+  // A plain http: image the panel's CSP blocked and that has no https
+  // version: say so instead of leaving an unexplained broken-image icon.
+  if (/^http:/i.test(src)) showBlockedHttpImage(img, src);
+}
+
+function showBlockedHttpImage(img, src) {
+  if (!img.isConnected) return;
+  const box = document.createElement("span");
+  box.className = "image-blocked";
+  const label = document.createElement("span");
+  label.textContent = `🚫 ${t(currentLang, "imageBlockedHttp_label")}`;
+  box.appendChild(label);
+  const alt = (img.getAttribute("alt") || "").trim();
+  if (alt) {
+    const altEl = document.createElement("span");
+    altEl.className = "image-blocked-alt";
+    altEl.textContent = alt;
+    box.appendChild(altEl);
+  }
+  const link = document.createElement("a");
+  link.href = src;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = t(currentLang, "imageBlockedHttp_open");
+  box.appendChild(link);
+  box.title = src;
+  img.replaceWith(box);
 }
 
 // Direct cross-origin image loading is preferred. If the remote host blocks
@@ -1285,6 +1313,11 @@ function handlePortMessage(msg) {
       autoScrollEnabled = false;
       setStreaming(false);
       saveConversations().catch((err) => console.error("[AI Assistant] Unable to save conversation:", err));
+      break;
+    }
+    case "NOTICE": {
+      // Non-fatal note from the worker (e.g. the page text was shortened).
+      if (msg.text) addBubble("notice", msg.text);
       break;
     }
     case "ERROR": {

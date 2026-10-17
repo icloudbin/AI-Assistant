@@ -1,10 +1,15 @@
 // AI model catalog for AI Assistant.
+//
+// maxPageChars: cap on the current-page text sent with a request (about 4
+// characters per token). Free tiers (Groq, OpenRouter free) reject or
+// rate-limit large requests, so they get a much smaller budget than DeepSeek.
+export const DEFAULT_MAX_PAGE_CHARS = 120000;
 export const MODELS = [
-  { id: "deepseek-flash", label: "DeepSeek V4.1 Flash", provider: "deepseek", apiModel: "deepseek-flash", thinking: "enabled" },
-  { id: "groq-gpt-oss-120b", label: "Groq: GPT-OSS 120B", provider: "groq", apiModel: "openai/gpt-oss-120b", vision: false },
-  { id: "groq-qwen3.8-27b", label: "Groq: Qwen 3.8 27B", provider: "groq", apiModel: "qwen/qwen3.8-27b" },
-  { id: "groq-gpt-oss-20b", label: "Groq: GPT-OSS 20B", provider: "groq", apiModel: "openai/gpt-oss-20b", vision: false },
-  { id: "openrouter-free-auto", label: "OpenRouter: Free Model (Auto)", provider: "openrouter", apiModel: "openrouter/free" },
+  { id: "deepseek-flash", label: "DeepSeek V4.1 Flash", provider: "deepseek", apiModel: "deepseek-flash", thinking: "enabled", maxPageChars: 120000 },
+  { id: "groq-gpt-oss-120b", label: "Groq: GPT-OSS 120B", provider: "groq", apiModel: "openai/gpt-oss-120b", vision: false, maxPageChars: 24000 },
+  { id: "groq-qwen3.8-27b", label: "Groq: Qwen 3.8 27B", provider: "groq", apiModel: "qwen/qwen3.8-27b", maxPageChars: 24000 },
+  { id: "groq-gpt-oss-20b", label: "Groq: GPT-OSS 20B", provider: "groq", apiModel: "openai/gpt-oss-20b", vision: false, maxPageChars: 24000 },
+  { id: "openrouter-free-auto", label: "OpenRouter: Free Model (Auto)", provider: "openrouter", apiModel: "openrouter/free", maxPageChars: 24000 },
 ];
 
 // UI helper: tolerant lookup. Resolves legacy IDs and falls back to the default

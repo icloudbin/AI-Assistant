@@ -195,6 +195,8 @@ body.panel-resizing * { cursor: row-resize !important; user-select: none !import
 }
 .bubble-text a { color: var(--accent); text-decoration: underline; }
 .bubble-text a:hover { color: var(--accent); }
+.image-blocked { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; padding: 4px 8px; margin: 2px 0; border: 1px dashed var(--border, #888); border-radius: 6px; font-size: 0.9em; opacity: 0.85; }
+.image-blocked-alt { opacity: 0.8; }
 .bubble-text img {
   display: block;
   max-width: 100%;
@@ -214,6 +216,7 @@ body.panel-resizing * { cursor: row-resize !important; user-select: none !import
   color: var(--danger);
   border: 1px solid rgba(245, 91, 91, 0.4);
 }
+.bubble.notice { align-self: flex-start; font-size: 0.9em; opacity: 0.85; border: 1px dashed var(--border); background: transparent; }
 .bubble.pending::after { content: "▍"; animation: blink 1s step-start infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 

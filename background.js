@@ -1,5 +1,5 @@
 // background.js (root directory)
-import { findKnownModel } from "./models.js";
+import { findKnownModel, DEFAULT_MAX_PAGE_CHARS } from "./models.js";
 import { CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY } from "./storage-keys.js";
 import { getStoredLanguage, t } from "./i18n.js";
 import { restoreSettingsFromBackup } from "./settings-storage.js";
@@ -421,6 +421,7 @@ chrome.runtime.onConnect.addListener((port) => {
     // Released in the finally block below, exactly once per request.
     const releaseKeepAlive = startRequestKeepAlive();
 
+    let pageSentChars = 0;
     try {
       // Recover user settings before reading provider keys or language. This
       // makes the background service worker resilient if extension local
@@ -447,7 +448,7 @@ chrome.runtime.onConnect.addListener((port) => {
       // before any provider request is constructed - independent of, and
       // unaffected by, any attached images (see normalizedImages below),
       // which are sent whenever present regardless of this toggle.
-      const requestPageContext = includePageContext === true ? pageContext : null;
+      let requestPageContext = includePageContext === true ? pageContext : null;
       // Resolve the model from the canonical catalog for THIS request.
       // Never trust provider/apiModel/thinking values supplied by the UI and
       // never silently fall back to another provider. Legacy IDs are resolved
@@ -473,6 +474,18 @@ chrome.runtime.onConnect.addListener((port) => {
       const normalizedImages = Array.isArray(images) ? images.filter((img) => img && typeof img.dataUrl === "string" && /^data:image\/(jpeg|png|gif|webp);base64,/i.test(img.dataUrl)) : [];
       if (normalizedImages.length !== (Array.isArray(images) ? images.length : 0)) throw new Error(t(lang, "bg_error_imagesEncoding"));
 
+      // Per-model page budget (free tiers reject/rate-limit big requests).
+      // Translation is never truncated (a cut translation would silently miss
+      // the rest of the page); it relies on the clear error hint below.
+      const pageCap = model.maxPageChars || DEFAULT_MAX_PAGE_CHARS;
+      if (translateMode !== true && requestPageContext && !requestPageContext.captureFailed && (requestPageContext.text || "").length > pageCap) {
+        let cut = requestPageContext.text.slice(0, pageCap);
+        const nl = cut.lastIndexOf("\n");
+        if (nl > pageCap * 0.8) cut = cut.slice(0, nl);
+        requestPageContext = { ...requestPageContext, text: cut };
+        port.postMessage({ type: "NOTICE", text: t(lang, "bg_notice_pageTruncated_template", { model: model.label, chars: String(cut.length) }), requestId });
+      }
+      pageSentChars = requestPageContext && !requestPageContext.captureFailed ? (requestPageContext.text || "").length : 0;
       let effectiveQuestion = question;
       let requestPageContextFinal = requestPageContext;
       // Format-preserving translation: the layout (lines, blank lines,
@@ -542,7 +555,12 @@ chrome.runtime.onConnect.addListener((port) => {
       // back for it. sidepanel.js already reset its own UI state the moment
       // it sent STOP, without waiting for background.js to confirm.
       if (err?.name === "AbortError") return;
-      port.postMessage({ type: "ERROR", error: err?.message || String(err), requestId });
+      let errorText = err?.message || String(err);
+      // Clear hint when a page-sized request is refused or rate limited.
+      if (pageSentChars > 0 && /^HTTP (413|429)\b|too large|rate.?limit|context.?length|maximum context|tokens? per (minute|day)|\bTPM\b|reduce the length/i.test(errorText)) {
+        errorText += `\n\n${t(await getStoredLanguage().catch(() => "en"), "bg_hint_pageTooLarge")}`;
+      }
+      port.postMessage({ type: "ERROR", error: errorText, requestId });
     } finally {
       if (activeRequestId === requestId) {
         activeRequestId = null;

@@ -1021,12 +1021,17 @@ if (!globalThis.__aiAssistantPageExtractor) {
   globalThis.__aiAssistantPageExtractor = aiAssistantPageExtractor;
 }
 
-// Registered unconditionally (not behind the flag above): on re-injection
-// the previously registered listener may be gone or dead, and a duplicate
-// live registration - possible only when this injection races the manifest
-// content script's document_idle registration - is benign, since both
-// listeners extract identical content and the first sendResponse wins.
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+// content.js is injected on demand (chrome.scripting.executeScript), and every
+// injection into the same tab runs again in the SAME isolated world, so each
+// run would otherwise add one more message listener - N injections meant the
+// extractor ran N times per request. The listener is therefore registered
+// unconditionally (a re-injection after an extension reload needs a live one),
+// but the previously registered one is removed first, so exactly one is ever
+// active per page.
+if (globalThis.__aiAssistantMessageListener) {
+  try { chrome.runtime.onMessage.removeListener(globalThis.__aiAssistantMessageListener); } catch (err) { /* orphaned context: nothing to remove */ }
+}
+globalThis.__aiAssistantMessageListener = (msg, sender, sendResponse) => {
   if (msg?.type !== "EXTRACT_PAGE_CONTENT") return false;
   // Only the extension's own pages (side panel) may request page text. Reject
   // other extensions, and anything carrying a tab (another content script)
@@ -1048,4 +1053,5 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: false, error: String(err?.message || err) });
   }
   return false;
-});
+};
+chrome.runtime.onMessage.addListener(globalThis.__aiAssistantMessageListener);
