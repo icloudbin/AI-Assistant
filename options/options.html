@@ -54,6 +54,8 @@
   .history-management-title { font-size: 13px; font-weight: 700; margin-bottom: 2px; }
   .history-management .actions { margin-top: 2px; }
   .backup-hint { margin-top: 10px; }
+  .backup-passphrase { margin-top: 8px; }
+  .backup-passphrase[hidden] { display: none; }
   .language-section select { margin-top: 6px; }
   .language-section label { margin-top: 14px; }
   .version-number { margin-top: 6px; font-size: 13px; color: var(--muted); }
@@ -155,6 +157,13 @@
     </div>
     <div class="settings-divider" aria-hidden="true"></div>
 
+    <div class="history-management">
+      <div class="history-management-title" data-i18n="piiFilter_label">Privacy filter</div>
+      <label class="toggle"><input type="checkbox" id="piiFilterToggle" checked /> <span data-i18n="piiFilter_toggle">Redact personal and sensitive information before sending to AI</span></label>
+      <div class="hint backup-hint" data-i18n="piiFilter_hint">Names (when clearly labelled), phone numbers, emails, credit cards, ID/SSN numbers, IP addresses, API keys, tokens and passwords are replaced with placeholders such as [EMAIL] locally, before the question, page text, attachments or history are sent to the AI provider or web research. Your local history keeps the originals. Pattern-based, so it is a safety net, not a guarantee.</div>
+    </div>
+    <div class="settings-divider" aria-hidden="true"></div>
+
     <div class="history-management custom-prompt-section">
       <div class="history-management-title" data-i18n="customPrompt_label">Custom Prompt</div>
       <div class="field custom-prompt-field">
@@ -180,12 +189,18 @@
 
     <div class="history-management">
       <div class="history-management-title" data-i18n="settingsBackup_title">Settings Backup</div>
+      <label class="checkbox-row" for="exportIncludeKeys">
+        <input id="exportIncludeKeys" type="checkbox" />
+        <span data-i18n="settingsBackup_includeKeys_label">Include API keys (encrypted with a passphrase)</span>
+      </label>
+      <input id="backupPassphrase" class="backup-passphrase" type="password" autocomplete="new-password" placeholder="Passphrase for encrypted API keys (at least 10 characters)" aria-label="Passphrase for encrypted API keys (at least 10 characters)" data-i18n-placeholder="settingsBackup_passphrase_placeholder" data-i18n-aria-label="settingsBackup_passphrase_placeholder" />
+      <input id="backupPassphraseConfirm" class="backup-passphrase" type="password" autocomplete="new-password" placeholder="Confirm passphrase (export only)" aria-label="Confirm passphrase (export only)" data-i18n-placeholder="settingsBackup_passphraseConfirm_placeholder" data-i18n-aria-label="settingsBackup_passphraseConfirm_placeholder" hidden />
       <div class="actions">
         <button id="exportSettings" type="button" data-i18n="settingsBackup_export_button">Export settings</button>
         <button id="importSettings" type="button" data-i18n="settingsBackup_import_button">Import settings</button>
         <input id="importSettingsFile" type="file" hidden accept=".json,application/json" />
       </div>
-      <div class="hint backup-hint" data-i18n="settingsBackup_hint">Export writes all settings — including API keys and your custom prompt — to a plain-text JSON file. Import restores them in one click, for example after removing and reinstalling the extension. Keep the file somewhere safe: it contains your API keys in readable form.</div>
+      <div class="hint backup-hint" data-i18n="settingsBackup_hint">Export saves your settings and custom prompt to a JSON file. API keys are left out unless you tick “Include API keys” and set a passphrase, which encrypts them in the file (AES-256-GCM). Import restores everything in one click, for example after removing and reinstalling the extension. If the file contains encrypted API keys, enter its passphrase before choosing the file. A forgotten passphrase cannot be recovered.</div>
     </div>
 
     <div class="history-management language-section" role="group" aria-labelledby="languageTitle">

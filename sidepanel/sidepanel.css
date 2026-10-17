@@ -149,6 +149,7 @@ body.panel-resizing * { cursor: row-resize !important; user-select: none !import
 .empty-state { color: var(--muted); text-align: center; margin-top: 40px; line-height: 1.6; }
 
 .bubble { max-width: 92%; padding: 8px 10px; border-radius: var(--radius); line-height: 1.5; }
+.bubble-text.plain-text { white-space: pre-wrap; tab-size: 4; }
 .bubble-text { word-break: break-word; overflow-wrap: anywhere; user-select: text; }
 .bubble-text p { margin: 0 0 8px; }
 .bubble-text p:last-child { margin-bottom: 0; }

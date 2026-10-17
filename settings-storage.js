@@ -1,8 +1,15 @@
 // settings-storage.js
-// Persistent second copy of user settings using IndexedDB.
+// Persistent second copy of NON-SECRET user settings using IndexedDB.
 // chrome.storage.local remains the primary store. IndexedDB is used only as
 // a recovery layer because extension settings should survive browser restarts
 // even if the browser's extension-storage database is unexpectedly reset.
+//
+// SECURITY: credentials (API keys) are deliberately NOT mirrored here. A second
+// plaintext copy doubles where a secret lives, and - worse - "restore keys that
+// are missing from chrome.storage.local" cannot tell a storage reset from the
+// user deliberately removing a key, so a deleted key would reappear on the next
+// service-worker start. Keys live only in chrome.storage.local; the Settings
+// export can carry them, but only encrypted with a passphrase (settings-crypto.js).
 
 import { LANGUAGE_STORAGE_KEY } from "./storage-keys.js";
 
@@ -11,12 +18,16 @@ const DB_VERSION = 1;
 const STORE_NAME = "settings";
 const SETTINGS_RECORD_KEY = "user-settings";
 
-export const PERSISTED_SETTING_KEYS = [
+// Credentials. Never written to, and never restored from, the IndexedDB mirror.
+export const SECRET_SETTING_KEYS = [
   "apiKey",
   "openrouterApiKey",
   "groqApiKey",
-  "groqKey",
+  "groqKey", // legacy alias of groqApiKey
   "tavilyApiKey",
+];
+
+export const PERSISTED_SETTING_KEYS = [
   "customPrompt",
   // The display language is stored under LANGUAGE_STORAGE_KEY ("languagePreference").
   // Backups made by older builds used the field name "language", which never
@@ -61,6 +72,8 @@ async function readBackup() {
 export async function saveSettingsBackup(values) {
   const current = await readBackup().catch(() => ({}));
   const next = { ...current };
+  // Drop any credentials an older build mirrored into this record.
+  for (const key of SECRET_SETTING_KEYS) delete next[key];
   for (const key of PERSISTED_SETTING_KEYS) {
     if (Object.prototype.hasOwnProperty.call(values, key)) {
       next[key] = values[key];
@@ -79,6 +92,28 @@ export async function saveSettingsBackup(values) {
   } finally {
     db.close();
   }
+}
+
+// Removes credentials that older builds mirrored into the IndexedDB record.
+// Only writes when something is actually there, so it is a no-op afterwards.
+export async function scrubSecretsFromBackup() {
+  const current = await readBackup().catch(() => ({}));
+  if (!SECRET_SETTING_KEYS.some((key) => Object.prototype.hasOwnProperty.call(current, key))) return false;
+  const next = { ...current };
+  for (const key of SECRET_SETTING_KEYS) delete next[key];
+  const db = await openDatabase();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).put(next, SETTINGS_RECORD_KEY);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error || new Error("Unable to scrub settings backup."));
+      tx.onabort = () => reject(tx.error || new Error("Settings backup scrub aborted."));
+    });
+  } finally {
+    db.close();
+  }
+  return true;
 }
 
 export async function getSettingsBackup() {
@@ -100,6 +135,12 @@ export async function restoreSettingsFromBackup() {
       chrome.storage.local.get(PERSISTED_SETTING_KEYS),
       getSettingsBackup(),
     ]);
+    // One-time cleanup of keys mirrored by earlier builds (the restore loop
+    // below only ever touches PERSISTED_SETTING_KEYS, so they are never
+    // resurrected even if this scrub fails).
+    if (SECRET_SETTING_KEYS.some((key) => backup[key] !== undefined)) {
+      await scrubSecretsFromBackup().catch(() => {});
+    }
     const restored = {};
     for (const key of PERSISTED_SETTING_KEYS) {
       if (local[key] === undefined && backup[key] !== undefined) {

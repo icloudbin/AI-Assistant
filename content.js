@@ -26,10 +26,10 @@
 //   4. Plain document.body.innerText, sliced to the character limit - the
 //      original fallback, unchanged, used whenever nothing above matches.
 //
-// This file is also injected on demand from sidepanel.js via
-// chrome.scripting.executeScript when the registered content script is
-// unreachable (e.g. the extension was reloaded while this tab stayed open,
-// or the message raced document_idle). Everything therefore lives inside
+// This file is no longer registered in manifest.json content_scripts; it is
+// injected on demand from sidepanel.js via chrome.scripting.executeScript
+// when the user asks for page context (and again if an earlier instance is
+// unreachable, e.g. the extension was reloaded while this tab stayed open). Everything therefore lives inside
 // the single aiAssistantPageExtractor() function declaration below:
 // re-injecting redeclares that function without error (top-level const/let
 // would throw on re-injection), and the extractor closure is pure DOM code
@@ -261,21 +261,164 @@ function readerModeStripNoise(root) {
   return root;
 }
 
-// Cheap text/link measurement via textContent (no layout/reflow needed),
-// used only to score and compare candidates against each other. Runs on a
-// stripped clone so scoring and the live page can never affect each other.
+// Page DOMs are never modified or duplicated while extracting. Everything
+// below only READS the live tree. The previous implementation cloned
+// document.body (or the article container) and attached the clone to the live
+// page for a moment to get layout-aware innerText. That fired page
+// MutationObservers (breaking some SPAs and tripping anti-tamper/anti-bot
+// scripts), briefly duplicated every id on the page, could re-trigger media
+// and resource loading, and forced a full-page reflow on large documents.
+
+// Nesting guard for the recursive walks below; real pages are far shallower.
+const EXTRACT_MAX_DEPTH = 600;
+
+// textContent of `root` with noise subtrees left out - the same text the old
+// "clone, strip noise, read textContent" sequence produced, without the clone.
+// Like readerModeStripNoise(), the root itself is never treated as noise.
+function textContentWithoutNoise(root) {
+  let text = '';
+  const walk = (node, depth) => {
+    for (let c = node.firstChild; c; c = c.nextSibling) {
+      if (c.nodeType === 3) text += c.nodeValue;
+      else if (c.nodeType === 1 && depth < EXTRACT_MAX_DEPTH && !readerModeIsNoise(c)) walk(c, depth + 1);
+    }
+  };
+  walk(root, 0);
+  return text;
+}
+
+// Elements whose contents are never part of the readable page text.
+const VISIBLE_TEXT_SKIP_TAGS = new Set([
+  'script', 'style', 'noscript', 'template', 'head', 'title', 'meta', 'link',
+  'canvas', 'object', 'embed', 'video', 'audio', 'iframe', 'svg', 'textarea',
+]);
+
+// Read-only stand-in for element.innerText on a noise-stripped copy. Walks the
+// live tree and emulates the parts of innerText that matter for reading:
+// elements that are display:none (any cause - [hidden], CSS classes) or
+// visibility:hidden are left out, block-level elements start and end a line
+// (<p> a blank line), <br> is a newline, table cells are tab-separated, and
+// whitespace is collapsed unless the element is preformatted. Noise elements
+// (see readerModeIsNoise) are skipped exactly as readerModeStripNoise() removed
+// them. Nothing is cloned, inserted, or modified.
+function readVisibleText(root) {
+  const items = []; // text tokens ({ text, pre }) and required-line-break counts (numbers)
+  const pushBreak = (n) => {
+    const last = items.length - 1;
+    if (last >= 0 && typeof items[last] === 'number') {
+      if (items[last] < n) items[last] = n;
+    } else {
+      items.push(n);
+    }
+  };
+
+  const walk = (el, depth) => {
+    const style = getComputedStyle(el);
+    const display = style.display;
+    if (display === 'none') return;
+    const visible = style.visibility === 'visible';
+    const ws = style.whiteSpace;
+    const preserve = ws === 'pre' || ws === 'pre-wrap' || ws === 'break-spaces';
+    const preLine = ws === 'pre-line';
+    const isBlock = display !== 'inline' && display !== 'contents' && display !== 'table-cell' &&
+      !display.startsWith('inline') && !display.startsWith('ruby');
+    const breakCount = el.localName === 'p' ? 2 : 1;
+    const closedDetails = el.localName === 'details' && !el.open;
+
+    if (isBlock && visible) pushBreak(breakCount);
+    for (let c = el.firstChild; c; c = c.nextSibling) {
+      if (c.nodeType === 3) {
+        if (!visible || closedDetails) continue;
+        let text = c.nodeValue;
+        if (!preserve) {
+          text = preLine
+            ? text.replace(/[ \t\f\r]*\n[ \t\f\r]*/g, '\n').replace(/[ \t\f\r]+/g, ' ')
+            : text.replace(/[ \t\n\r\f]+/g, ' ');
+        }
+        if (text) items.push({ text, pre: preserve });
+      } else if (c.nodeType === 1) {
+        const tag = c.localName;
+        if (VISIBLE_TEXT_SKIP_TAGS.has(tag) || readerModeIsNoise(c)) continue;
+        // The body of a collapsed <details> is not rendered; only <summary> is.
+        if (closedDetails && tag !== 'summary') continue;
+        if (tag === 'br') {
+          if (visible) items.push({ text: '\n', pre: true });
+        } else if (depth < EXTRACT_MAX_DEPTH) {
+          walk(c, depth + 1);
+        }
+      }
+    }
+    if (isBlock && visible) pushBreak(breakCount);
+    else if (display === 'table-cell' && visible && el.nextElementSibling) items.push({ text: '\t', pre: true });
+  };
+  walk(root, 0);
+
+  // Assemble: adjacent line-break requirements merge to the largest one,
+  // leading/trailing breaks are dropped, and collapsible spaces never start a
+  // line, end a line, or double up across element boundaries. Built from an
+  // array of parts with the last character tracked separately: re-scanning or
+  // re-flattening one ever-growing string for every token is quadratic and took
+  // seconds on very large pages.
+  const parts = [];
+  let last = ''; // last character emitted ('' while nothing has been emitted)
+  const trimTrailingSpaces = () => {
+    while (parts.length) {
+      const part = parts[parts.length - 1];
+      let end = part.length;
+      while (end > 0 && part.charCodeAt(end - 1) === 32) end--;
+      if (end === part.length) break;
+      if (end === 0) parts.pop();
+      else { parts[parts.length - 1] = part.slice(0, end); break; }
+    }
+    const tail = parts[parts.length - 1];
+    last = tail ? tail[tail.length - 1] : '';
+  };
+  let pending = 0;
+  for (const item of items) {
+    if (typeof item === 'number') {
+      if (item > pending) pending = item;
+      continue;
+    }
+    let text = item.text;
+    if (!item.pre && (!last || pending || last === ' ' || last === '\n' || last === '\t')) text = text.replace(/^ +/, '');
+    if (!text) continue;
+    if (pending && last) {
+      trimTrailingSpaces();
+      parts.push('\n'.repeat(pending));
+    } else if (item.pre && text.startsWith('\n')) {
+      trimTrailingSpaces();
+    }
+    pending = 0;
+    parts.push(text);
+    last = text[text.length - 1];
+  }
+  return parts.join('');
+}
+
+// Cheap text/link measurement (no layout/reflow needed), used only to score and
+// compare candidates against each other. Reads the live tree directly and skips
+// noise subtrees, so nothing is cloned and the live page is never affected.
 function readerModeMeasure(root) {
-  const clone = root.cloneNode(true);
-  readerModeStripNoise(clone);
-  const text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
   let linkText = '';
-  for (const a of clone.querySelectorAll('a')) linkText += a.textContent || '';
+  let longParagraphCount = 0;
+  const walk = (node, inLink, depth) => {
+    let own = '';
+    for (let c = node.firstChild; c; c = c.nextSibling) {
+      if (c.nodeType === 3) {
+        own += c.nodeValue;
+      } else if (c.nodeType === 1 && depth < EXTRACT_MAX_DEPTH && !readerModeIsNoise(c)) {
+        const isLink = c.localName === 'a';
+        const sub = walk(c, inLink || isLink, depth + 1);
+        own += sub;
+        if (isLink && !inLink) linkText += sub;
+        if (c.localName === 'p' && sub.trim().length > 40) longParagraphCount++;
+      }
+    }
+    return own;
+  };
+  const text = walk(root, false, 0).replace(/\s+/g, ' ').trim();
   linkText = linkText.replace(/\s+/g, ' ').trim();
   const linkDensity = text.length ? linkText.length / text.length : 1;
-  const paragraphs = Array.from(clone.querySelectorAll('p'));
-  const longParagraphCount = paragraphs.filter(
-    (p) => (p.textContent || '').trim().length > 40
-  ).length;
   return { textLength: text.length, linkDensity, longParagraphCount };
 }
 
@@ -491,7 +634,7 @@ function extractSynologyCommunity() {
   };
 }
 
-function extractReaderModeArticle() {
+function findReaderModeBestEl() {
   const candidateSelector =
     'article, main, [role="main"], [class*="article"], [class*="post"], ' +
     '[class*="content"], [id*="article"], [id*="content"], [id*="main"]';
@@ -518,26 +661,17 @@ function extractReaderModeArticle() {
     }
   }
   if (!bestEl) return null;
+  return bestEl;
+}
 
-  // Re-read the winning candidate's text with innerText, matching how every
-  // other extractor in this file reads visible text, rather than reusing
-  // the cheap textContent-based measurement above. innerText needs real
-  // layout, so the stripped clone is attached to the live document in an
-  // off-screen (not display:none - that would report empty) holder just
-  // long enough to read it, then removed again; the live page itself is
-  // never modified.
-  const clone = bestEl.cloneNode(true);
-  readerModeStripNoise(clone);
-  const holder = document.createElement('div');
-  holder.style.cssText = 'position:absolute; left:-99999px; top:0;';
-  holder.appendChild(clone);
-  document.body.appendChild(holder);
-  let text = '';
-  try {
-    text = (clone.innerText || clone.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
-  } finally {
-    holder.remove();
-  }
+function extractReaderModeArticle() {
+  const bestEl = findReaderModeBestEl();
+  if (!bestEl) return null;
+
+  // Re-read the winning candidate's visible, layout-aware text (rather than
+  // reusing the cheap textContent-based measurement above) by walking the live
+  // tree read-only - see readVisibleText(). The page is never modified.
+  const text = readVisibleText(bestEl).replace(/\n{3,}/g, '\n\n').trim();
   if (text.length < READER_MODE_MIN_TEXT_LENGTH) return null;
 
   return {
@@ -584,9 +718,7 @@ function extractAmazonProductPage() {
     for (const el of document.querySelectorAll(selector)) {
       if (seen.has(el)) continue;
       seen.add(el);
-      const clone = el.cloneNode(true);
-      readerModeStripNoise(clone);
-      const text = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+      const text = textContentWithoutNoise(el).replace(/\s+/g, ' ').trim();
       if (text) sections.push(text);
     }
   }
@@ -595,22 +727,9 @@ function extractAmazonProductPage() {
   // Preserve a cleaned representation of the rest of the page as well. This
   // lets questions about material outside the standard product modules still
   // use the full page, while product facts remain at the front of the context.
-  const bodyClone = document.body?.cloneNode(true);
-  let fullPageText = '';
-  if (bodyClone) {
-    readerModeStripNoise(bodyClone);
-    const holder = document.createElement('div');
-    holder.style.cssText = 'position:absolute; left:-99999px; top:0;';
-    holder.appendChild(bodyClone);
-    document.body.appendChild(holder);
-    try {
-      fullPageText = (bodyClone.innerText || bodyClone.textContent || '')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
-    } finally {
-      holder.remove();
-    }
-  }
+  const fullPageText = document.body
+    ? readVisibleText(document.body).replace(/\n{3,}/g, '\n\n').trim()
+    : '';
 
   const text = [
     'AMAZON PRODUCT INFORMATION:',
@@ -626,7 +745,218 @@ function extractAmazonProductPage() {
   };
 }
 
-function extractPageContent() {
+// ---------------------------------------------------------------------------
+// Structure-preserving extraction (used by Translate).
+//
+// readVisibleText() above flattens a page to plain text: heading levels, list
+// markers/numbering, table structure, links, bold/italic and code blocks are
+// all lost before the text ever reaches the model, so a translation can never
+// reproduce them. This converts the DOM to Markdown instead, keeping that
+// structure explicit in the text. Only scripts/menus/ads/hidden elements are
+// skipped; <header> content (article titles) is kept.
+// ---------------------------------------------------------------------------
+const MD_SKIP_TAGS = new Set([
+  'script', 'style', 'noscript', 'template', 'svg', 'canvas', 'iframe', 'object',
+  'embed', 'video', 'audio', 'button', 'form', 'select', 'input', 'textarea',
+  'nav', 'aside', 'footer', 'head', 'title', 'meta', 'link',
+]);
+const MD_NOISE_PATTERN = /cookie|consent|banner|newsletter|popup|modal|overlay|advert|sponsor|skip-link/i;
+const MD_BLOCK_TAGS = new Set([
+  'address', 'article', 'blockquote', 'body', 'dd', 'details', 'div', 'dl', 'dt',
+  'fieldset', 'figcaption', 'figure', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header',
+  'hgroup', 'hr', 'li', 'main', 'ol', 'p', 'pre', 'section', 'summary', 'table',
+  'tbody', 'thead', 'tfoot', 'tr', 'td', 'th', 'ul', 'caption',
+]);
+const MD_BLOCK_SELECTOR = 'p,div,ul,ol,li,table,h1,h2,h3,h4,h5,h6,blockquote,pre,section,article,figure';
+const MD_LIST_MARK = '\u0001';
+
+function mdDisplay(el) {
+  try { return getComputedStyle(el).display || ''; } catch (err) { return ''; }
+}
+
+function mdSkip(el) {
+  if (MD_SKIP_TAGS.has(el.localName)) return true;
+  if (el.hasAttribute('hidden')) return true;
+  if (mdDisplay(el) === 'none') return true;
+  const sig = `${el.id || ''} ${typeof el.className === 'string' ? el.className : ''}`;
+  return MD_NOISE_PATTERN.test(sig);
+}
+
+function mdIsBlock(el) {
+  if (MD_BLOCK_TAGS.has(el.localName)) return true;
+  const d = mdDisplay(el);
+  return !!d && d !== 'inline' && d !== 'contents' && d !== 'table-cell' && !d.startsWith('inline') && !d.startsWith('ruby');
+}
+
+function mdAbsUrl(u) {
+  try {
+    const x = new URL(u, location.href);
+    return /^(https?:|mailto:)$/.test(x.protocol) ? x.href : '';
+  } catch (err) { return ''; }
+}
+
+function mdWrap(inner, mark) {
+  const core = inner.trim();
+  if (!core || core.includes('\n')) return inner;
+  return `${inner.match(/^\s*/)[0]}${mark}${core}${mark}${inner.match(/\s*$/)[0]}`;
+}
+
+function mdInlineList(nodes, pre) {
+  let out = '';
+  for (const c of nodes) {
+    if (c.nodeType === 3) {
+      out += pre ? c.nodeValue : c.nodeValue.replace(/[ \t\r\n\f]+/g, ' ');
+      continue;
+    }
+    if (c.nodeType !== 1 || mdSkip(c)) continue;
+    const tag = c.localName;
+    if (tag === 'br') { out += '\n'; continue; }
+    if (tag === 'img') {
+      const src = mdAbsUrl(c.getAttribute('src') || '');
+      if (src) out += `![${(c.getAttribute('alt') || '').replace(/[\[\]\n]/g, ' ').trim()}](${src})`;
+      continue;
+    }
+    const inner = mdInlineList(Array.from(c.childNodes), pre);
+    if (tag === 'strong' || tag === 'b') out += mdWrap(inner, '**');
+    else if (tag === 'em' || tag === 'i') out += mdWrap(inner, '*');
+    else if (tag === 'code' || tag === 'kbd' || tag === 'samp') out += inner.trim() ? `\`${inner.trim().replace(/`/g, "'")}\`` : inner;
+    else if (tag === 'a') {
+      const href = mdAbsUrl(c.getAttribute('href') || '');
+      const label = inner.replace(/[\[\]]/g, '').trim();
+      out += href && label && !label.includes('\n') ? `${inner.match(/^\s*/)[0]}[${label}](${href})${inner.match(/\s*$/)[0]}` : inner;
+    } else if (mdIsBlock(c)) out += ` ${inner} `;
+    else out += inner;
+  }
+  return out;
+}
+
+function mdCleanInline(text) {
+  return text.replace(/[ \t]*\n[ \t]*/g, '\n').replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+function mdTable(el) {
+  const rows = [];
+  for (const tr of el.querySelectorAll('tr')) {
+    const cells = Array.from(tr.children)
+      .filter((cell) => cell.localName === 'td' || cell.localName === 'th')
+      .map((cell) => mdInlineList(Array.from(cell.childNodes), false).replace(/\s+/g, ' ').replace(/\|/g, '/').trim());
+    if (cells.length) rows.push(cells);
+  }
+  if (!rows.length) return '';
+  const width = Math.max(...rows.map((r) => r.length));
+  const lines = rows.map((r) => `| ${Array.from({ length: width }, (_, i) => r[i] || '').join(' | ')} |`);
+  lines.splice(1, 0, `| ${Array(width).fill('---').join(' | ')} |`);
+  return lines.join('\n');
+}
+
+function mdList(el, depth) {
+  const ordered = el.localName === 'ol';
+  let n = parseInt(el.getAttribute('start') || '1', 10) || 1;
+  const pad = '  '.repeat(depth);
+  const lines = [];
+  for (const li of el.children) {
+    if (li.localName !== 'li' || mdSkip(li)) continue;
+    const blocks = mdBlocksOf(li, depth + 1);
+    const marker = ordered ? `${n++}. ` : '- ';
+    let first = true;
+    for (const block of blocks) {
+      if (block.startsWith(MD_LIST_MARK)) {
+        lines.push(block.slice(1));
+      } else {
+        const text = block.split('\n').map((l, i) => (first && i === 0 ? `${pad}${marker}${l}` : `${pad}   ${l}`)).join('\n');
+        lines.push(text);
+        first = false;
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
+function mdBlocksOf(root, depth = 0) {
+  const blocks = [];
+  let run = [];
+  const flush = () => {
+    if (!run.length) return;
+    const text = mdCleanInline(mdInlineList(run, false));
+    run = [];
+    if (text) blocks.push(text);
+  };
+  const visit = (parent) => {
+    for (const c of Array.from(parent.childNodes)) {
+      if (c.nodeType === 3) { run.push(c); continue; }
+      if (c.nodeType !== 1 || mdSkip(c)) continue;
+      const tag = c.localName;
+      if (/^h[1-6]$/.test(tag)) {
+        flush();
+        const text = mdInlineList(Array.from(c.childNodes), false).replace(/\s+/g, ' ').trim();
+        if (text) blocks.push(`${'#'.repeat(Number(tag[1]))} ${text}`);
+      } else if (tag === 'ul' || tag === 'ol') {
+        flush();
+        const list = mdList(c, depth);
+        if (list) blocks.push(depth > 0 ? MD_LIST_MARK + list : list);
+      } else if (tag === 'blockquote') {
+        flush();
+        const inner = mdBlocksOf(c, 0).map((b) => b.replace(new RegExp(MD_LIST_MARK, 'g'), '')).join('\n\n');
+        if (inner) blocks.push(inner.split('\n').map((l) => (l ? `> ${l}` : '>')).join('\n'));
+      } else if (tag === 'pre') {
+        flush();
+        const code = (c.textContent || '').replace(/\n+$/, '');
+        if (code.trim()) blocks.push('```\n' + code + '\n```');
+      } else if (tag === 'table') {
+        flush();
+        const table = mdTable(c);
+        if (table) blocks.push(table);
+      } else if (tag === 'hr') {
+        flush();
+        blocks.push('---');
+      } else if (mdIsBlock(c) || c.querySelector(MD_BLOCK_SELECTOR)) {
+        flush();
+        visit(c);
+        flush();
+      } else {
+        run.push(c);
+      }
+    }
+  };
+  visit(root);
+  flush();
+  return blocks;
+}
+
+function mdCut(text) {
+  let out = text.replace(new RegExp(MD_LIST_MARK, 'g'), '').replace(/\n{3,}/g, '\n\n').trim();
+  if (out.length > PAGE_CONTEXT_CHAR_LIMIT) {
+    out = out.slice(0, PAGE_CONTEXT_CHAR_LIMIT);
+    const cut = out.lastIndexOf('\n');
+    if (cut > 0) out = out.slice(0, cut);
+  }
+  return out;
+}
+
+function extractPageMarkdownContent() {
+  const roots = [findReaderModeBestEl(), document.body].filter(Boolean);
+  for (let i = 0; i < roots.length; i++) {
+    const text = mdCut(mdBlocksOf(roots[i]).join('\n\n'));
+    if (text && (text.length >= READER_MODE_MIN_TEXT_LENGTH || i === roots.length - 1)) {
+      return { source: 'markdown-page', format: 'markdown', title: document.title, url: location.href, text };
+    }
+  }
+  return null;
+}
+
+// The current selection as Markdown (null when nothing is selected).
+function extractSelectionMarkdown() {
+  const sel = getSelection();
+  if (!sel || !sel.rangeCount || sel.isCollapsed) return null;
+  const holder = document.createElement('div');
+  for (let i = 0; i < sel.rangeCount; i++) holder.appendChild(sel.getRangeAt(i).cloneContents());
+  const text = mdCut(mdBlocksOf(holder).join('\n\n'));
+  if (!text) return null;
+  const structured = /^(#{1,6} |[-*] |\d+\. |> |\||```)/m.test(text) || /\*\*|\]\(|`/.test(text);
+  return { text, structured };
+}
+
+function extractPageContent(opts) {
   const mailPlus = extractSynologyMailPlus();
   if (mailPlus) return withPageImages(mailPlus);
 
@@ -642,6 +972,11 @@ function extractPageContent() {
   const amazonProduct = extractAmazonProductPage();
   if (amazonProduct) return withPageImages(amazonProduct);
 
+  if (opts && opts.markdown) {
+    const markdownPage = extractPageMarkdownContent();
+    if (markdownPage) return withPageImages(markdownPage);
+  }
+
   const readerMode = extractReaderModeArticle();
   if (readerMode) return withPageImages(readerMode);
 
@@ -652,27 +987,9 @@ function extractPageContent() {
   // navigation, headers, footers, sidebars, cookie banners, and ads.
   if (!document.body) return null;
 
-  const clone = document.body.cloneNode(true);
-  readerModeStripNoise(clone);
-  // innerText needs real layout: on a detached clone it degenerates to
-  // textContent (per spec, an element that is not being rendered returns
-  // textContent), which concatenates text nodes with no separators - every
-  // paragraph, heading, and list item would glue together on one line.
-  // Attach the clone off-screen just long enough to read it (the same
-  // pattern as extractReaderModeArticle above), then remove it again; the
-  // live page itself is never modified.
-  const holder = document.createElement('div');
-  holder.style.cssText = 'position:absolute; left:-99999px; top:0;';
-  holder.appendChild(clone);
-  document.body.appendChild(holder);
-  let text = '';
-  try {
-    text = (clone.innerText || clone.textContent || '')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-  } finally {
-    holder.remove();
-  }
+  // Walk the live tree read-only (see readVisibleText): the page is never
+  // cloned, modified, or re-laid-out.
+  const text = readVisibleText(document.body).replace(/\n{3,}/g, '\n\n').trim();
   // A page can be meaningful even when it has no extractable text, such as
   // an image gallery or a scanned document. Keep that page available to the
   // quick actions when it contains eligible images, so they can still be
@@ -697,7 +1014,7 @@ function extractPageContent() {
   });
 }
 
-  return { extractPageContent };
+  return { extractPageContent, extractSelectionMarkdown };
 }
 
 if (!globalThis.__aiAssistantPageExtractor) {
@@ -711,10 +1028,22 @@ if (!globalThis.__aiAssistantPageExtractor) {
 // listeners extract identical content and the first sendResponse wins.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type !== "EXTRACT_PAGE_CONTENT") return false;
+  // Only the extension's own pages (side panel) may request page text. Reject
+  // other extensions, and anything carrying a tab (another content script)
+  // or a non-extension URL. Web pages cannot reach this listener at all.
+  if (
+    !sender ||
+    sender.id !== chrome.runtime.id ||
+    sender.tab ||
+    typeof sender.url !== "string" ||
+    !sender.url.startsWith(chrome.runtime.getURL(""))
+  ) {
+    return false;
+  }
   // Always answer: an exception inside the extractor used to leave the sender
   // with "message port closed before a response was received" and no data.
   try {
-    sendResponse({ ok: true, data: globalThis.__aiAssistantPageExtractor().extractPageContent() });
+    sendResponse({ ok: true, data: globalThis.__aiAssistantPageExtractor().extractPageContent({ markdown: msg.format === 'markdown' }) });
   } catch (err) {
     sendResponse({ ok: false, error: String(err?.message || err) });
   }

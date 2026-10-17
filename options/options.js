@@ -9,6 +9,7 @@ import {
 } from "../i18n.js";
 import { HISTORY_STORAGE_KEY, MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
 import { saveSettingsBackup, restoreSettingsFromBackup } from "../settings-storage.js";
+import { encryptSecrets, decryptSecrets, MIN_PASSPHRASE_LENGTH } from "../settings-crypto.js";
 
 const apiKeyInput = document.getElementById("apiKey");
 const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
@@ -16,6 +17,12 @@ const groqApiKeyInput = document.getElementById("groqApiKey");
 const tavilyApiKeyInput = document.getElementById("tavilyApiKey");
 const customPromptInput = document.getElementById("customPrompt");
 const msgEl = document.getElementById("msg");
+const piiFilterToggle = document.getElementById("piiFilterToggle");
+// Privacy filter: on by default, saved immediately when toggled.
+chrome.storage.local.get("piiFilterEnabled").then((s) => { piiFilterToggle.checked = s.piiFilterEnabled !== false; }).catch(() => {});
+piiFilterToggle.addEventListener("change", () => {
+  chrome.storage.local.set({ piiFilterEnabled: piiFilterToggle.checked }).catch(() => {});
+});
 const backupHistoryBtn = document.getElementById("backupHistory");
 const restoreHistoryBtn = document.getElementById("restoreHistory");
 const restoreHistoryFile = document.getElementById("restoreHistoryFile");
@@ -159,7 +166,8 @@ document.getElementById("save").addEventListener("click", async (event) => {
       customPrompt,
     };
     await chrome.storage.local.set(settingsToSave);
-    await saveSettingsBackup(settingsToSave);
+    // API keys live only in chrome.storage.local (never mirrored to IndexedDB).
+    await saveSettingsBackup({ customPrompt });
 
     // Verify the write immediately. This makes a broken Save operation visible
     // instead of showing "Saved" when the value was not actually persisted.
@@ -355,6 +363,41 @@ function readU32le(bytes, offset) {
     | (bytes[offset + 3] << 24)) >>> 0;
 }
 
+// Decompression limits for history restore.
+//
+// Every size stored in a ZIP header is attacker-controlled, so a few hundred KB
+// of Deflate data can expand to gigabytes ("zip bomb") and crash the Settings
+// tab - or, with overlapping entries, even without any compression at all. A
+// genuine backup is bounded by the chrome.storage.local quota (about 10 MB of
+// history), so these ceilings are far above anything the exporter produces.
+const ZIP_MAX_ENTRY_BYTES = 32 * 1024 * 1024;  // one entry, after decompression
+const ZIP_MAX_TOTAL_BYTES = 64 * 1024 * 1024;  // all entries combined
+
+// Inflates a raw Deflate stream, reading it chunk by chunk and aborting as soon
+// as the output would exceed maxBytes. Unlike `new Response(stream).arrayBuffer()`
+// this never holds more than maxBytes (plus one chunk) in memory.
+// Returns null when the limit is exceeded; throws if the data is not valid Deflate.
+async function inflateRawLimited(bytes, maxBytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  const reader = stream.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let pos = 0;
+  for (const chunk of chunks) { out.set(chunk, pos); pos += chunk.length; }
+  return out;
+}
+
 async function extractZipEntries(bytes) {
   const decoder = new TextDecoder("utf-8", { fatal: false });
   const entries = new Map();
@@ -376,6 +419,7 @@ async function extractZipEntries(bytes) {
   if (centralOffset + centralSize > bytes.length) throw new Error(t(currentLang, "zip_error_invalidCentralDir"));
 
   let offset = centralOffset;
+  let totalBytes = 0;
   for (let i = 0; i < entryCount; i++) {
     if (offset + 46 > bytes.length || readU32le(bytes, offset) !== 0x02014b50) {
       throw new Error(t(currentLang, "zip_error_invalidCentralDirEntry"));
@@ -401,6 +445,15 @@ async function extractZipEntries(bytes) {
       throw new Error(t(currentLang, "zip_error_zip64Unsupported"));
     }
 
+    // Enforce the size budget from the central directory before reading any
+    // data. The total is a running sum because several entries may point at the
+    // same bytes (overlapping-entries bomb), so a per-entry check alone is not
+    // enough. Decompression below is capped at the declared size, so the
+    // declared sizes bound the real memory use.
+    if (uncompressedSize > ZIP_MAX_ENTRY_BYTES) throw new Error(t(currentLang, "zip_error_expandedTooLarge"));
+    totalBytes += uncompressedSize;
+    if (totalBytes > ZIP_MAX_TOTAL_BYTES) throw new Error(t(currentLang, "zip_error_expandedTooLarge"));
+
     if (localOffset + 30 > bytes.length || readU32le(bytes, localOffset) !== 0x04034b50) {
       throw new Error(t(currentLang, "zip_error_invalidLocalHeader"));
     }
@@ -410,7 +463,8 @@ async function extractZipEntries(bytes) {
     const dataEnd = dataStart + compressedSize;
     if (dataStart > bytes.length || dataEnd > bytes.length) throw new Error(t(currentLang, "zip_error_entryExceedsFileSize"));
 
-    const compressed = bytes.slice(dataStart, dataEnd);
+    // A view, not a copy: entries can be large and may overlap.
+    const compressed = bytes.subarray(dataStart, dataEnd);
     let data;
     if (method === 0) {
       data = compressed;
@@ -419,11 +473,15 @@ async function extractZipEntries(bytes) {
         throw new Error(t(currentLang, "zip_error_deflateUnsupported"));
       }
       try {
-        const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-        data = new Uint8Array(await new Response(stream).arrayBuffer());
+        // Output may never exceed the declared size (itself already capped above).
+        data = await inflateRawLimited(compressed, Math.min(uncompressedSize, ZIP_MAX_ENTRY_BYTES));
       } catch (err) {
         throw new Error(t(currentLang, "zip_error_decompressFailed_template", { name, detail: err?.message || t(currentLang, "zip_error_invalidDeflateData") }));
       }
+      // null = the stream kept producing data past its declared size: a lying
+      // header or a zip bomb. Decompression was cancelled and the partial
+      // output (at most the declared size) was discarded.
+      if (!data) throw new Error(t(currentLang, "zip_error_invalidEntrySize_template", { name }));
     } else {
       throw new Error(t(currentLang, "zip_error_unsupportedMethod_template", { method }));
     }
@@ -761,10 +819,16 @@ loadTheme();
 // it has its own ZIP backup above - and so are the transient pointers
 // (currentConversationId, pendingContextAction), which are worthless on a
 // fresh install.
-const SETTINGS_BACKUP_KEYS = [
-  "apiKey",  "openrouterApiKey",
+// API keys are exported only when the user opts in, and then only encrypted
+// with a passphrase (settings-crypto.js). Import still understands the older
+// plaintext files (format version 1) that carry them in `settings`.
+const SETTINGS_BACKUP_SECRET_KEYS = [
+  "apiKey",
+  "openrouterApiKey",
   "groqApiKey",
   "tavilyApiKey",
+];
+const SETTINGS_BACKUP_PLAIN_KEYS = [
   "factCheckWebResearch",
   "customPrompt",
   THEME_STORAGE_KEY,
@@ -774,12 +838,28 @@ const SETTINGS_BACKUP_KEYS = [
   "micRecognitionLang",
   "composerHeight",
 ];
+const SETTINGS_BACKUP_KEYS = [...SETTINGS_BACKUP_SECRET_KEYS, ...SETTINGS_BACKUP_PLAIN_KEYS];
 const SETTINGS_BACKUP_FORMAT = "Brave AI Assistant Settings Backup";
 const SETTINGS_BACKUP_MAX_BYTES = 1024 * 1024;
 
 const exportSettingsBtn = document.getElementById("exportSettings");
 const importSettingsBtn = document.getElementById("importSettings");
 const importSettingsFile = document.getElementById("importSettingsFile");
+const includeKeysToggle = document.getElementById("exportIncludeKeys");
+const passphraseInput = document.getElementById("backupPassphrase");
+const passphraseConfirmInput = document.getElementById("backupPassphraseConfirm");
+
+// The confirmation field is only needed when exporting keys.
+function syncBackupKeyControls() {
+  passphraseConfirmInput.hidden = !includeKeysToggle.checked;
+}
+includeKeysToggle.addEventListener("change", syncBackupKeyControls);
+syncBackupKeyControls();
+
+function clearPassphraseFields() {
+  passphraseInput.value = "";
+  passphraseConfirmInput.value = "";
+}
 
 function settingsBackupFail(err) {
   console.error("[AI Assistant] Settings backup failed:", err);
@@ -794,13 +874,31 @@ async function exportSettings() {
   msgEl.textContent = t(currentLang, "settingsBackup_preparing");
 
   try {
+    const includeKeys = includeKeysToggle.checked;
+    const passphrase = passphraseInput.value;
+    if (includeKeys) {
+      if (passphrase.length < MIN_PASSPHRASE_LENGTH) throw new Error(t(currentLang, "settingsBackup_error_passphraseShort"));
+      if (passphrase !== passphraseConfirmInput.value) throw new Error(t(currentLang, "settingsBackup_error_passphraseMismatch"));
+    }
+
     const stored = await chrome.storage.local.get(SETTINGS_BACKUP_KEYS);
+    const settings = {};
+    for (const key of SETTINGS_BACKUP_PLAIN_KEYS) {
+      if (stored[key] !== undefined) settings[key] = stored[key];
+    }
     const backup = {
       format: SETTINGS_BACKUP_FORMAT,
-      version: 1,
+      version: 2,
       exportedAt: new Date().toISOString(),
-      settings: stored,
+      settings,
     };
+    if (includeKeys) {
+      const secrets = {};
+      for (const key of SETTINGS_BACKUP_SECRET_KEYS) {
+        if (typeof stored[key] === "string" && stored[key]) secrets[key] = stored[key];
+      }
+      if (Object.keys(secrets).length) backup.encryptedSecrets = await encryptSecrets(secrets, passphrase);
+    }
 
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -819,6 +917,7 @@ async function exportSettings() {
   } catch (err) {
     settingsBackupFail(err);
   } finally {
+    clearPassphraseFields();
     exportSettingsBtn.disabled = false;
     importSettingsBtn.disabled = false;
   }
@@ -861,6 +960,24 @@ async function importSettings() {
       else if (NUMERIC_SETTINGS_KEYS.has(key) && typeof value === "number" && Number.isFinite(value)) restored[key] = value;
       else if (BOOLEAN_SETTINGS_KEYS.has(key) && typeof value === "boolean") restored[key] = value;
     }
+
+    // API keys exported with a passphrase live in an encrypted envelope.
+    if (backup.encryptedSecrets !== undefined) {
+      const passphrase = passphraseInput.value;
+      if (!passphrase) throw new Error(t(currentLang, "settingsBackup_error_passphraseRequired"));
+      let secrets;
+      try {
+        secrets = await decryptSecrets(backup.encryptedSecrets, passphrase);
+      } catch (err) {
+        throw new Error(t(currentLang, err?.message === "DECRYPT_FAILED"
+          ? "settingsBackup_error_decryptFailed"
+          : "settingsBackup_error_notSettingsBackup"));
+      }
+      for (const key of SETTINGS_BACKUP_SECRET_KEYS) {
+        const value = secrets[key];
+        if (typeof value === "string" && value) restored[key] = value;
+      }
+    }
     if (!Object.keys(restored).length) throw new Error(t(currentLang, "settingsBackup_error_notSettingsBackup"));
 
     await chrome.storage.local.set(restored);
@@ -884,6 +1001,7 @@ async function importSettings() {
   } catch (err) {
     settingsBackupFail(err);
   } finally {
+    clearPassphraseFields();
     importSettingsFile.value = "";
     exportSettingsBtn.disabled = false;
     importSettingsBtn.disabled = false;

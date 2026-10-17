@@ -1,3 +1,103 @@
+# Translation: the format was being lost BEFORE the model (v1.10.72)
+
+- **Real root cause:** the page extractor (`content.js`) flattened the page to plain text: heading levels, bullets/numbering, tables, links, bold and code blocks were gone before the text reached the model, and the noise filter even dropped titles inside `<header>`. No prompt or renderer could restore that.
+- **New structure-preserving extractor (`extractPageMarkdownContent`, `extractSelectionMarkdown`):** for Translate the page (or the right-click selection) is converted DOM -> Markdown: `#` headings, nested `-`/`1.` lists with start numbers, `|` tables, fenced code, `>` quotes, `**bold**`, `*italic*`, `[links](url)`, images. Titles in `<header>` are kept; only scripts, menus, ads and hidden elements are skipped.
+- `translate-lines.js` keeps all of that in code (markers, indentation, code blocks, images, URLs, inline code are never sent to the model; URLs/code are swapped for `{{Un}}` tokens and restored). The model translates only the words.
+- The side panel renders markdown translations (and now supports nested lists and ordered-list start numbers); plain selections keep exact whitespace.
+- Build bumped to 1.10.72.
+
+# Translation: layout preserved by code, not by the model (v1.10.71)
+
+- **Why again:** prompting (v1.10.68) and plain-text rendering (v1.10.70) still left the layout to the model, which merges lines, drops markers and rewrites structure.
+- **New `translate-lines.js`:** for Translate (quick action and context menu) the source is split into lines; blank lines, indentation, list markers/numbering (`1.`, `-`, `•`, `#`, `>`) and letter-less lines (separators, bare numbers) never go to the model. Only the text of each remaining line is sent as `[n] text`, and the streamed `[n] translation` lines are re-assembled around the original structure. Missing lines fall back to the original text, extra commentary is dropped, so the output always has the same line layout as the source.
+- Context-menu translation now sends the exact selected text (`translateSource`); web research is skipped for translations.
+- Build bumped to 1.10.71.
+
+# Translation format fix, round 2 (v1.10.70)
+
+- **Root cause:** v1.10.68 only changed the prompt. The reply was still run through the Markdown renderer, which renumbers lists, merges consecutive lines into one paragraph, drops indentation and turns `*`, `_`, `#`, `>` and `|` in the source into formatting. So even a perfect translation was displayed with a different layout.
+- **Fix:** translation replies (Translate quick action and context-menu translate) are now rendered as plain text with `white-space: pre-wrap`, streamed and restored from history the same way (`plain: true` on the stored turn). The system prompt now asks for line-for-line plain text with no added Markdown. Context-menu text is sent on its own lines after the instruction instead of being glued to it.
+- Build bumped to 1.10.70.
+
+# Privacy filter before sending to AI (v1.10.69)
+
+- **New `pii-filter.js`:** the worker redacts the question (including attachment text), page title/URL/text and conversation history locally before building any provider or Tavily request. Covers emails, phone numbers (CN/US/international), credit cards (Luhn-checked), CVV, SSN, CN ID numbers, IBAN, IPv4, private keys, JWTs, API keys (OpenAI/Anthropic/GitHub/AWS/Google/Stripe/Slack/Groq/Tavily...), Bearer tokens, `password=`/`token=` values, URL credentials and secret query params, and names that follow a clear cue (`Name:`, `My name is`, `Dear`, `Mr.`, `姓名`, `我叫`, email display names).
+- Replaced by placeholders like `[EMAIL]`; local history keeps the originals. Images are not filtered. If filtering throws, the request is not sent.
+- **Setting:** Settings > Privacy filter (on by default).
+- Build bumped to 1.10.69.
+
+# Strict-format translation + "Read current page" always on (v1.10.68)
+
+- **Translation keeps the source format:** Quick-action Translate and the context-menu "Translate selected text" now send a `translateMode` flag; the worker adds a mandatory system instruction (`TRANSLATION_FORMAT_INSTRUCTION`) requiring only the translation, with the same line breaks, paragraphs, headings, lists, tables, code and links, and no preface or commentary.
+- **"Read current page" on by default:** it is checked every time the panel opens; a saved opt-out is no longer restored (it only lasts until the panel closes).
+- **Build number:** bump the patch version in `manifest.json` (and add a README entry) on every build.
+
+# Narrower injection + stricter image CSP (v1.10.67)
+
+- **No global content script:** `content_scripts` (`<all_urls>`, every page load) is removed from `manifest.json`. `content.js` is injected on demand by the side panel with `chrome.scripting.executeScript` only when "Read current page" or a quick action needs the page (this path already existed as the fallback). Pages no longer pay any load-time cost.
+- **`host_permissions` kept on purpose:** `activeTab` is granted only by a user gesture on the toolbar icon/context menu and only for that tab, but the panel reads whichever tab becomes active (tab switch, auto-refresh), takes screenshots with `captureVisibleTab`, and the worker fetches page images. Without host access these break on any tab the user hasn't just clicked the icon on. Making it `optional_host_permissions` would be a possible follow-up at the cost of a permission prompt.
+- **CSP:** `img-src` is now `'self' data: https:` (no plaintext `http:`). An `http:` image that fails to load is retried through the worker over `https:` only.
+
+# Sender validation + "Read current page" on by default (v1.10.66)
+
+- **Sender checks:** `content.js` (`EXTRACT_PAGE_CONTENT`) and the side panel (`CONTEXT_ACTION`) now verify `sender.id === chrome.runtime.id`, that the sender carries no `tab`, and that its URL is a `chrome-extension://` page of this extension. `background.js` already enforced this through `isOwnExtensionPage()`.
+- **Default:** the "Read current page" checkbox is checked by default (HTML and stored-preference fallback); an explicit opt-out is still remembered.
+
+# Multi-window fix: one window could cancel another window's keep-alive and reset its conversation pointer (v1.10.65)
+
+**Problem:** the service worker is one process shared by every browser window, but two pieces of `background.js` state were treated as if each request or panel owned them.
+1. **Keep-alive timer.** There was a single global `keepAliveTimer`. Each question started it (replacing any running one) and each finishing question cleared it. With two windows streaming at once, the first to finish - or to have its panel closed, which aborts its request - cleared the only timer, so the other window's request lost its keep-alive and could be cut off by the worker's ~30 s idle timeout.
+2. **Current-conversation pointer.** Every port disconnect unconditionally wrote `currentConversationId = ""`. Closing the panel in window A reset the pointer that window B was still using.
+
+**Fixed (`background.js`):**
+- **Shared, reference-held keep-alive:** every in-flight question takes one hold and releases it in its `finally` block; the timer runs while any hold exists and is cleared only when the last one is released. The release function is idempotent, and it is called unconditionally, including when a newer question on the same port has already replaced `activeRequestId` (STOP followed immediately by a new question). Simply counting requests would have leaked a hold in that case and kept the worker alive indefinitely.
+- **Pointer cleared only by the last panel:** the worker tracks its connected side-panel ports and resets the pointer only when the last one disconnects. Aborting a disconnected port's own in-flight request is unchanged and still unconditional. With one window open, behaviour is exactly as before.
+
+**Verified** by loading the real `background.js` under a stubbed `chrome` API (instrumented timers, a controllable streaming `fetch`, one mock port per window). On the previous build 4 of 10 scenarios fail (A finishes while B streams: 0 timers left instead of 1; A's panel closed while B streams: 0 instead of 1; A's panel closed: B's pointer wiped; a reconnected panel). On this build all 10 pass, including: a single request still starts and stops its timer, the error path releases it, STOP-then-immediate-ASK neither leaks nor stops early, the timer tick really calls the extension API, closing the last panel still clears the pointer, and a lone panel behaves as before. Real service-worker termination cannot be reproduced from this sandbox, so a real two-window test in the browser is still worthwhile.
+
+**Known limits / not changed:** the pointer is still a single storage key shared by all windows, and the side panel itself writes it too (`startNewTopic()` on every panel open, `selectConversation()`), so it remains "last writer wins" across windows. Nothing currently reads it back with activation (both `loadConversations()` callers pass `activate: false`; each panel shows its conversation from memory), so this has no visible effect today. Making it per-window would be a larger change with no consumer. A panel that has no live port (after a worker restart, until its next question) is not counted as connected.
+
+# Security fix: history restore could be crashed by a ZIP bomb (v1.10.64)
+
+**Problem:** restoring a history backup in Settings (`options.js` -> `extractZipEntries`) inflated Deflate entries with `new Response(stream).arrayBuffer()`, which buffers the whole output with no ceiling. The side panel's ZIP reader already capped decompression and cancelled the stream when the cap was hit; the Settings page did not. The sizes in a ZIP header are attacker-controlled and were only compared *after* the data was already in memory, so a small, highly compressed archive could exhaust memory and crash the Settings tab. The stored (no-compression) path was exposed too: up to 200 central-directory entries may point at the same bytes, multiplying memory use without any compression.
+
+**Measured before the fix:** a 306 KB archive of zero bytes was accepted and pushed the process to about 1.3 GB (a copy with a falsified header was rejected only after about 1 GB was allocated), and a 21 MB archive of overlapping stored entries crashed the process outright.
+
+**Fixed (`options/options.js`, `i18n.js`):**
+- **Bounded streaming inflate:** new `inflateRawLimited()` reads the Deflate stream chunk by chunk, stops as soon as the output passes its limit and calls `reader.cancel()`. The limit for each entry is its *declared* size, so a header that understates the real size is caught immediately instead of after the fact.
+- **Budget checked before any data is touched:** an entry may expand to at most 32 MiB and all entries together to at most 64 MiB. The total is a running sum, which is what stops overlapping-entries archives. A genuine backup is bounded by the `chrome.storage.local` quota (about 10 MB of history), so real backups are nowhere near these limits.
+- **No copy of the compressed bytes:** entry data is read through a `subarray()` view instead of `slice()`.
+- New error string `zip_error_expandedTooLarge` in all six languages.
+
+**Verified** against the real `extractZipEntries` extracted from `options.js`: the 306 KB zero-byte bomb, the falsified-header bomb, a total-budget bomb (3 x 30 MiB) and the overlapping-stored bomb are all rejected, each in under 0.4 s and with peak memory of at most 195 MB (the two bombs that fail on their header alone stay under 50 MB); the exporter's own stored ZIP, a realistic Deflate backup, an empty entry and an entry of exactly 32 MiB still restore; 32 MiB + 1, a declared size that is too small or too large, and corrupt Deflate data are all rejected cleanly. Not tested in a real browser from this sandbox - worth one real Backup -> Restore round trip in Settings.
+
+**Not changed:** `sidepanel/sidepanel.js` already had the cap (`inflateRaw`) and was left as is. Restore still reads every entry in the archive even though only `conversation-history.json` is used; skipping the others would be a further reduction in work but changes which malformed archives are tolerated.
+
+# Security hardening: the background worker is no longer an open fetch proxy (v1.10.63)
+
+**Problem:** the service worker holds the extension's `<all_urls>` host permission, but its `FETCH_IMAGE` / `FETCH_PAGE_IMAGES` handlers checked only that a URL was `http(s)` and did not check who was asking. Image URLs come from web pages (`<img>` tags) and from model replies (which a page can steer by prompt injection), so the worker could be pointed at `localhost` services, router admin pages or cloud-metadata endpoints (`169.254.169.254`). The handlers also accepted SVG, trusted the declared `Content-Type`, and read the whole body into memory with no timeout.
+
+**Fixed (`background.js`, new `url-safety.js`):**
+- **Sender check:** the message and `ai-chat` port handlers only serve the extension's own pages (side panel, settings, mic tab). Content scripts, which share the extension id but run inside web pages, are rejected. (Ordinary page scripts could not reach the worker before either - the manifest has no `externally_connectable`.)
+- **Destination check:** only public internet hosts. Blocked: `localhost`, loopback, RFC 1918 / CGNAT / link-local (incl. `169.254.169.254`) / reserved IPv4 in any spelling (`2130706433`, `0x7f000001`, `127.1`), private/loopback/link-local/mapped/NAT64/6to4 IPv6, single-label and `.local`/`.lan`/`.internal`/`.intranet`/`.home.arpa` names, common wildcard-DNS names (`*.nip.io`, ...) and URLs with embedded credentials. **Exception:** a non-public host is allowed when it is the same host as the page the user is currently viewing, so images on an intranet/localhost page keep working there.
+- **Redirects:** the final URL is re-checked and the response discarded if it landed on a disallowed host.
+- **Limits:** 10-second timeout; byte cap enforced while streaming (a lying or missing `Content-Length` can no longer force a huge download); the body must have a real PNG/JPEG/GIF/WebP/BMP signature, and the data URL carries the real type.
+- **SVG removed** from the worker's accepted types (an SVG inside `<img>` cannot run script or resolve external entities, but the side panel's sanitizer already refused SVG data images, so this makes the policy consistent).
+- **Coarse errors:** failures return only `unavailable` - no status codes, timings or messages to probe with.
+- The side panel now tells the worker which page the user is on (`pageUrl`) so the same-host exception can work.
+
+**Known limits:** a *public* hostname that resolves to a private address (DNS rebinding) cannot be detected from an extension (no DNS API). A redirect from a public URL to an internal one is discarded, but the browser has already sent that one GET; its response is never returned. The side panel's own `<img>` tags for model-emitted Markdown images are still fetched directly by the browser (outside this worker).
+
+# Page-extraction fix: no more DOM insertion into the host page (v1.10.62)
+
+**Fixed:** `content.js` used to clone `document.body` (or the winning article container) and temporarily attach the clone to the live page, off-screen, just to read layout-aware `innerText`. In reader mode, on Amazon pages and in the generic fallback this fired the page's `MutationObserver`s (which can upset SPA frameworks and anti-tamper/anti-bot scripts), briefly duplicated every `id` on the page, could re-trigger media/resource loading, and forced a full-page reflow on large documents.
+
+Extraction now only **reads** the live DOM:
+- `readVisibleText()` walks the live tree and reproduces what `innerText` gave for these pages: `display:none` / `[hidden]` / `visibility:hidden` content is left out, block elements and `<p>` break lines, `<br>` is a newline, table cells are tab-separated, `<pre>` whitespace is preserved, the body of a closed `<details>` is omitted, and the same noise elements are skipped as before.
+- The reader-mode scoring (`readerModeMeasure`) and the Amazon section text no longer clone anything either.
+
+**Verified** in Chromium against the previous build on article, nested, no-container, link-heavy, image-only and Amazon-style pages, a 36,000-element page and a 3,000-deep DOM: extracted text is byte-for-byte identical, the host page sees 0 DOM mutations during extraction (it saw 2 before), and a very large page extracts about 3x faster. The only clone left is the small, never-attached copy of a reply panel in the Synology Community extractor.
+
 # Review and bug-fix pass (v1.10.61)
 
 **Fixed:**
@@ -55,6 +155,7 @@ AI-Assistant/
 ├── content.js
 ├── storage-keys.js
 ├── settings-storage.js
+├── url-safety.js
 ├── i18n.js
 ├── privacy-policy.md
 ├── icons/

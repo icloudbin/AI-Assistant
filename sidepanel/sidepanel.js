@@ -94,6 +94,10 @@ const sendBtn = document.getElementById("sendBtn");
 const clearBtn = document.getElementById("clearBtn");
 const optionsBtn = document.getElementById("optionsBtn");
 const includeContextToggle = document.getElementById("includeContextToggle");
+// Privacy: reading the current page (text + screenshot, including Proton Mail
+// message bodies) is ON by default; once the user turns it off, that explicit
+// choice is remembered across sessions.
+const INCLUDE_CONTEXT_STORAGE_KEY = "includeCurrentPageContext";
 const pageContextBar = document.getElementById("pageContextBar");
 const pageContextTitle = document.getElementById("pageContextTitle");
 const modelSelect = document.getElementById("modelSelect");
@@ -205,6 +209,9 @@ let conversations = [];
 let currentConversationId = null;
 let port = null;
 let currentAssistantBubble = null;
+// True while the in-flight request is a translation: its reply is rendered as
+// plain text (see setBubbleContent) and stored with plain: true.
+let pendingPlainReply = false;
 let currentAssistantText = "";
 let isStreaming = false;
 let pendingModelLabel = "";
@@ -252,6 +259,7 @@ function connectPort() {
         displayContent: currentAssistantText,
         modelLabel: pendingModelLabel,
         modelId: pendingModelId,
+        plain: pendingPlainReply,
       });
       saveConversations().catch((err) => console.error("[AI Assistant] Unable to save conversation:", err));
     }
@@ -424,7 +432,30 @@ function markdownToHtml(markdown) {
 
   const flushList = () => {
     if (!listType || !listItems.length) return;
-    out.push(`<${listType}>${listItems.map((item) => `<li>${inlineMarkdownToHtml(item).replace(/\n/g, "<br>")}</li>`).join("")}</${listType}>`);
+    // Items carry their indentation and marker type, so nested lists, mixed
+    // ordered/unordered nesting and an ordered list's start number survive.
+    let html = "";
+    const stack = []; // { indent, type }
+    const closeTop = () => { html += `</li></${stack.pop().type}>`; };
+    for (const item of listItems) {
+      while (stack.length && item.indent < stack[stack.length - 1].indent) closeTop();
+      const top = stack[stack.length - 1];
+      if (!top || item.indent > top.indent) {
+        const start = item.type === "ol" && item.num !== 1 ? ` start="${item.num}"` : "";
+        html += `<${item.type}${start}><li>`;
+        stack.push({ indent: item.indent, type: item.type });
+      } else if (top.type !== item.type) {
+        closeTop();
+        const start = item.type === "ol" && item.num !== 1 ? ` start="${item.num}"` : "";
+        html += `<${item.type}${start}><li>`;
+        stack.push({ indent: item.indent, type: item.type });
+      } else {
+        html += "</li><li>";
+      }
+      html += inlineMarkdownToHtml(item.text).replace(/\n/g, "<br>");
+    }
+    while (stack.length) closeTop();
+    out.push(html);
     listType = null;
     listItems = [];
   };
@@ -447,8 +478,10 @@ function markdownToHtml(markdown) {
         let j = i + 1;
         while (j < lines.length && !lines[j].trim()) j++;
         const nextTrimmed = j < lines.length ? lines[j].trim() : "";
+        const nextIndent = j < lines.length ? (lines[j].match(/^[ \t]*/)[0].replace(/\t/g, "    ").length) : 0;
         const continuesSameList =
-          (listType === "ol" && /^\d+[.)]\s+/.test(nextTrimmed)) || (listType === "ul" && /^[-+*]\s+/.test(nextTrimmed));
+          (listType === "ol" && /^\d+[.)]\s+/.test(nextTrimmed)) || (listType === "ul" && /^[-+*]\s+/.test(nextTrimmed)) ||
+          (nextIndent > 0 && /^(?:\d+[.)]|[-+*])\s+/.test(nextTrimmed));
         if (!continuesSameList) flushList();
       }
       i++;
@@ -529,9 +562,16 @@ function markdownToHtml(markdown) {
     if (ordered || unordered) {
       flushParagraph();
       const nextType = ordered ? "ol" : "ul";
-      if (listType && listType !== nextType) flushList();
-      listType = nextType;
-      listItems.push((ordered || unordered)[1]);
+      // A different marker type only starts a new list at the top level;
+      // deeper (indented) items nest instead.
+      if (listType && listType !== nextType && !(listItems.length && line.match(/^[ \t]*/)[0].length > 0)) flushList();
+      if (!listType) listType = nextType;
+      listItems.push({
+        indent: line.match(/^[ \t]*/)[0].replace(/\t/g, "    ").length,
+        type: nextType,
+        num: ordered ? Number(trimmed.match(/^\d+/)[0]) : 1,
+        text: (ordered || unordered)[1],
+      });
       i++;
       continue;
     }
@@ -541,7 +581,7 @@ function markdownToHtml(markdown) {
     // pushed onto `paragraph`, which was flushed into the output BEFORE the
     // still-open list, so the text jumped above the list it belonged to.
     if (listType && listItems.length) {
-      listItems[listItems.length - 1] += `\n${trimmed}`;
+      listItems[listItems.length - 1].text += `\n${trimmed}`;
       i++;
       continue;
     }
@@ -559,18 +599,39 @@ const ALLOWED_TAGS = new Set([
   "P", "BR", "STRONG", "EM", "DEL", "CODE", "PRE", "H1", "H2", "H3", "H4", "H5", "H6",
   "UL", "OL", "LI", "BLOCKQUOTE", "HR", "A", "IMG", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "DIV"
 ]);
-const ALLOWED_ATTRS = new Set(["href", "target", "rel", "class", "src", "alt", "loading", "decoding"]);
+const ALLOWED_ATTRS = new Set(["href", "target", "rel", "class", "src", "alt", "loading", "decoding", "start"]);
+
+const DROP_WITH_CONTENT = new Set([
+  "SCRIPT", "STYLE", "SVG", "MATH", "TEMPLATE", "NOSCRIPT", "IFRAME", "FRAME", "FRAMESET",
+  "OBJECT", "EMBED", "APPLET", "TEXTAREA", "TITLE", "XMP", "NOEMBED", "NOFRAMES", "PLAINTEXT",
+  "SELECT", "FORM", "INPUT", "BUTTON", "META", "LINK", "BASE"
+]);
 
 function sanitizeRenderedHtml(html) {
-  const doc = new DOMParser().parseFromString(`<div id="root">${html}</div>`, "text/html");
-  const root = doc.getElementById("root");
+  // Parse into doc.body (no id lookup, so DOM clobbering via id="root" is moot).
+  const doc = new DOMParser().parseFromString(`<!doctype html><body>${html}</body>`, "text/html");
+  const root = doc.body;
   if (!root) return "";
+
+  // Comments / CDATA / processing instructions are a classic mXSS carrier
+  // (attributes hidden in a comment become live after re-serialization).
+  const nodeWalker = doc.createTreeWalker(root, NodeFilter.SHOW_COMMENT | NodeFilter.SHOW_PROCESSING_INSTRUCTION | NodeFilter.SHOW_CDATA_SECTION);
+  const junk = [];
+  while (nodeWalker.nextNode()) junk.push(nodeWalker.currentNode);
+  junk.forEach((n) => n.remove());
 
   const walker = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
   const elements = [];
   while (walker.nextNode()) elements.push(walker.currentNode);
 
   for (const el of elements.reverse()) {
+    // Foreign content (svg/math) and raw-text/embedding elements are dropped
+    // WITH their content instead of being unwrapped: hoisting their children
+    // across a namespace/parsing-mode boundary is what enables mutation XSS.
+    if (el.namespaceURI !== "http://www.w3.org/1999/xhtml" || DROP_WITH_CONTENT.has(el.tagName)) {
+      el.remove();
+      continue;
+    }
     if (!ALLOWED_TAGS.has(el.tagName)) {
       const parent = el.parentNode;
       if (!parent) continue;
@@ -645,7 +706,12 @@ async function fallbackRemoteImage(img) {
 
   img.dataset.remoteFallbackAttempted = "1";
   try {
-    const result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src });
+    // The background worker refuses localhost/private-network image hosts
+    // unless they are the host of the page the user is on; tell it which page.
+    const activeTab = await getCurrentActiveTab().catch(() => null);
+    // The panel's CSP no longer loads plaintext http: images, so a failed
+    // http: image is retried over https: only (never fetched in the clear).
+    const result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src.replace(/^http:/i, "https:"), pageUrl: String(activeTab?.url || "") });
     if (result?.ok && result.dataUrl) {
       img.src = result.dataUrl;
     }
@@ -752,10 +818,17 @@ function refreshExistingCopyButtons() {
   });
 }
 
-function setBubbleContent(bubbleEl, text, role) {
+function setBubbleContent(bubbleEl, text, role, plain = false) {
   const textEl = getBubbleTextEl(bubbleEl);
   if (!textEl) return;
-  if (role === "assistant") {
+  if (role === "assistant" && plain) {
+    // Translations are shown as PLAIN TEXT (white-space: pre-wrap), never run
+    // through the Markdown renderer: Markdown would renumber lists, merge
+    // consecutive lines, drop indentation and turn *, _, #, > and | in the
+    // source into formatting - i.e. change the original layout.
+    textEl.classList.add("plain-text");
+    textEl.textContent = text;
+  } else if (role === "assistant") {
     textEl.innerHTML = sanitizeRenderedHtml(markdownToHtml(text));
     enhanceCodeBlocks(textEl);
   } else {
@@ -763,7 +836,7 @@ function setBubbleContent(bubbleEl, text, role) {
   }
 }
 
-function addBubble(role, text, modelLabel) {
+function addBubble(role, text, modelLabel, plain = false) {
   emptyState.hidden = true;
   const wrap = document.createElement("div");
   wrap.className = `bubble ${role}`;
@@ -805,7 +878,7 @@ function addBubble(role, text, modelLabel) {
   }
 
   wrap.appendChild(textEl);
-  setBubbleContent(wrap, text, role);
+  setBubbleContent(wrap, text, role, plain);
 
   chatLog.appendChild(wrap);
   scrollToBottom();
@@ -988,7 +1061,7 @@ async function getCurrentActiveTab() {
   }
 }
 
-async function getActivePageContext(retryCount = 0) {
+async function getActivePageContext(retryCount = 0, format = null) {
   const tab = await getCurrentActiveTab();
   if (!tab?.id) return null;
   const initialTabId = tab.id;
@@ -1010,12 +1083,14 @@ async function getActivePageContext(retryCount = 0) {
       title: String(data?.title || tab.title || ""),
       url: String(data?.url || initialUrl || ""),
       text: text.slice(0, MAX_PAGE_CONTEXT_CHARS),
+      // "markdown" when the structure-preserving extractor produced the text.
+      format: data?.format === "markdown" ? "markdown" : "text",
       imageUrls,
     };
   };
 
   const askExtractor = () => new Promise((resolve) => {
-    chrome.tabs.sendMessage(initialTabId, { type: "EXTRACT_PAGE_CONTENT" }, (value) => {
+    chrome.tabs.sendMessage(initialTabId, { type: "EXTRACT_PAGE_CONTENT", format }, (value) => {
       if (chrome.runtime.lastError) { resolve(null); return; }
       resolve(value || null);
     });
@@ -1050,7 +1125,7 @@ async function getActivePageContext(retryCount = 0) {
       // active page. This prevents a slow content-script response from a
       // previous tab/navigation being attached to the next request.
       if (currentTab?.id !== initialTabId || String(currentTab.url || "") !== initialUrl) {
-        return retryCount < 2 ? getActivePageContext(retryCount + 1) : null;
+        return retryCount < 2 ? getActivePageContext(retryCount + 1, format) : null;
       }
       return makeContext(data);
     }
@@ -1074,7 +1149,7 @@ async function getActivePageContext(retryCount = 0) {
     }
     if (readyState && readyState !== "complete" && retryCount < 2) {
       await new Promise((resolve) => setTimeout(resolve, 700));
-      return getActivePageContext(retryCount + 1);
+      return getActivePageContext(retryCount + 1, format);
     }
   } catch (err) {
     console.debug("[AI Assistant] Content script unavailable:", err);
@@ -1082,10 +1157,10 @@ async function getActivePageContext(retryCount = 0) {
   return null;
 }
 
-async function fetchPageImages(imageUrls) {
+async function fetchPageImages(imageUrls, pageUrl = "") {
   if (!Array.isArray(imageUrls) || !imageUrls.length) return [];
   try {
-    const result = await chrome.runtime.sendMessage({ type: "FETCH_PAGE_IMAGES", urls: imageUrls });
+    const result = await chrome.runtime.sendMessage({ type: "FETCH_PAGE_IMAGES", urls: imageUrls, pageUrl });
     if (!result?.ok || !Array.isArray(result.images)) return [];
     return result.images.filter((img) => img && typeof img.dataUrl === "string" && /^data:image\/(jpeg|png|gif|webp);base64,/i.test(img.dataUrl));
   } catch (err) {
@@ -1178,14 +1253,14 @@ function handlePortMessage(msg) {
   switch (msg.type) {
     case "START": {
       currentAssistantText = "";
-      currentAssistantBubble = addBubble("assistant", "", pendingModelLabel);
+      currentAssistantBubble = addBubble("assistant", "", pendingModelLabel, pendingPlainReply);
       currentAssistantBubble.classList.add("pending");
       break;
     }
     case "CHUNK": {
       currentAssistantText += msg.delta;
       if (currentAssistantBubble) {
-        setBubbleContent(currentAssistantBubble, currentAssistantText, "assistant");
+        setBubbleContent(currentAssistantBubble, currentAssistantText, "assistant", pendingPlainReply);
         scrollToBottom();
       }
       break;
@@ -1205,7 +1280,7 @@ function handlePortMessage(msg) {
       if (currentAssistantBubble) {
         currentAssistantBubble.classList.remove("pending");
       }
-      history.push({ role: "assistant", content: currentAssistantText, displayContent: currentAssistantText, modelLabel: pendingModelLabel, modelId: pendingModelId });
+      history.push({ role: "assistant", content: currentAssistantText, displayContent: currentAssistantText, modelLabel: pendingModelLabel, modelId: pendingModelId, plain: pendingPlainReply });
       currentAssistantBubble = null;
       autoScrollEnabled = false;
       setStreaming(false);
@@ -1382,7 +1457,7 @@ function renderConversation(messages) {
   emptyState.hidden = true;
   for (const message of messages) {
     if (message.role !== "user" && message.role !== "assistant") continue;
-    addBubble(message.role, message.displayContent || message.content, message.role === "assistant" ? message.modelLabel : undefined);
+    addBubble(message.role, message.displayContent || message.content, message.role === "assistant" ? message.modelLabel : undefined, message.role === "assistant" && message.plain === true);
   }
   scrollToBottom();
 }
@@ -1987,7 +2062,7 @@ if (!SpeechRecognitionCtor) {
   });
 }
 
-async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "", noWebResearch = false, includePageImages = false, forceWebResearch = false) {
+async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "", noWebResearch = false, includePageImages = false, forceWebResearch = false, translateMode = false, translateSource = null, translateSourceFormat = "text") {
   e?.preventDefault?.();
   const question = forcedQuestion !== null ? String(forcedQuestion).trim() : questionInput.value.trim();
   const attachmentText = attachmentContextText();
@@ -2053,7 +2128,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   if (shouldIncludePageContext) {
     // Capture the page at the moment the user submits the request. The API
     // request must never reuse the page context shown or captured earlier.
-    pageContext = await getActivePageContext();
+    pageContext = await getActivePageContext(0, translateMode === true && !translateSource ? "markdown" : null);
     if (isCancelled()) return;
     if (pageContext) {
       updateContextBar(pageContext);
@@ -2077,7 +2152,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   // every quick action fail on them, so the visuals are skipped for those.
   const attachPageVisuals = includePageImages && modelSupportsVision(selectedModel);
   if (attachPageVisuals && pageContextValid) {
-    automaticPageImages = await fetchPageImages(pageContext.imageUrls);
+    automaticPageImages = await fetchPageImages(pageContext.imageUrls, pageContext.url);
     const currentTab = await getCurrentActiveTab();
     if (currentTab?.id !== pageContext.tabId || String(currentTab?.url || "") !== pageContext.url) {
       automaticPageImages = [];
@@ -2121,6 +2196,9 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     pageContext = { ...pageContext, previousPage: previousPageContext };
   }
 
+  // Markdown sources are shown rendered (headings, lists, tables, links);
+  // plain sources keep their exact whitespace.
+  pendingPlainReply = translateMode === true && !(translateSource ? translateSourceFormat === "markdown" : pageContextValid && pageContext.format === "markdown");
   const askMessage = {
     type: "ASK",
     payload: {
@@ -2156,6 +2234,11 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       // its dedicated claim-verification research path.
       noWebResearch,
       forceWebResearch,
+      // Translation requests must reproduce the source's exact formatting.
+      translateMode: translateMode === true,
+      // Exact selected text for the context-menu translation (page text is
+      // used for the quick action when this is null).
+      translateSource: translateMode === true && typeof translateSource === "string" ? translateSource : null,
     },
   };
   try {
@@ -2223,16 +2306,16 @@ async function processContextAction(pending) {
   // The visible instruction prefix follows the language selected in Settings.
   const isTranslation = pending.action === "translate";
   const prompt = isTranslation
-    ? `${instruction} ${pending.text}`
+    ? instruction.replace(/[:：]\s*$/, "")
     : `${instruction}\n\n${t(lang, "contextAction_highlightedText_label")}:\n${pending.text}`;
   // Show a compact preview in the user bubble (the instruction plus the start
   // of the selection) instead of the entire raw prompt, matching how quick
   // actions display a short prompt rather than their full API wording.
   const preview = pending.text.length > 120 ? `${pending.text.slice(0, 120).trimEnd()}…` : pending.text;
   const displayQuestion = isTranslation
-    ? `${instruction} ${preview}`
+    ? `${instruction}\n\n${preview}`
     : `${instruction}\n${t(lang, "contextAction_highlightedText_label")}:\n${preview}`;
-  await handleSubmit(null, prompt, false, displayQuestion, pending.action === "fact-check", pending.action === "fact-check" ? pending.text : "", pending.action !== "fact-check");
+  await handleSubmit(null, prompt, false, displayQuestion, pending.action === "fact-check", pending.action === "fact-check" ? pending.text : "", pending.action !== "fact-check", false, false, isTranslation, isTranslation ? pending.text : null, pending.format === "markdown" ? "markdown" : "text");
 }
 
 // The createdAt timestamp of the context-menu action most recently claimed by
@@ -2290,7 +2373,21 @@ async function consumePendingContextAction(pending = null) {
   await processContextAction(action);
 }
 
-chrome.runtime.onMessage.addListener((message) => {
+// Only the extension's own worker may drive the panel. Content scripts share
+// this extension's id but run inside web pages: their sender carries a `tab`
+// and a web-page URL, so both are rejected here.
+function isTrustedExtensionSender(sender) {
+  return (
+    Boolean(sender) &&
+    sender.id === chrome.runtime.id &&
+    !sender.tab &&
+    typeof sender.url === "string" &&
+    sender.url.startsWith(chrome.runtime.getURL(""))
+  );
+}
+
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (!isTrustedExtensionSender(sender)) return false;
   if (message?.type === "CONTEXT_ACTION") {
     consumePendingContextAction(message.pending).catch((err) => console.debug("[AI Assistant] Context action failed:", err));
   }
@@ -2301,14 +2398,14 @@ chatForm.addEventListener("submit", handleSubmit);
 // Quick actions always operate on the page that is active at the moment the
 // button is clicked. They deliberately force page context on, so they still
 // work when the manual "Read current page" toggle is unchecked.
-async function runQuickPageAction(apiPromptKey, displayPromptKey, factCheck = false, forceWebResearch = false) {
+async function runQuickPageAction(apiPromptKey, displayPromptKey, factCheck = false, forceWebResearch = false, translateMode = false) {
   if (isStreaming) return;
   const lang = currentLang || await getStoredLanguage();
   const apiPrompt = t("en", apiPromptKey);
   const displayPrompt = t(lang, displayPromptKey);
   // Fact Check keeps its dedicated Tavily path. Explain performs Tavily
   // research for supporting context; the remaining quick actions stay local.
-  await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck, "", !factCheck && !forceWebResearch, true, forceWebResearch);
+  await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck, "", !factCheck && !forceWebResearch, true, forceWebResearch, translateMode);
 }
 
 quickSummarizeBtn?.addEventListener("click", () => {
@@ -2316,7 +2413,7 @@ quickSummarizeBtn?.addEventListener("click", () => {
 });
 
 quickTranslateBtn?.addEventListener("click", () => {
-  runQuickPageAction("quickTranslate_prompt", "quickTranslate_prompt");
+  runQuickPageAction("quickTranslate_prompt", "quickTranslate_prompt", false, false, true);
 });
 
 quickExplainBtn?.addEventListener("click", () => {
@@ -2362,6 +2459,7 @@ historySelect.addEventListener("change", async () => {
 });
 
 includeContextToggle.addEventListener("change", async () => {
+  try { await chrome.storage.local.set({ [INCLUDE_CONTEXT_STORAGE_KEY]: includeContextToggle.checked }); } catch {}
   if (includeContextToggle.checked) {
     await refreshActivePageContext();
   } else {
@@ -2445,6 +2543,13 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
   renderHistorySelect();
   scheduleHistoryRender();
   connectPort();
+  try {
+    // "Read current page" is ON every time the panel opens. A previously
+    // saved opt-out is deliberately not restored; toggling it off only
+    // lasts until the panel is closed.
+    includeContextToggle.checked = true;
+    await chrome.storage.local.set({ [INCLUDE_CONTEXT_STORAGE_KEY]: true });
+  } catch {}
   await consumePendingContextAction();
   if (includeContextToggle.checked) {
     await refreshActivePageContext();
