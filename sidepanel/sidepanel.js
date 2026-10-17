@@ -1,5 +1,5 @@
 // sidepanel/sidepanel.js —— Fixed version: no trailing spaces; keeps import "../models.js"; API Key configuration moved to Settings
-import { MODELS, findModelById, resolveModelId, findModelIdByLabel } from "../models.js";
+import { MODELS, findModelById, findKnownModel, resolveModelId, findModelIdByLabel, modelSupportsVision } from "../models.js";
 import { HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY, PENDING_CONTEXT_ACTION_KEY, PREFERRED_TRANSLATION_LANGUAGE_KEY, MAX_SAVED_CONVERSATIONS } from "../storage-keys.js";
 import { getStoredLanguage, applyStaticTranslations, t, LANGUAGE_STORAGE_KEY } from "../i18n.js";
 
@@ -267,6 +267,18 @@ function ensurePort() {
   return port;
 }
 
+// Sends a message to the background worker. If the cached port turns out to be
+// dead (the service worker was recycled and onDisconnect has not run yet),
+// reconnect once and retry instead of throwing and leaving the composer locked.
+function postToBackground(message) {
+  try {
+    ensurePort().postMessage(message);
+  } catch {
+    port = null;
+    ensurePort().postMessage(message);
+  }
+}
+
 function scrollToBottom(force = false) {
   if (!force && !autoScrollEnabled) return;
   programmaticScroll = true;
@@ -373,12 +385,15 @@ function inlineMarkdownToHtml(text) {
   // Both underscores must sit at a word boundary; `*` has no such rule and
   // is deliberately left unchanged below.
   s = s.replace(/(?<![\p{L}\p{N}])__([^_\n]+)__(?![\p{L}\p{N}])/gu, "<strong>$1</strong>");
-  s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+  s = s.replace(/\*(?!\s)([^*\n]*[^*\s])\*/g, "<em>$1</em>");
   s = s.replace(/(?<![\p{L}\p{N}_])_([^_\n]+)_(?![\p{L}\p{N}_])/gu, "<em>$1</em>");
   s = s.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
 
   for (let i = 0; i < codeSpans.length; i++) {
-    s = s.replace(`@@INLINECODE${i}@@`, codeSpans[i]);
+    // A replacer function is required: with a plain replacement string, "$&",
+    // "$$", "$`" and "$'" inside the code span would be interpreted as special
+    // replacement patterns and corrupt the output (e.g. `$&` in a regex).
+    s = s.replace(`@@INLINECODE${i}@@`, () => codeSpans[i]);
   }
   return s;
 }
@@ -409,7 +424,7 @@ function markdownToHtml(markdown) {
 
   const flushList = () => {
     if (!listType || !listItems.length) return;
-    out.push(`<${listType}>${listItems.map((item) => `<li>${inlineMarkdownToHtml(item)}</li>`).join("")}</${listType}>`);
+    out.push(`<${listType}>${listItems.map((item) => `<li>${inlineMarkdownToHtml(item).replace(/\n/g, "<br>")}</li>`).join("")}</${listType}>`);
     listType = null;
     listItems = [];
   };
@@ -462,7 +477,7 @@ function markdownToHtml(markdown) {
       continue;
     }
 
-    const heading = trimmed.match(/^(#{1,6})\s+(.+?)\s*#*$/);
+    const heading = trimmed.match(/^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/);
     if (heading) {
       flushParagraph();
       flushList();
@@ -517,6 +532,16 @@ function markdownToHtml(markdown) {
       if (listType && listType !== nextType) flushList();
       listType = nextType;
       listItems.push((ordered || unordered)[1]);
+      i++;
+      continue;
+    }
+
+    // A non-blank line directly under a list item (an indented continuation
+    // or a "lazy" continuation line) belongs to that item. Previously it was
+    // pushed onto `paragraph`, which was flushed into the output BEFORE the
+    // still-open list, so the text jumped above the list it belonged to.
+    if (listType && listItems.length) {
+      listItems[listItems.length - 1] += `\n${trimmed}`;
       i++;
       continue;
     }
@@ -834,8 +859,8 @@ function findConversationModelId(messages) {
   for (let i = (messages || []).length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m.role !== "assistant") continue;
-    const resolvedId = resolveModelId(m.modelId);
-    if (resolvedId) return resolvedId;
+    const knownId = findKnownModel(m.modelId)?.id;
+    if (knownId) return knownId;
     const byLabelId = findModelIdByLabel(m.modelLabel);
     if (byLabelId) return byLabelId;
   }
@@ -878,6 +903,11 @@ function setStreaming(streaming) {
   if (streaming && isListening) {
     userStoppedMic = true;
     stopMic();
+  }
+  // A disabled textarea loses focus; give it back when the request finishes so
+  // the user can keep typing without clicking into the box.
+  if (!streaming && document.hasFocus() && !document.activeElement?.matches?.("select, input, textarea, button")) {
+    questionInput.focus();
   }
 }
 
@@ -1161,6 +1191,17 @@ function handlePortMessage(msg) {
       break;
     }
     case "DONE": {
+      if (!currentAssistantText.trim()) {
+        // Defensive: background.js reports an empty reply as an ERROR, but never
+        // store an empty assistant turn - providers reject empty assistant
+        // messages, which would break every later request in this conversation.
+        currentAssistantBubble?.remove();
+        currentAssistantBubble = null;
+        currentAssistantText = "";
+        autoScrollEnabled = false;
+        setStreaming(false);
+        break;
+      }
       if (currentAssistantBubble) {
         currentAssistantBubble.classList.remove("pending");
       }
@@ -1212,13 +1253,30 @@ function makeTopicTitle(messages) {
   if (!userTexts.length) return "";
   const summarySource = userTexts.join(" ");
   const words = summarySource.split(/\s+/).filter(Boolean);
-  return words.slice(0, 10).join(" ") || t(currentLang, "historySelect_newTopic");
+  // Chinese/Japanese text has no spaces, so the whole message would become the
+  // title; cap the length as well as the word count.
+  const title = words.slice(0, 10).join(" ").slice(0, 80).trim();
+  return title || t(currentLang, "historySelect_newTopic");
+}
+
+// Attachment text can be up to 180,000 characters per message. Stored in full
+// across up to 100 conversations it exceeds chrome.storage.local's 10 MB quota,
+// after which every save fails and no history is kept. background.js condenses
+// attachment blocks in history turns to this same preview size before sending
+// them anyway, so only the stored copy is shortened (the live session keeps the
+// full text for the current request).
+const STORED_ATTACHMENT_PREVIEW_CHARS = 4000;
+function condenseStoredContent(text) {
+  return String(text || "").replace(/\[ATTACHMENTS\][\s\S]*?\[\/ATTACHMENTS\]/gi, (block) => {
+    if (block.length <= STORED_ATTACHMENT_PREVIEW_CHARS) return block;
+    return `${block.slice(0, STORED_ATTACHMENT_PREVIEW_CHARS).trimEnd()}\n...[attachment contents truncated]\n[/ATTACHMENTS]`;
+  });
 }
 
 function toStoredMessage(message) {
   return {
     role: message.role,
-    content: message.content,
+    content: message.role === "user" ? condenseStoredContent(message.content) : message.content,
     displayContent: message.displayContent || message.content,
     modelLabel: message.modelLabel || "",
     modelId: message.modelId || "",
@@ -1252,10 +1310,20 @@ async function saveConversations() {
     .filter((c) => c.messages?.length)
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
     .slice(0, MAX_SAVED_CONVERSATIONS);
-  await chrome.storage.local.set({
-    [HISTORY_STORAGE_KEY]: conversations,
-    [CURRENT_CONVERSATION_KEY]: currentConversationId || "",
-  });
+  // If the storage quota is exceeded, drop the oldest saved conversations and
+  // retry instead of silently losing every later save.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await chrome.storage.local.set({
+        [HISTORY_STORAGE_KEY]: conversations,
+        [CURRENT_CONVERSATION_KEY]: currentConversationId || "",
+      });
+      break;
+    } catch (err) {
+      if (attempt >= 4 || conversations.length <= 1) throw err;
+      conversations = conversations.slice(0, Math.max(1, Math.floor(conversations.length / 2)));
+    }
+  }
   renderHistorySelect();
   scheduleHistoryRender();
 }
@@ -1366,10 +1434,9 @@ async function selectConversation(id) {
     // the user's way out of a hung/unresponsive request.
     stopActiveRequest();
 
-    // New Topic is a fresh conversation (DeepSeek, Claude, OpenAI,
-    // or OpenRouter, depending on the selected model): discard the active conversation
-    // state, clear the composer, and leave the API ready for the user's
-    // first message. The new conversation is persisted only when that
+    // New Topic is a fresh conversation (whichever provider the selected
+    // model uses): discard the active conversation state, clear the composer,
+    // and leave the API ready for the user's first message. The new conversation is persisted only when that
     // first message is actually sent.
     startNewTopic();
     renderHistorySelect();
@@ -1444,7 +1511,27 @@ async function inflateRaw(bytes) {
     throw new Error(t(currentLang, "sp_zip_error_decompressionUnsupported"));
   }
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
+  // Read incrementally and stop at a hard cap: the uncompressed size declared
+  // in a ZIP header is attacker-controlled, so a small "zip bomb" could
+  // otherwise expand to gigabytes in memory.
+  const limit = MAX_TOTAL_EXTRACTED_CHARS * 4;
+  const reader = stream.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > limit) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let pos = 0;
+  for (const chunk of chunks) { out.set(chunk, pos); pos += chunk.length; }
+  return out;
 }
 
 async function extractZipText(file) {
@@ -1507,6 +1594,7 @@ async function extractZipText(file) {
     if (method === 0) content = compressed;
     else if (method === 8) content = await inflateRaw(compressed);
     else continue;
+    if (!content) continue; // exceeded the decompression cap
 
     const text = decodeUtf8(content);
     if (!text.trim()) continue;
@@ -1708,6 +1796,9 @@ function buildRecognition() {
   rec.interimResults = true;
 
   rec.onresult = (event) => {
+    // Ignore results from a recognizer that has been replaced (e.g. after
+    // switching the voice language while listening).
+    if (rec !== recognition) return;
     let interim = "";
     for (let i = event.resultIndex; i < event.results.length; i++) {
       const transcript = event.results[i][0].transcript;
@@ -1722,6 +1813,7 @@ function buildRecognition() {
   };
 
   rec.onerror = (event) => {
+    if (rec !== recognition) return;
     const err = event.error;
     console.debug("[AI Assistant] Voice input error:", err);
     if (err === "no-speech" || err === "aborted") return; // benign; onend decides what happens next
@@ -1739,6 +1831,11 @@ function buildRecognition() {
   };
 
   rec.onend = () => {
+    // A recognizer that was stopped to be replaced (language switch) fires
+    // onend AFTER startMic() has already reset userStoppedMic, so without this
+    // check the old recognizer restarted itself and two recognizers wrote into
+    // the question box at once (duplicated text, wrong language).
+    if (rec !== recognition) return;
     isListening = false;
     micBtn.classList.remove("active");
     micBtn.setAttribute("aria-pressed", "false");
@@ -1897,10 +1994,24 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   if ((!question && !attachmentText) || isStreaming) return;
 
   const selectedModel = getSelectedModel();
+  // Text-only models (GPT-OSS) reject any request containing an image part with
+  // an HTTP 400. Say so up front, before anything is cleared or locked, so the
+  // draft and attachments are kept and the user can switch model or remove them.
+  if (!modelSupportsVision(selectedModel) && attachments.some((a) => a.status === "ready" && a.kind === "image")) {
+    addBubble("error", t(currentLang, "error_modelNoImages_template", { model: selectedModel.label }));
+    return;
+  }
   pendingModelLabel = selectedModel.label;
   pendingModelId = selectedModel.id;
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   currentRequestId = requestId;
+  // Lock the composer right away. Setting this only after the awaited storage
+  // write below left a window in which a second submit passed the isStreaming
+  // guard above.
+  setStreaming(true);
+  // True once Clear / New Topic / another conversation (stopActiveRequest) has
+  // abandoned this request while it was still gathering page context.
+  const isCancelled = () => currentRequestId !== requestId;
 
   // Only clear the composer when the submission came from it. Quick actions
   // and context-menu actions pass a forcedQuestion; wiping the input then
@@ -1927,8 +2038,13 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   }
   convo.title = convo.title || makeTopicTitle(history);
   renderHistorySelect();
-  await saveConversations();
-  setStreaming(true);
+  try {
+    await saveConversations();
+  } catch (err) {
+    // A storage failure must not leave the composer locked or block the answer.
+    console.error("[AI Assistant] Unable to save conversation:", err);
+  }
+  if (isCancelled()) return;
 
   let pageContext = null;
   const shouldIncludePageContext = forcedIncludePageContext === null
@@ -1938,6 +2054,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     // Capture the page at the moment the user submits the request. The API
     // request must never reuse the page context shown or captured earlier.
     pageContext = await getActivePageContext();
+    if (isCancelled()) return;
     if (pageContext) {
       updateContextBar(pageContext);
     } else {
@@ -1955,14 +2072,18 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   const pageContextValid = !!pageContext && !pageContext.captureFailed;
   let automaticPageImages = [];
   let pageScreenshot = null;
-  if (includePageImages && pageContextValid) {
+  // Page images/screenshots are optional extra context. Text-only models (the
+  // GPT-OSS models) reject requests that contain image parts, which would make
+  // every quick action fail on them, so the visuals are skipped for those.
+  const attachPageVisuals = includePageImages && modelSupportsVision(selectedModel);
+  if (attachPageVisuals && pageContextValid) {
     automaticPageImages = await fetchPageImages(pageContext.imageUrls);
     const currentTab = await getCurrentActiveTab();
     if (currentTab?.id !== pageContext.tabId || String(currentTab?.url || "") !== pageContext.url) {
       automaticPageImages = [];
     }
   }
-  if (includePageImages) {
+  if (attachPageVisuals) {
     // Capture a visible-page image in addition to individually fetched <img>
     // elements. This also covers pages whose text extraction failed but whose
     // visible content is an image or canvas.
@@ -1971,6 +2092,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       : await getCurrentActiveTab();
     pageScreenshot = await captureVisiblePageScreenshot(screenshotTab?.id, String(screenshotTab?.url || ""));
   }
+  if (isCancelled()) return;
   const pageVisualInputCount = automaticPageImages.length + (pageScreenshot ? 1 : 0);
   // A visual input in the provider payload is not always enough to make a
   // text-focused quick action discuss it. State explicitly that the attached
@@ -1999,7 +2121,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     pageContext = { ...pageContext, previousPage: previousPageContext };
   }
 
-  ensurePort().postMessage({
+  const askMessage = {
     type: "ASK",
     payload: {
       requestId,
@@ -2035,7 +2157,19 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       noWebResearch,
       forceWebResearch,
     },
-  });
+  };
+  try {
+    postToBackground(askMessage);
+  } catch (err) {
+    console.error("[AI Assistant] Unable to send request:", err);
+    if (!isCancelled()) {
+      currentRequestId = null;
+      autoScrollEnabled = false;
+      addBubble("error", t(currentLang, "error_withMessage_template", { message: err?.message || String(err) }));
+      setStreaming(false);
+    }
+    return;
+  }
 
   // Attachments are one-shot. Everything this request needed was captured
   // above (readyAttachments / attachmentText), the user bubble already lists

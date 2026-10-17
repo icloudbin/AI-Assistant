@@ -1,5 +1,5 @@
 // background.js (root directory)
-import { findModelById } from "./models.js";
+import { findKnownModel } from "./models.js";
 import { CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY } from "./storage-keys.js";
 import { getStoredLanguage, t } from "./i18n.js";
 import { restoreSettingsFromBackup } from "./settings-storage.js";
@@ -276,12 +276,13 @@ chrome.runtime.onConnect.addListener((port) => {
       // unaffected by, any attached images (see normalizedImages below),
       // which are sent whenever present regardless of this toggle.
       const requestPageContext = includePageContext === true ? pageContext : null;
-      const model = findModelById(modelId);
-
       // Resolve the model from the canonical catalog for THIS request.
       // Never trust provider/apiModel/thinking values supplied by the UI and
-      // never silently fall back to another provider. Legacy IDs are handled
-      // by findModelById() so an upgrade does not break saved selections.
+      // never silently fall back to another provider. Legacy IDs are resolved
+      // by findKnownModel(), which (unlike the UI's tolerant findModelById)
+      // returns undefined for an unknown ID instead of defaulting to the first
+      // model - previously this check could never fire.
+      const model = findKnownModel(modelId);
       if (!model) {
         throw new Error(t(lang, "bg_error_unknownModel_template", { model: modelId || "(none)" }));
       }
@@ -289,8 +290,7 @@ chrome.runtime.onConnect.addListener((port) => {
       if (
         model.provider !== "deepseek" &&
         model.provider !== "openrouter" &&
-        model.provider !== "groq" &&
-        model.provider !== "zai"
+        model.provider !== "groq"
       ) {
         throw new Error(t(lang, "bg_error_unsupportedProvider_template", { provider: model.provider }));
       }
@@ -322,7 +322,7 @@ chrome.runtime.onConnect.addListener((port) => {
         // skipped entirely. Without this flag their fixed instruction prompts
         // ("Summarize the CURRENT webpage...") match the "current" keyword in
         // ONLINE_RESEARCH_REQUEST_PATTERN (context-menu text actions have no
-        // page context either, so needsOnlineResearch() returned true
+        // page context either, so the research preflight returned true
         // unconditionally) and fired a Tavily search on every click - and
         // failed outright for users without a Tavily API key.
         const research = await runTavilyQuestionResearch({
@@ -339,8 +339,6 @@ chrome.runtime.onConnect.addListener((port) => {
         await streamOpenRouter(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       } else if (model.provider === "groq") {
         await streamGroq(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
-      } else if (model.provider === "zai") {
-        await streamZAI(model, effectiveQuestion, requestPageContext, history, normalizedImages, ctx);
       }
 
       port.postMessage({ type: "DONE", requestId });
@@ -414,9 +412,13 @@ function cleanResearchText(value, max = 800) {
 function candidateFactClaims(text, title = "") {
   const sentences = String(text || "")
     .replace(/\r/g, "\n")
-    .split(/(?<=[.!?。！？])\s+|\n+/)
+    // Chinese/Japanese sentences end in 。！？ with no following space, so the
+    // split must not require whitespace after those marks.
+    .split(/(?<=[.!?])\s+|(?<=[。！？])|\n+/)
     .map((s) => cleanResearchText(s, 700))
-    .filter((s) => s.length >= 35);
+    // 35 characters is a normal English sentence, but a long CJK one - use a
+    // lower floor there or nearly every CJK claim would be discarded.
+    .filter((s) => s.length >= (/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(s) ? 12 : 35));
 
   const scored = sentences.map((s, index) => {
     let score = 0;
@@ -465,13 +467,84 @@ async function tavilySearch(query, apiKey, signal, topic = "news", maxResults = 
 
 const ONLINE_RESEARCH_MAX_RESULTS = 6;
 const ONLINE_RESEARCH_MAX_EVIDENCE_CHARS = 18000;
+// Explicit requests for fresh/online information. "current" / "当前" do not count
+// when they merely point at the page being viewed ("explain the current page"):
+// that is a page question, not a request for web research.
 const ONLINE_RESEARCH_REQUEST_PATTERN =
-  /\b(search|research|look up|browse|latest|current|up[- ]to[- ]date|newest|official)\b|联网|搜索|检索|查找|最新|当前|官网|官方/i;
+  /\b(search|research|look up|browse|latest|current(?!\s+(?:web\s?)?(?:page|tab|article|site|website|document|post|thread|email|message|file|selection|text|window|url)\b)|up[- ]to[- ]date|newest|official)\b|联网|搜索|检索|查找|最新|当前(?!页面|网页|页|文章|标签|文档|邮件|内容)|官网|官方/i;
+
+// Words that carry no topic information. Ordinary question phrasing ("what does
+// it say about ...") must not be counted as "not covered by the page", which
+// the previous 25-word list did constantly.
 const ONLINE_RESEARCH_STOP_WORDS = new Set([
-  'a', 'an', 'and', 'are', 'can', 'do', 'does', 'for', 'how', 'i', 'in',
-  'is', 'it', 'of', 'on', 'or', 'the', 'to', 'what', 'when', 'where', 'which',
-  'who', 'why', 'with', '请问', '什么', '如何', '是否', '有', '和', '的', '了', '吗',
+  'a', 'about', 'after', 'all', 'also', 'an', 'analyse', 'analyze', 'and', 'any',
+  'are', 'article', 'as', 'at', 'attached', 'attachment', 'attachments', 'be',
+  'been', 'but', 'by', 'can', 'could', 'describe', 'did', 'do', 'does', 'document',
+  'explain', 'file', 'files', 'for', 'from', 'get', 'give', 'has', 'have', 'he',
+  'her', 'how', 'i', 'if', 'in', 'into', 'is', 'it', 'its', 'key', 'main', 'me',
+  'more', 'my', 'no', 'not', 'of', 'on', 'or', 'our', 'page', 'please', 'point',
+  'points', 'say', 'says', 'she', 'should', 'show', 'so', 'some', 'summarise',
+  'summarize', 'tell', 'text', 'than', 'that', 'the', 'their', 'them', 'then',
+  'there', 'these', 'they', 'this', 'those', 'to', 'was', 'we', 'were', 'what',
+  'when', 'where', 'which', 'who', 'why', 'will', 'with', 'would', 'you', 'your',
+  // Generic request filler that says nothing about the topic.
+  'brief', 'briefly', 'concise', 'content', 'current', 'detail', 'detailed', 'details',
+  'help', 'info', 'information', 'like', 'make', 'need', 'sense', 'short', 'simple',
+  'simply', 'site', 'terms', 'thing', 'things', 'use', 'using', 'want', 'webpage', 'website',
 ]);
+
+// CJK text has no spaces between words, so a whole sentence used to be a single
+// "term" that never appeared verbatim on a page - every Chinese/Japanese
+// question therefore triggered web research. These filler strings are removed
+// and what remains is compared as overlapping two-character grams instead.
+const CJK_RUN_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu;
+const CJK_FILLER_RE = new RegExp(
+  [
+    '请问', '什么', '如何', '是否', '怎么', '怎样', '为什么', '可以', '能否', '这个', '那个',
+    '文章', '页面', '网页', '内容', '主要', '观点', '总结', '解释', '介绍', '说明', '告诉', '哪些',
+    'について', 'ください', '教えて', 'ですか', 'です', 'ます', 'とは', 'これ', 'それ',
+    'ページ', '記事', '内容', '要約', '説明',
+    '有', '和', '的', '了', '吗', '呢', '吧', '啊', '请', '这', '那', '是', '在', '我', '你', '他', '她', '它',
+    'は', 'が', 'を', 'に', 'で', 'と', 'も', 'の', 'か',
+  ]
+    .sort((a, b) => b.length - a.length)
+    .join('|'),
+  'gu'
+);
+
+// Splits a normalized question into comparable terms: whole words for
+// space-delimited scripts, two-character grams for CJK runs.
+function researchTerms(query) {
+  const terms = new Set();
+  const nonCjk = query.replace(CJK_RUN_RE, ' ');
+  for (const word of nonCjk.match(/[\p{L}\p{N}][\p{L}\p{N}-]{1,}/gu) || []) {
+    if (!ONLINE_RESEARCH_STOP_WORDS.has(word)) terms.add(word);
+  }
+  for (const run of query.match(CJK_RUN_RE) || []) {
+    for (const piece of run.replace(CJK_FILLER_RE, ' ').split(/\s+/)) {
+      for (let i = 0; i + 2 <= piece.length; i++) terms.add(piece.slice(i, i + 2));
+    }
+  }
+  return [...terms];
+}
+
+// The side panel appends attachment contents and a page-visuals note to the
+// question text. They are context, not part of what the user asked: left in,
+// they made any file containing a word like "current" or "latest" trigger a web
+// search, and the file's text became the search query.
+const RESEARCH_EXTRA_BLOCK_RE = /\[(ATTACHMENTS|CURRENT PAGE VISUALS)\][\s\S]*?\[\/\1\]/gi;
+
+function splitResearchQuestion(question) {
+  let attachmentText = '';
+  const text = String(question || '')
+    .replace(RESEARCH_EXTRA_BLOCK_RE, (block) => {
+      if (/^\[ATTACHMENTS\]/i.test(block)) attachmentText += `\n${block}`;
+      return ' ';
+    })
+    .replace(/\s+/g, ' ')
+    .trim();
+  return { text, attachmentText };
+}
 
 // Decide before the model request whether the page can answer the question.
 // This is deliberately content-based, not topic-based: any missing year,
@@ -479,23 +552,28 @@ const ONLINE_RESEARCH_STOP_WORDS = new Set([
 // that already covers the question remains local. A streamed model reply
 // cannot be safely inspected and retried after it has already been shown, so
 // this preflight is the reliable point to make the automatic decision.
-function needsOnlineResearch(question, pageContext) {
+//
+// Returns "explicit" when the user asked for fresh/online information,
+// "implicit" when the page (plus any attachment) simply does not cover the
+// question, or null when no research is needed. The distinction matters when
+// no Tavily key is configured: an explicit request reports the missing key,
+// while an implicit (automatic) lookup is only an enhancement and is skipped.
+function onlineResearchTrigger(question, pageContext, attachmentText = '') {
   const query = String(question || '').normalize('NFKC').toLowerCase();
-  if (query.length < 3) return false;
+  if (query.length < 3) return null;
+  if (ONLINE_RESEARCH_REQUEST_PATTERN.test(query)) return 'explicit';
 
-  const pageText = String(pageContext?.text || '').normalize('NFKC').toLowerCase();
-  if (ONLINE_RESEARCH_REQUEST_PATTERN.test(query)) return true;
+  const pageText = `${pageContext?.text || ''}\n${attachmentText}`.normalize('NFKC').toLowerCase().trim();
 
   const years = [...new Set(query.match(/\b20\d{2}\b/g) || [])];
-  if (years.some((year) => !pageText.includes(year))) return true;
+  if (years.some((year) => !pageText.includes(year))) return 'implicit';
 
-  const terms = [...new Set(query.match(/[\p{L}\p{N}][\p{L}\p{N}-]{1,}/gu) || [])]
-    .filter((term) => !ONLINE_RESEARCH_STOP_WORDS.has(term));
-  if (!terms.length) return false;
-  if (!pageText) return true;
+  const terms = researchTerms(query);
+  if (!terms.length) return null;
+  if (!pageText) return 'implicit';
 
   const covered = terms.filter((term) => pageText.includes(term)).length;
-  return covered / terms.length < 0.6;
+  return covered / terms.length < 0.6 ? 'implicit' : null;
 }
 
 function pageResearchQuery(question, pageContext) {
@@ -508,16 +586,26 @@ function pageResearchQuery(question, pageContext) {
 }
 
 async function runTavilyQuestionResearch({ question, pageContext, ctx, force = false }) {
-  if (!force && !needsOnlineResearch(question, pageContext)) return null;
+  const { text: questionText, attachmentText } = splitResearchQuestion(question);
+  const trigger = force ? 'explicit' : onlineResearchTrigger(questionText, pageContext, attachmentText);
+  if (!trigger) return null;
 
   const stored = await chrome.storage.local.get(['tavilyApiKey']);
   const apiKey = String(stored.tavilyApiKey || '').trim();
-  if (!apiKey) throw new Error(t(ctx.lang, 'bg_error_tavilyKeyMissing'));
+  if (!apiKey) {
+    // Automatic research is an optional enhancement: without a Tavily key the
+    // question is simply answered by the model. Only an explicit request for
+    // online information (or the Explain action) reports the missing key -
+    // previously any question the page did not fully cover failed outright for
+    // users who had never set one up.
+    if (trigger === 'implicit') return null;
+    throw new Error(t(ctx.lang, 'bg_error_tavilyKeyMissing'));
+  }
 
-  // Ordinary questions use the user's wording. A forced Explain action has a
-  // fixed instruction, so it instead searches the current page's title and
-  // excerpt for relevant supporting sources.
-  const searchQuery = force ? pageResearchQuery(question, pageContext) : question;
+  // Ordinary questions use the user's wording (without attachment text). A
+  // forced Explain action has a fixed instruction, so it instead searches the
+  // current page's title and excerpt for relevant supporting sources.
+  const searchQuery = force ? pageResearchQuery(questionText, pageContext) : questionText;
   const result = await tavilySearch(searchQuery, apiKey, ctx.signal, 'general', ONLINE_RESEARCH_MAX_RESULTS);
   const byUrl = new Map();
   for (const item of result?.results || []) {
@@ -638,6 +726,19 @@ ${evidenceText}`,
   };
 }
 
+// Builds the message for a failed provider response. The raw body can be a
+// large HTML error page (gateway errors), which used to be dumped whole into
+// the chat; keep only a bounded excerpt.
+async function providerHttpError(resp) {
+  let body = "";
+  try {
+    body = (await resp.text()).replace(/\s+/g, " ").trim();
+  } catch {
+    // Unreadable body: the status code alone is still useful.
+  }
+  return `HTTP ${resp.status}${body ? ` ${body.slice(0, 500)}${body.length > 500 ? "…" : ""}` : ""}`;
+}
+
 async function streamDeepSeek(model, question, pageContext, history, images, ctx) {
   const { apiKey, customPrompt } = await chrome.storage.local.get(["apiKey", "customPrompt"]);
   if (!apiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "DeepSeek" }));
@@ -661,9 +762,9 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
     }),
     signal: ctx.signal,
   });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
+  if (!resp.ok) throw new Error(await providerHttpError(resp));
 
-  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx);
+  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx, openAICompatibleStreamError);
 }
 
 // Groq OpenAI-compatible Chat Completions API.
@@ -689,9 +790,9 @@ async function streamGroq(model, question, pageContext, history, images, ctx) {
     }),
     signal: ctx.signal,
   });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
+  if (!resp.ok) throw new Error(await providerHttpError(resp));
 
-  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx);
+  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx, openAICompatibleStreamError);
 }
 
 // OpenRouter (https://openrouter.ai) is a third-party router, not a model's
@@ -718,151 +819,16 @@ async function streamOpenRouter(model, question, pageContext, history, images, c
     }),
     signal: ctx.signal,
   });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
+  if (!resp.ok) throw new Error(await providerHttpError(resp));
 
-  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx);
+  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx, openAICompatibleStreamError);
 }
 
-// Z.AI's current documented API is OpenAI-compatible PaaS Chat Completions.
-// GLM-5.3-Flash supports multimodal message content, thinking, and the
-// reasoning_effort parameter. The extension therefore uses the same shared
-// message builder as DeepSeek/OpenRouter.
-async function streamZAI(model, question, pageContext, history, images, ctx) {
-  const { zaiApiKey, customPrompt } = await chrome.storage.local.get(["zaiApiKey", "customPrompt"]);
-  if (!zaiApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "Z.AI" }));
-
-  const resp = await fetch("https://api.z.ai/api/paas/v4/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${zaiApiKey}`,
-    },
-    body: JSON.stringify({
-      model: model.apiModel,
-      messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang),
-      stream: true,
-      ...(model.thinking ? { thinking: { type: model.thinking } } : {}),
-      ...(model.reasoningEffort ? { reasoning_effort: model.reasoningEffort } : {}),
-    }),
-    signal: ctx.signal,
-  });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
-
-  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx);
-}
-
-// Claude uses api.anthropic.com, authenticated with x-api-key + an
-// anthropic-version header (both required), plus
-// anthropic-dangerous-direct-browser-access: true - without that header the
-// request is blocked by CORS since this call is made directly from the
-// extension's background service worker rather than through a server-side
-// proxy or the Anthropic SDK - see
-// https://platform.claude.com/docs/en/api/overview (checked 2026-08-23).
-// Claude uses a single top-level `system` string; OpenAI uses `instructions`.
-// Unlike DeepSeek, `max_tokens` is required by the Messages API.
-// Modern adaptive-thinking Claude models share the same output budget between
-// thinking and visible output, so the model catalog supplies a larger budget.
-// The SSE stream itself uses named events (message_start,
-// content_block_start, content_block_delta, content_block_stop,
-// message_delta, message_stop, plus periodic pings) instead of
-// DeepSeek's unnamed alt=sse chunks, but readSse only ever looks at
-// "data:" lines regardless of the preceding "event:" line, so the same
-// reader still applies; only content_block_delta events whose delta.type is
-// "text_delta" carry answer text, everything else is ignored - see
-// https://platform.claude.com/docs/en/build-with-claude/streaming (checked
-// 2026-08-23).
-async function streamClaude(model, question, pageContext, history, images, ctx) {
-  const { claudeApiKey, customPrompt } = await chrome.storage.local.get(["claudeApiKey", "customPrompt"]);
-  if (!claudeApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "Claude" }));
-
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": claudeApiKey,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
-    body: JSON.stringify({
-      model: model.apiModel,
-      max_tokens: model.maxTokens || 32768,
-      system: buildSystemInstruction(pageContext, customPrompt, ctx.lang),
-      messages: buildClaudeMessages(question, history, images, ctx.lang),
-      stream: true,
-    }),
-    signal: ctx.signal,
-  });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
-
-  await readSse(
-    resp,
-    (json) => (json?.type === "content_block_delta" && json.delta?.type === "text_delta" ? json.delta.text || "" : ""),
-    ctx
-  );
-}
-
-// OpenAI's current recommended endpoint is the Responses API
-// (https://api.openai.com/v1/responses), not the older
-// /v1/chat/completions - see
-// https://platform.openai.com/docs/guides/migrate-to-responses (checked
-// 2026-08-24). Like Claude, the system prompt is a single top-level
-// field (`instructions`, a plain string) rather than a message with role
-// "system" - unlike Claude, OpenAI's `input` array does technically also
-// accept a "system"/"developer" role turn, but `instructions` is used here
-// to stay consistent with how the other three providers are wired, reusing
-// the same buildSystemInstruction helper. `store: false` is set because
-// this extension is stateless per request (it always resends the full
-// history itself, like the other three providers) and never uses OpenAI's
-// previous_response_id continuation feature, so there's no reason for
-// OpenAI to retain the response server-side by default.
-//
-// CORS CAVEAT: multiple OpenAI community threads confirm api.openai.com
-// does not return CORS-permissive headers for a plain webpage origin, and
-// OpenAI's own guidance is to proxy through a backend rather than call the
-// API directly from client-side code. That guidance is written for
-// ordinary web pages; a Chrome/Brave extension's background service worker
-// with host_permissions (this extension already has "<all_urls>") is a
-// different, more privileged fetch() context that is not normally subject
-// to the same CORS enforcement - which is exactly what already lets this
-// same file call api.deepseek.com, generativelanguage.googleapis.com, and
-// api.anthropic.com directly. This could not be verified against a live
-// api.openai.com endpoint from the sandbox this was written in (network
-// access there is allow-listed to a small set of domains that doesn't
-// include it), so it needs a real test with a live key; unlike Claude,
-// OpenAI does not document an equivalent explicit opt-in header to add if
-// a direct request does turn out to be blocked.
-async function streamOpenAI(model, question, pageContext, history, images, ctx) {
-  const { openaiApiKey, customPrompt } = await chrome.storage.local.get(["openaiApiKey", "customPrompt"]);
-  if (!openaiApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "OpenAI" }));
-
-  const resp = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${openaiApiKey}`,
-    },
-    body: JSON.stringify({
-      model: model.apiModel,
-      instructions: buildSystemInstruction(pageContext, customPrompt, ctx.lang),
-      input: buildOpenAIInput(question, history, images, ctx.lang),
-      store: false,
-      stream: true,
-      ...(model.reasoningEffort ? { reasoning: { effort: model.reasoningEffort } } : {}),
-    }),
-    signal: ctx.signal,
-  });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text()}`);
-
-  await readSse(resp, (json) => (json?.type === "response.output_text.delta" ? json.delta || "" : ""), ctx);
-}
-
-// Shared SSE reader: DeepSeek, Claude, OpenAI, and OpenRouter all
-// send
+// Shared SSE reader: DeepSeek, Groq and OpenRouter all send
 // "data: {...}\n\n"
-// lines (Claude's are additionally preceded by a named "event:" line, which
-// this reader ignores since it only inspects lines starting with "data:");
-// only the JSON shape differs, so `extractDelta` picks the provider-specific
-// text out of each parsed chunk. `ctx` (added alongside the STOP/abort
+// lines (any named "event:" line is ignored since this reader only inspects
+// lines starting with "data:"); `extractDelta` picks the text out of each
+// parsed chunk. `ctx` (added alongside the STOP/abort
 // mechanism) carries the port to post CHUNKs to and the requestId to tag
 // them with, so sidepanel.js can tell a chunk belonging to a since-aborted
 // request apart from the current one if any are still in flight when a STOP
@@ -873,42 +839,70 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let emitted = false;
+
+  // Handles one complete SSE line; throws on a provider-reported error.
+  const handleLine = (line) => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) return;
+    const data = trimmed.slice(5).trim();
+    if (!data || data === "[DONE]") return;
+    let json;
+    try {
+      json = JSON.parse(data);
+    } catch {
+      return;
+    }
+    const streamError = extractError?.(json);
+    if (streamError) throw new Error(streamError);
+    const delta = extractDelta(json);
+    if (delta) {
+      emitted = true;
+      ctx.port.postMessage({ type: "CHUNK", delta, requestId: ctx.requestId });
+    }
+  };
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split("\n");
     buffer = lines.pop() || "";
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t.startsWith("data:")) continue;
-      const data = t.slice(5).trim();
-      if (!data || data === "[DONE]") continue;
-      let json;
-      try {
-        json = JSON.parse(data);
-      } catch {
-        continue;
-      }
-      const streamError = extractError?.(json);
-      if (streamError) throw new Error(streamError);
-      const delta = extractDelta(json);
-      if (delta) ctx.port.postMessage({ type: "CHUNK", delta, requestId: ctx.requestId });
-    }
+    for (const line of lines) handleLine(line);
   }
+  // Flush whatever is left: a final "data:" line that is not newline-terminated
+  // used to be dropped, silently truncating the end of the answer.
+  buffer += decoder.decode();
+  if (buffer.trim()) handleLine(buffer);
+
+  // A stream that ended without a single visible character (empty completion,
+  // or reasoning that consumed the whole budget) is a failure, not an answer:
+  // saving an empty assistant turn breaks later requests, because providers
+  // reject empty assistant messages in the history.
+  if (!emitted) throw new Error(t(ctx.lang, "bg_error_emptyResponse"));
+}
+
+// OpenAI-compatible providers (DeepSeek, Groq, OpenRouter) can report a failure
+// in the middle of an HTTP 200 stream as {"error": {...}}. OpenRouter's free
+// router does this regularly; without this check such a request just ended with
+// an empty answer and no explanation.
+function openAICompatibleStreamError(json) {
+  const error = json?.error;
+  if (!error) return "";
+  if (typeof error === "string") return error;
+  return String(error.message || JSON.stringify(error));
 }
 
 // Shared base prompt, kept provider-agnostic and toggle-agnostic. Previously
 // this string (plus the whole CURRENT PAGE CONTEXT template below) was
-// hand-duplicated inside both buildMessages() and buildSystemInstruction(),
-// which risked the two drifting apart on a future edit; both now read from
-// this single copy via pageContextInstruction().
+// duplicated in more than one place, which risked the copies drifting apart on
+// a future edit; it now lives in this single copy, read via
+// pageContextInstruction().
 const BASE_PROMPT = "You are an assistant running in the browser side panel.";
 const MAX_PAGE_CONTEXT_CHARS = 120000;
 
-// Returns this request's page-context instruction, for either providers with
-// a message-list system role (buildMessages) or a single system string
-// (buildSystemInstruction). Unconditional - always returns something, rather
+// Returns this request's page-context instruction (used by buildMessages).
+// Unconditional - always returns something, rather
 // than only when pageContext is present - because the OFF case needs its own
 // explicit, per-request instruction just as much as the ON case does: with no
 // pageContext this call, the model otherwise gets no explicit signal that
@@ -965,23 +959,22 @@ function condenseHistoryAttachments(text) {
   });
 }
 
-// Normalizes conversation history for providers that require strict
-// user/assistant alternation. Claude's Messages API rejects adjacent
-// same-role turns outright.
+// Normalizes conversation history so providers that expect strict
+// user/assistant alternation do not reject it.
 // Adjacent same-role messages can genuinely occur in this extension: when a
 // request fails or is stopped, the user's question stays in history with no
 // assistant reply after it, so the next submission would send [..., user,
 // user]. Such runs are merged into a single turn, and a leading assistant
-// turn (which Claude also rejects, and which the MAX_HISTORY_TURNS window
-// slice in sidepanel.js can leave behind when it cuts into a conversation
-// mid-exchange) is dropped. Providers that don't require alternation
-// (OpenAI-style message lists) receive the same normalized history for
-// consistency.
+// turn (which the MAX_HISTORY_TURNS window slice in sidepanel.js can leave
+// behind when it cuts into a conversation mid-exchange) is dropped.
 function normalizeHistoryTurns(history) {
   const out = [];
   for (const h of history || []) {
     if (!h || (h.role !== "user" && h.role !== "assistant") || typeof h.content !== "string") continue;
     const content = h.role === "user" ? condenseHistoryAttachments(h.content) : h.content;
+    // Empty turns (e.g. an assistant reply saved by an older build after an
+    // empty completion) make providers reject the whole request with a 400.
+    if (!content.trim()) continue;
     const prev = out[out.length - 1];
     if (prev && prev.role === h.role) {
       prev.content = `${prev.content}\n\n${content}`;
@@ -1014,46 +1007,4 @@ function buildMessages(question, pageContext, history, customPrompt, images = []
   for (const img of images) content.push({ type: "image_url", image_url: { url: img.dataUrl, detail: "auto" } });
   messages.push({ role: "user", content: images.length ? content : question });
   return messages;
-}
-
-// Claude and OpenAI reuse this helper for their top-level system/instructions fields.
-function buildSystemInstruction(pageContext, customPrompt, lang) {
-  const text = customPrompt ? `${BASE_PROMPT}\n\nUser-defined instructions:\n${customPrompt}` : BASE_PROMPT;
-  return `${text}\n\n${outputLanguageInstruction(lang)}\n\n${pageContextInstruction(pageContext)}`;
-}
-
-// Claude/OpenAI each expose the system prompt as a single top-level
-// field (system_instruction/system/instructions - see buildSystemInstruction
-// above) rather than a message list, so unlike DeepSeek/OpenRouter's
-// buildMessages() - which re-inserts outputLanguageInstruction() a second
-// time as a system message immediately before the user turn - these three
-// providers previously carried the language requirement only once, at the
-// very top of the request. In longer conversations that one mention can get
-// out-weighed by several turns of history plus an English-language current
-// question, and the model reverts to English intermittently. Each of the
-// three builders below now appends outputLanguageInstruction(lang) as a
-// trailing text block on the CURRENT user turn - the same reinforcement
-// buildMessages() already gives DeepSeek/OpenRouter, just adapted to each
-// provider's own content-block shape - so the language guard is always the
-// last thing the model reads before it starts answering.
-
-function buildClaudeMessages(question, history, images = [], lang) {
-  const messages = normalizeHistoryTurns(history).map((h) => ({ role: h.role, content: h.content }));
-  const content = [{ type: "text", text: question }];
-  for (const img of images) {
-    const match = img.dataUrl.match(/^data:(image\/(?:jpeg|png|gif|webp));base64,(.+)$/i);
-    if (match) content.push({ type: "image", source: { type: "base64", media_type: match[1], data: match[2] } });
-  }
-  content.push({ type: "text", text: outputLanguageInstruction(lang) });
-  messages.push({ role: "user", content });
-  return messages;
-}
-
-function buildOpenAIInput(question, history, images = [], lang) {
-  const input = normalizeHistoryTurns(history).map((h) => ({ role: h.role, content: h.content }));
-  const content = [{ type: "input_text", text: question }];
-  for (const img of images) content.push({ type: "input_image", image_url: img.dataUrl, detail: "auto" });
-  content.push({ type: "input_text", text: outputLanguageInstruction(lang) });
-  input.push({ role: "user", content });
-  return input;
 }

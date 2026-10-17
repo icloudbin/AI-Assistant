@@ -71,14 +71,22 @@ function extractSynologyMailPlus() {
     message.querySelector('.subject')?.innerText?.trim() ||
     '';
 
+  // Fallback lookups match a class *word* ("mail-to", "to-list"), never a mere
+  // substring: [class*="to"] also matches "button", "bottom", "toolbar" and
+  // returned arbitrary page text (sometimes the whole message) as the recipient.
+  const byClassWord = (word) => {
+    const re = new RegExp(`(?:^|[\\s_-])${word}(?:$|[\\s_-])`, 'i');
+    return Array.from(message.querySelectorAll('[class]')).find((el) => re.test(el.getAttribute('class') || ''));
+  };
+
   const sender =
     message.querySelector('.from')?.innerText?.trim() ||
-    message.querySelector('[class*="from"]')?.innerText?.trim() ||
+    byClassWord('from')?.innerText?.trim() ||
     '';
 
   const recipient =
     message.querySelector('.to')?.innerText?.trim() ||
-    message.querySelector('[class*="to"]')?.innerText?.trim() ||
+    byClassWord('to')?.innerText?.trim() ||
     '';
 
   // Put the message metadata before the body. This gives the model an
@@ -360,9 +368,16 @@ function extractRedditArticle() {
     if (seen.has(comment)) continue;
     seen.add(comment);
 
-    // Skip comments that are clearly promoted/advertising containers.
-    const wrapper = comment.closest('shreddit-comments-page-ad, [data-testid*="ad"], [id*="ad"]');
-    if (wrapper) continue;
+    // Skip comments that are clearly promoted/advertising containers. "ad" must
+    // be a whole word in the id/test-id: the old [id*="ad"] substring match also
+    // hit ids such as "thread", "header" or "loaded" and silently dropped real
+    // comments.
+    const isAdWord = (value) => /(?:^|[-_:\s])ads?(?:$|[-_:\s])/i.test(String(value || ''));
+    let adWrapper = comment.closest('shreddit-comments-page-ad');
+    for (let node = comment.parentElement; node && !adWrapper; node = node.parentElement) {
+      if (isAdWord(node.id) || isAdWord(node.getAttribute('data-testid'))) adWrapper = node;
+    }
+    if (adWrapper) continue;
 
     const commentBody = comment.querySelector(
       '.md[property="schema:commentBody"], [property="schema:commentBody"], .md'
@@ -696,6 +711,12 @@ if (!globalThis.__aiAssistantPageExtractor) {
 // listeners extract identical content and the first sendResponse wins.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type !== "EXTRACT_PAGE_CONTENT") return false;
-  sendResponse({ ok: true, data: globalThis.__aiAssistantPageExtractor().extractPageContent() });
+  // Always answer: an exception inside the extractor used to leave the sender
+  // with "message port closed before a response was received" and no data.
+  try {
+    sendResponse({ ok: true, data: globalThis.__aiAssistantPageExtractor().extractPageContent() });
+  } catch (err) {
+    sendResponse({ ok: false, error: String(err?.message || err) });
+  }
   return false;
 });

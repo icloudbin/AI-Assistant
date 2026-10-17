@@ -412,6 +412,7 @@ textarea#questionInput:focus { outline: none; border-color: var(--accent); }
   max-height: 110px;
   overflow-y: auto;
 }
+.attachment-list[hidden] { display: none; }
 .attachment {
   display: flex;
   align-items: center;

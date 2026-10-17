@@ -1,4 +1,35 @@
-# AI model connection update (2026-10-07, v1.10.54)
+# Review and bug-fix pass (v1.10.61)
+
+**Fixed:**
+- Markdown: text on the line(s) directly under a list item (indented or "lazy" continuation) was rendered *above* the whole list; it now stays inside its item.
+- Voice input: switching the voice language while listening left the old recognizer running, so two recognizers wrote into the question box (duplicated text, wrong language). Results/errors/end events from a replaced recognizer are now ignored.
+- Attaching an image while a text-only model (GPT-OSS) is selected failed with a provider HTTP 400; the panel now explains it up front and keeps the draft and attachments.
+- History could silently stop saving: attachment text (up to 180,000 characters per message) was stored in full for up to 100 conversations and exceeded the 10 MB `chrome.storage.local` quota. Stored copies of attachment blocks are now condensed to the same preview size the background worker already sends for history turns, and a quota error drops the oldest conversations and retries instead of losing the save.
+- ZIP attachments: decompression is capped, so a small crafted archive can no longer expand to gigabytes in memory.
+- Provider HTTP errors showed the entire response body (often a full HTML error page); they are now cut to a short excerpt.
+- History backup ZIPs were written with an invalid DOS date (0), which some tools flag; they now use 1980-01-01.
+- Conversation titles for Chinese/Japanese messages (no spaces) were the whole message; titles are now capped at 80 characters.
+- The question box regains focus after an answer finishes.
+- Manifest: added `minimum_chrome_version` 116 (the side-panel `open()` API used by the context menu needs it).
+
+**Not changed, worth knowing:** the quick *Translate* button always asks for Chinese (the "Preferred Translation Language" setting only affects the right-click menu); `buildMessages()` sends two `system` messages after the conversation history, which strict chat templates (some Qwen builds) can reject.
+
+# Provider cleanup and bug-fix pass (2026-10-16)
+
+**Removed:** the Z.AI, Claude (Anthropic) and OpenAI streaming code, their message builders, and every remaining reference in the UI strings and privacy policy. The supported providers are DeepSeek, Groq and OpenRouter (Gemini had already been removed earlier). The model catalog itself (`models.js`) was not changed apart from marking the two text-only GPT-OSS models with `vision: false`. The provider-specific entries further down this file are kept only as history.
+
+**Fixed:**
+- Inline code containing `$&`, `$$` etc. was corrupted when rendered; headings ending in `#` (e.g. `C#`) lost the character; `2 * 3 * 4` was rendered as italics.
+- The display language was backed up under the wrong key (`language` instead of `languagePreference`) and so was never restored. Old backups are migrated.
+- Importing a settings backup left the Tavily field stale and could blank other fields, so a later Save overwrote the imported keys.
+- Cancelling a request (Clear / New Topic) while the page was being captured still sent the request and could throw; the composer is now locked immediately and a storage error no longer leaves it stuck.
+- A reply that was empty is now reported as an error instead of being saved as an empty assistant turn (providers reject those, which broke the rest of the conversation). Errors reported mid-stream and a final unterminated SSE line are now handled.
+- An unknown model ID is now rejected instead of silently being sent to DeepSeek; restoring a conversation uses its saved model/label.
+- Automatic web research: attachment text and the page-visuals note are no longer treated as part of the question; Chinese/Japanese questions are matched correctly; ordinary question words no longer count as "not covered by the page"; "explain the current page" no longer counts as a request for fresh information. Without a Tavily key, automatic research is skipped instead of failing the request (explicit requests and Explain still report the missing key).
+- Fact Check now splits and keeps Chinese/Japanese sentences.
+- Page extraction: the MailPlus recipient fallback and the Reddit ad filter no longer match unrelated elements; the content script always replies.
+
+# AI model connection update (2026-10-07, v1.10.54) — superseded: Gemini, Claude, OpenAI and Z.AI entries below no longer apply
 
 - DeepSeek: `deepseek-flash` remains the API ID for DeepSeek V4.1 Flash; reasoning effort is pinned to high.
 - Gemini: confirmed on `gemini-3.8-flash` using Google's Interactions API.
@@ -23,10 +54,14 @@ AI-Assistant/
 ├── background.js
 ├── content.js
 ├── storage-keys.js
+├── settings-storage.js
+├── i18n.js
+├── privacy-policy.md
 ├── icons/
 │   └── icon16.png / icon48.png / icon128.png (declared in manifest.json's "icons" and "action.default_icon" fields)
 ├── options/
 │   ├── options.html
+│   ├── options.css
 │   └── options.js
 └── sidepanel/
     ├── sidepanel.html
@@ -85,7 +120,7 @@ sidepanel/mic-permission.html / sidepanel/mic-permission.css / sidepanel/mic-per
 
 The side panel now has an Upload button below the question box. It accepts images, common text/code files, HTML, and ZIP/WinZip archives. Text and HTML files are read locally and included in the DeepSeek chat request. ZIP files are parsed locally and supported text/HTML entries are extracted and included.
 
-Image attachments are encoded locally as data URLs and sent with the current request. DeepSeek image requests are handled natively by `deepseek-flash`; Gemini, Claude, OpenAI, and OpenRouter receive their provider-specific multimodal image content when the selected model/API supports vision.
+Image attachments are encoded locally as data URLs and sent with the current request. DeepSeek image requests are handled natively by `deepseek-flash`; Groq and OpenRouter receive multimodal image content when the selected model supports vision. The two GPT-OSS models on Groq are text-only, so automatic page screenshots/images are not attached for them.
 
 
 Version 1.0.9 adds a Settings > Backup History button that exports all locally saved conversations as a standard ZIP file. API keys and custom prompts are not included.

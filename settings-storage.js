@@ -4,6 +4,8 @@
 // a recovery layer because extension settings should survive browser restarts
 // even if the browser's extension-storage database is unexpectedly reset.
 
+import { LANGUAGE_STORAGE_KEY } from "./storage-keys.js";
+
 const DB_NAME = "ai-assistant-settings";
 const DB_VERSION = 1;
 const STORE_NAME = "settings";
@@ -16,7 +18,10 @@ export const PERSISTED_SETTING_KEYS = [
   "groqKey",
   "tavilyApiKey",
   "customPrompt",
-  "language",
+  // The display language is stored under LANGUAGE_STORAGE_KEY ("languagePreference").
+  // Backups made by older builds used the field name "language", which never
+  // matched the real storage key, so the language was never actually restored.
+  LANGUAGE_STORAGE_KEY,
   "preferredTranslationLanguage",
   "themePreference",
 ];
@@ -77,7 +82,12 @@ export async function saveSettingsBackup(values) {
 }
 
 export async function getSettingsBackup() {
-  return readBackup().catch(() => ({}));
+  const backup = await readBackup().catch(() => ({}));
+  // Migrate the legacy "language" field written by older builds.
+  if (backup.language !== undefined && backup[LANGUAGE_STORAGE_KEY] === undefined) {
+    return { ...backup, [LANGUAGE_STORAGE_KEY]: backup.language };
+  }
+  return backup;
 }
 
 // Restore only keys that are genuinely absent from chrome.storage.local.

@@ -88,7 +88,7 @@ async function loadLanguage() {
 languageSelect.addEventListener("change", async () => {
   const lang = languageSelect.value;
   await chrome.storage.local.set({ [LANGUAGE_STORAGE_KEY]: lang });
-  await saveSettingsBackup({ language: lang });
+  await saveSettingsBackup({ [LANGUAGE_STORAGE_KEY]: lang });
   applyLanguage(lang);
 });
 
@@ -289,7 +289,7 @@ function createZip(entries) {
       u16le(0x0800),       // UTF-8 filenames
       u16le(0),            // stored, no compression
       u16le(0),            // time
-      u16le(0),            // date
+      u16le(0x0021),       // date: 1980-01-01 (0 is an invalid DOS date)
       u32le(crc),
       u32le(data.length),
       u32le(data.length),
@@ -306,8 +306,8 @@ function createZip(entries) {
       u16le(20),             // version needed
       u16le(0x0800),         // UTF-8 filenames
       u16le(0),              // stored
-      u16le(0),
-      u16le(0),
+      u16le(0),              // time
+      u16le(0x0021),         // date: 1980-01-01
       u32le(crc),
       u32le(data.length),
       u32le(data.length),
@@ -509,7 +509,7 @@ function makeRestoredTopicTitle(messages) {
     .filter(Boolean);
   if (!userTexts.length) return t(currentLang, "restoredConversationTitle");
   const words = userTexts.join(" ").split(/\s+/).filter(Boolean);
-  const title = words.slice(0, 10).join(" ");
+  const title = words.slice(0, 10).join(" ").slice(0, 80).trim();
   return title || t(currentLang, "restoredConversationTitle");
 }
 
@@ -871,10 +871,12 @@ async function importSettings() {
     // so refresh them by hand. Language, theme, and preferred translation
     // live-update through the listeners registered earlier in this file,
     // triggered by the set() above.
-    apiKeyInput.value = restored.apiKey || "";
-    openrouterApiKeyInput.value = restored.openrouterApiKey || "";
-    groqApiKeyInput.value = restored.groqApiKey || restored.groqKey || "";
-    if (restored.customPrompt !== undefined) customPromptInput.value = restored.customPrompt;
+    // Re-read from storage rather than from `restored`: keys that were empty in
+    // the backup file are skipped by the import, so storage may still hold a
+    // different value than `restored` suggests. The Tavily field was also never
+    // refreshed, and a later Save would then overwrite the freshly imported key
+    // with the stale (often empty) input value.
+    await loadSavedApiSettings();
 
     msgEl.style.color = "#4ade80";
     msgEl.textContent = t(currentLang, "settingsBackup_import_success");

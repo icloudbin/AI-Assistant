@@ -71,11 +71,9 @@ Custom prompts are stored locally in the user's browser and are not sent to the 
 The Extension does not provide its own AI inference server. Depending on the model selected by the user, requests may be sent directly from the Extension to one of the following third-party services:
 
 DeepSeek — https://api.deepseek.com
-- Tavily — https://api.tavily.com (only when the user enables online Fact Check)
-Anthropic Claude — https://api.anthropic.com
-OpenAI — https://api.openai.com
+Groq — https://api.groq.com
 OpenRouter — https://openrouter.ai
-Z.AI — https://api.z.ai
+- Tavily — https://api.tavily.com (only when the user has added a Tavily API key; used for online research such as Fact Check, Explain, and automatic lookups for questions the current page cannot answer)
 
 The information sent to the selected provider may include the user's question, relevant conversation history, custom prompt, webpage context, selected webpage text, and attached images or extracted file content.
 
