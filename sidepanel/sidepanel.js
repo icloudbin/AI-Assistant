@@ -98,6 +98,7 @@ const includeContextToggle = document.getElementById("includeContextToggle");
 // message bodies) is ON by default; once the user turns it off, that explicit
 // choice is remembered across sessions.
 const INCLUDE_CONTEXT_STORAGE_KEY = "includeCurrentPageContext";
+const PAGE_VISUALS_STORAGE_KEY = "pageVisualsEnabled";
 const pageContextBar = document.getElementById("pageContextBar");
 const pageContextTitle = document.getElementById("pageContextTitle");
 const modelSelect = document.getElementById("modelSelect");
@@ -654,10 +655,15 @@ function sanitizeRenderedHtml(html) {
           el.remove();
           continue;
         }
-        el.setAttribute("src", isDataImage ? src : u.href);
-        el.setAttribute("loading", "lazy");
-        el.setAttribute("decoding", "async");
-        el.setAttribute("alt", el.getAttribute("alt") || "");
+        if (isDataImage) {
+          el.setAttribute("src", src);
+          el.setAttribute("loading", "lazy");
+          el.setAttribute("decoding", "async");
+          el.setAttribute("alt", el.getAttribute("alt") || "");
+        } else {
+          // Remote image: never loaded automatically (see remoteImageNode).
+          el.replaceWith(remoteImageNode(doc, u.href, el.getAttribute("alt") || ""));
+        }
       } catch {
         el.remove();
       }
@@ -678,12 +684,7 @@ function sanitizeRenderedHtml(html) {
         // image filename extension, render it as an IMG instead of a link.
         const isImageUrl = /\.(?:png|jpe?g|gif|webp|bmp|svg)$/i.test(u.pathname);
         if (isImageUrl && (u.protocol === "http:" || u.protocol === "https:")) {
-          const img = document.createElement("img");
-          img.setAttribute("src", u.href);
-          img.setAttribute("alt", el.textContent || t(currentLang, "imageAltFallback"));
-          img.setAttribute("loading", "lazy");
-          img.setAttribute("decoding", "async");
-          el.replaceWith(img);
+          el.replaceWith(remoteImageNode(doc, u.href, el.textContent || t(currentLang, "imageAltFallback")));
           continue;
         }
 
@@ -699,60 +700,82 @@ function sanitizeRenderedHtml(html) {
   return root.innerHTML;
 }
 
-async function fallbackRemoteImage(img) {
-  if (!(img instanceof HTMLImageElement) || img.dataset.remoteFallbackAttempted === "1") return;
-  const src = img.getAttribute("src") || "";
-  if (!/^https?:\/\//i.test(src)) return;
+// ---------- Remote images in model replies ----------
+// A model reply (which a web page can steer by prompt injection) may contain
+// Markdown images. Loading such an image automatically would send a request
+// to an arbitrary host - with whatever the injected prompt put in its URL -
+// the moment the reply renders, i.e. a silent data-exfiltration channel. So
+// remote images are NEVER loaded automatically: the panel's CSP allows only
+// 'self' and data: images, and each remote image is shown as a placeholder
+// that shows its address. Only when the user clicks it is the image fetched,
+// through the background worker (public hosts only, size/type checked), and
+// shown as a data URL. Loaded images are remembered so streaming re-renders
+// do not turn them back into placeholders.
+const loadedRemoteImages = new Map(); // url -> data URL
 
-  img.dataset.remoteFallbackAttempted = "1";
+function remoteImageNode(doc, url, alt) {
+  const cached = loadedRemoteImages.get(url);
+  if (cached) {
+    const img = doc.createElement("img");
+    img.setAttribute("src", cached);
+    img.setAttribute("alt", alt);
+    img.setAttribute("loading", "lazy");
+    img.setAttribute("decoding", "async");
+    return img;
+  }
+  const box = doc.createElement("span");
+  box.className = "remote-image";
+  box.setAttribute("role", "button");
+  box.setAttribute("tabindex", "0");
+  box.setAttribute("data-src", url);
+  box.setAttribute("data-alt", alt);
+  box.setAttribute("title", url);
+  box.textContent = `🖼️ ${t(currentLang, "imageRemote_load")}${alt.trim() ? ` - ${alt.trim()}` : ""}`;
+  return box;
+}
+
+async function loadRemoteImage(box) {
+  if (box.dataset.loading === "1") return;
+  const src = box.getAttribute("data-src") || "";
+  if (!/^https?:\/\//i.test(src)) return;
+  box.dataset.loading = "1";
   try {
-    // The background worker refuses localhost/private-network image hosts
-    // unless they are the host of the page the user is on; tell it which page.
+    // The worker refuses localhost/private-network hosts unless they are the
+    // host of the page the user is on; tell it which page. Plain http: is
+    // retried over https: only (never fetched in the clear).
     const activeTab = await getCurrentActiveTab().catch(() => null);
-    // The panel's CSP no longer loads plaintext http: images, so a failed
-    // http: image is retried over https: only (never fetched in the clear).
     const result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src.replace(/^http:/i, "https:"), pageUrl: String(activeTab?.url || "") });
     if (result?.ok && result.dataUrl) {
+      loadedRemoteImages.set(src, result.dataUrl);
+      const img = document.createElement("img");
       img.src = result.dataUrl;
+      img.alt = box.getAttribute("data-alt") || "";
+      box.replaceWith(img);
       return;
     }
   } catch (_) {
-    // Fall through to the placeholder below.
+    // Fall through to the failure state below.
   }
-  // A plain http: image the panel's CSP blocked and that has no https
-  // version: say so instead of leaving an unexplained broken-image icon.
-  if (/^http:/i.test(src)) showBlockedHttpImage(img, src);
-}
-
-function showBlockedHttpImage(img, src) {
-  if (!img.isConnected) return;
-  const box = document.createElement("span");
-  box.className = "image-blocked";
-  const label = document.createElement("span");
-  label.textContent = `🚫 ${t(currentLang, "imageBlockedHttp_label")}`;
-  box.appendChild(label);
-  const alt = (img.getAttribute("alt") || "").trim();
-  if (alt) {
-    const altEl = document.createElement("span");
-    altEl.className = "image-blocked-alt";
-    altEl.textContent = alt;
-    box.appendChild(altEl);
-  }
+  box.dataset.loading = "0";
+  box.classList.add("failed");
+  box.textContent = `🚫 ${t(currentLang, "imageRemote_failed")}`;
   const link = document.createElement("a");
   link.href = src;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
   link.textContent = t(currentLang, "imageBlockedHttp_open");
-  box.appendChild(link);
-  box.title = src;
-  img.replaceWith(box);
+  box.append(" ", link);
 }
 
-// Direct cross-origin image loading is preferred. If the remote host blocks
-// extension-origin requests, retry through the extension service worker.
-chatLog.addEventListener("error", (event) => {
-  if (event.target?.tagName === "IMG") fallbackRemoteImage(event.target);
-}, true);
+chatLog.addEventListener("click", (event) => {
+  const box = event.target?.closest?.(".remote-image");
+  if (box && !box.classList.contains("failed")) loadRemoteImage(box);
+});
+chatLog.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const box = event.target?.closest?.(".remote-image");
+  if (box && !box.classList.contains("failed")) { event.preventDefault(); loadRemoteImage(box); }
+});
 
 // Copies text to the clipboard, preferring the modern async Clipboard API
 // and falling back to the older execCommand technique (an offscreen,
@@ -2183,7 +2206,19 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   // Page images/screenshots are optional extra context. Text-only models (the
   // GPT-OSS models) reject requests that contain image parts, which would make
   // every quick action fail on them, so the visuals are skipped for those.
-  const attachPageVisuals = includePageImages && modelSupportsVision(selectedModel);
+  // Page screenshots/images are NOT covered by the text privacy filter, so
+  // they are sent only when the user has switched "Send page screenshot and
+  // images" on in Settings (off by default). Images the user attaches
+  // themselves are unaffected.
+  let pageVisualsAllowed = false;
+  if (includePageImages) {
+    try {
+      pageVisualsAllowed = (await chrome.storage.local.get(PAGE_VISUALS_STORAGE_KEY))[PAGE_VISUALS_STORAGE_KEY] === true;
+    } catch {
+      pageVisualsAllowed = false;
+    }
+  }
+  const attachPageVisuals = includePageImages && pageVisualsAllowed && modelSupportsVision(selectedModel);
   if (attachPageVisuals && pageContextValid) {
     automaticPageImages = await fetchPageImages(pageContext.imageUrls, pageContext.url);
     const currentTab = await getCurrentActiveTab();
@@ -2300,6 +2335,24 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
 
 
 
+// Target language for translations: the "Preferred Translation Language"
+// setting (default English). Shared by the right-click menu and the quick
+// Translate button.
+const TRANSLATION_LANGUAGE_NAME_KEYS = {
+  "en": "contextAction_language_en",
+  "zh-CN": "contextAction_language_zhCN",
+  "zh-TW": "contextAction_language_zhTW",
+  "fr": "contextAction_language_fr",
+  "ja": "contextAction_language_ja",
+  "es": "contextAction_language_es",
+};
+
+async function getPreferredTranslationLanguage() {
+  const stored = await chrome.storage.local.get(PREFERRED_TRANSLATION_LANGUAGE_KEY);
+  const code = TRANSLATION_LANGUAGE_NAME_KEYS[stored[PREFERRED_TRANSLATION_LANGUAGE_KEY]] ? stored[PREFERRED_TRANSLATION_LANGUAGE_KEY] : "en";
+  return { code, nameKey: TRANSLATION_LANGUAGE_NAME_KEYS[code] };
+}
+
 async function processContextAction(pending) {
   if (!pending?.action || !pending?.text) return;
   if (isStreaming) stopActiveRequest();
@@ -2311,17 +2364,8 @@ async function processContextAction(pending) {
       instruction = t(lang, "contextAction_summarize_prefix");
       break;
     case "translate": {
-      const stored = await chrome.storage.local.get(PREFERRED_TRANSLATION_LANGUAGE_KEY);
-      const code = stored[PREFERRED_TRANSLATION_LANGUAGE_KEY] || "en";
-      const languageKey = {
-        "en": "contextAction_language_en",
-        "zh-CN": "contextAction_language_zhCN",
-        "zh-TW": "contextAction_language_zhTW",
-        "fr": "contextAction_language_fr",
-        "ja": "contextAction_language_ja",
-        "es": "contextAction_language_es",
-      }[code] || "contextAction_language_en";
-      instruction = t(lang, "contextAction_translate_prefix", { language: t(lang, languageKey) });
+      const target = await getPreferredTranslationLanguage();
+      instruction = t(lang, "contextAction_translate_prefix", { language: t(lang, target.nameKey) });
       break;
     }
     case "explain":
@@ -2434,8 +2478,11 @@ chatForm.addEventListener("submit", handleSubmit);
 async function runQuickPageAction(apiPromptKey, displayPromptKey, factCheck = false, forceWebResearch = false, translateMode = false) {
   if (isStreaming) return;
   const lang = currentLang || await getStoredLanguage();
-  const apiPrompt = t("en", apiPromptKey);
-  const displayPrompt = t(lang, displayPromptKey);
+  // The Translate button targets the "Preferred Translation Language" setting;
+  // the API prompt names the language in English, the visible bubble in the UI language.
+  const vars = translateMode ? await getPreferredTranslationLanguage().then((l) => ({ api: { language: t("en", l.nameKey) }, display: { language: t(lang, l.nameKey) } })) : {};
+  const apiPrompt = t("en", apiPromptKey, vars.api);
+  const displayPrompt = t(lang, displayPromptKey, vars.display);
   // Fact Check keeps its dedicated Tavily path. Explain performs Tavily
   // research for supporting context; the remaining quick actions stay local.
   await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck, "", !factCheck && !forceWebResearch, true, forceWebResearch, translateMode);

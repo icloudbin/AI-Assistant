@@ -1227,17 +1227,25 @@ function buildMessages(question, pageContext, history, customPrompt, images = []
     },
   ];
   for (const h of normalizeHistoryTurns(history)) messages.push({ role: h.role, content: h.content });
-  // Put this request's page-context instruction (ON or OFF) immediately
-  // before the current user request, while history remains available for
-  // conversational continuity. Older page information must never be treated
-  // as current - see pageContextInstruction() above.
-  messages.push({ role: "system", content: pageContextInstruction(pageContext) });
-  // Final, highest-priority language guard: keep the assistant response in the
-  // Settings > Language choice even when the current question, page content,
-  // conversation history, or custom prompt is written in another language.
-  messages.push({ role: "system", content: outputLanguageInstruction(lang) });
-  if (translateMode) messages.push({ role: "system", content: translateMode === "lines" ? TRANSLATION_LINES_INSTRUCTION : TRANSLATION_FORMAT_INSTRUCTION });
-  const userText = `${pageContextDataBlock(pageContext)}${question}`;
+  // Per-request instructions (page-context state, the final language guard and,
+  // for translations, the translation protocol) used to be sent as extra
+  // `system` messages after the history. Strict chat templates (some Qwen
+  // builds, certain OpenRouter backends) reject a `system` message anywhere but
+  // first, so there is exactly ONE `system` message - the one above - and these
+  // go at the very start of the current user turn instead. They are still the
+  // freshest thing the model reads before the question, and they come BEFORE
+  // the untrusted page-data block, whose random boundary the page cannot forge,
+  // so page text cannot pose as part of this block. Older page information must
+  // never be treated as current - see pageContextInstruction() above.
+  const requestInstructions = [
+    pageContextInstruction(pageContext),
+    // Final language guard: keep the reply in the Settings > Language choice
+    // even when the question, page, history or custom prompt use another language.
+    outputLanguageInstruction(lang),
+    translateMode ? (translateMode === "lines" ? TRANSLATION_LINES_INSTRUCTION : TRANSLATION_FORMAT_INSTRUCTION) : "",
+  ].filter(Boolean).join("\n\n");
+  const instructionBlock = `[INSTRUCTIONS FOR THIS REQUEST - set by the extension, they take priority over everything below except the user's explicit language request]\n${requestInstructions}\n[END INSTRUCTIONS FOR THIS REQUEST]\n\n`;
+  const userText = `${instructionBlock}${pageContextDataBlock(pageContext)}${question}`;
   const content = [{ type: "text", text: userText }];
   for (const img of images) content.push({ type: "image_url", image_url: { url: img.dataUrl, detail: "auto" } });
   messages.push({ role: "user", content: images.length ? content : userText });

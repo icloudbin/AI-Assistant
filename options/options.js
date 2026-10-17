@@ -23,6 +23,13 @@ chrome.storage.local.get("piiFilterEnabled").then((s) => { piiFilterToggle.check
 piiFilterToggle.addEventListener("change", () => {
   chrome.storage.local.set({ piiFilterEnabled: piiFilterToggle.checked }).catch(() => {});
 });
+const pageVisualsToggle = document.getElementById("pageVisualsToggle");
+// Page screenshot/images with quick actions: OFF by default (images cannot be
+// run through the text privacy filter), saved immediately when toggled.
+chrome.storage.local.get("pageVisualsEnabled").then((s) => { pageVisualsToggle.checked = s.pageVisualsEnabled === true; }).catch(() => {});
+pageVisualsToggle.addEventListener("change", () => {
+  chrome.storage.local.set({ pageVisualsEnabled: pageVisualsToggle.checked }).catch(() => {});
+});
 const backupHistoryBtn = document.getElementById("backupHistory");
 const restoreHistoryBtn = document.getElementById("restoreHistory");
 const restoreHistoryFile = document.getElementById("restoreHistoryFile");
@@ -830,6 +837,8 @@ const SETTINGS_BACKUP_SECRET_KEYS = [
 ];
 const SETTINGS_BACKUP_PLAIN_KEYS = [
   "factCheckWebResearch",
+  "piiFilterEnabled",
+  "pageVisualsEnabled",
   "customPrompt",
   THEME_STORAGE_KEY,
   LANGUAGE_STORAGE_KEY,
@@ -952,7 +961,7 @@ async function importSettings() {
     // against models.js), so a bad value can at worst restore a default,
     // not break anything.
     const NUMERIC_SETTINGS_KEYS = new Set(["composerHeight"]);
-    const BOOLEAN_SETTINGS_KEYS = new Set(["factCheckWebResearch"]);
+    const BOOLEAN_SETTINGS_KEYS = new Set(["factCheckWebResearch", "piiFilterEnabled", "pageVisualsEnabled"]);
     const restored = {};
     for (const key of SETTINGS_BACKUP_KEYS) {
       const value = backup.settings[key];

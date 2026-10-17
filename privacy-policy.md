@@ -1,6 +1,6 @@
 Privacy Policy for AI Assistant
 
-Effective Date: October 7, 2026
+Effective Date: October 17, 2026
 
 AI Assistant ("the Extension") is a browser extension that provides AI assistance for webpages, selected webpage text, and user-provided files. This Privacy Policy explains what information the Extension processes, how it is used, and when it is shared with third-party services.
 
@@ -14,6 +14,7 @@ Custom prompts configured by the user
 Interface language and translation preferences
 Voice input language preference
 Locally saved conversation history
+Privacy filter and page screenshot preferences
 Temporary information required to pass a user-initiated context-menu action to the Side Panel
 
 The Extension does not transmit these locally stored settings to the Extension developer's servers.
@@ -37,6 +38,14 @@ Examples include asking questions about the current page, summarizing, translati
 The Extension is designed to use the current active webpage and refresh its context when the user changes tabs or navigates to another page.
 
 When the Read current page option is disabled, ordinary questions are not sent with the current webpage content as context.
+
+The quick actions (Summarize, Translate, Explain, Key Points and Fact Check) always read the current page, even when the Read current page option is unchecked, because they operate on that page. The Read current page option is switched on each time the side panel is opened.
+
+Page screenshot and images: only if the user turns on "Page screenshot and images" in Settings (off by default), the quick actions also capture a screenshot of the visible part of the current tab and up to a few of the page's images and send them to the selected AI provider. These images are sent as they appear, including any personal information visible on the page; the privacy filter described below cannot redact images. Images the user attaches themselves are sent as described in section 3.
+
+Privacy filter: unless the user turns it off in Settings (on by default), the Extension locally replaces recognisable personal and sensitive text (such as emails, phone numbers, card and ID numbers, IP addresses, API keys, tokens, passwords and clearly labelled names) with placeholders before the question, page text, attachment text and conversation history are sent to an AI provider or to Tavily. The filter is pattern based and is a safety net, not a guarantee. Locally stored history keeps the original text.
+
+Images in AI replies: remote images that appear in an AI reply are not loaded automatically. They are fetched, through the Extension, only when the user clicks the placeholder.
 
 3. User-Provided Files
 

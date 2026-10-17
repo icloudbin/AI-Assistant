@@ -26,6 +26,18 @@ function luhnValid(digits) {
 
 const NAME_WORD = "[A-Z][a-zA-Z'’-]{1,24}";
 const NAME_SEQ = `${NAME_WORD}(?:\\s+${NAME_WORD}){0,3}`;
+// Greetings ("Hello World", "Hi Everyone", "Dear Customer Support Team") are
+// followed by a capitalised word far more often than by a person's name. Only
+// one or two capitalised words are taken, and a group word is left alone.
+const NAME_SEQ_SHORT = `${NAME_WORD}(?:\\s+${NAME_WORD})?`;
+const GENERIC_GREETING_TARGETS = new Set([
+  "all", "everyone", "everybody", "there", "world", "team", "folks", "guys", "friends", "sir", "madam",
+  "customer", "customers", "support", "user", "users", "admin", "administrator", "developer", "developers",
+  "colleagues", "students", "reader", "readers", "hiring", "recruiter", "service", "sales", "help",
+]);
+const isGenericTarget = (word) => GENERIC_GREETING_TARGETS.has(String(word).toLowerCase());
+// Common Chinese surnames: "<surname>先生/女士/老师..." is a name, "产品经理" is not.
+const CN_SURNAMES = "王李张刘陈杨黄赵吴周徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾萧田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤";
 
 // Each rule: [regex, replacement | function]. Order matters (specific first).
 const RULES = [
@@ -70,17 +82,22 @@ const RULES = [
   [/(?<![\d])\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}(?![\d])/g, "[PHONE]"],
 
   // --- network ---
-  [/(?<![\d.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\d.])/g, "[IP_ADDRESS]"],
+  // "Version 1.2.3.4" / "v2.0.1.5" look like IPv4 addresses but are not.
+  [/(?<![\d.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\d.])/g, (m, offset, whole) => (/(?:\bversion|\bver\.?|\bv|版本|\brelease|\bbuild)\s*:?\s*$/i.test(whole.slice(Math.max(0, offset - 14), offset)) ? m : "[IP_ADDRESS]")],
 
   // --- names (only with a clear cue) ---
   [new RegExp(`("?)(${NAME_SEQ})("?)(\\s*<\\[EMAIL\\]>)`, "g"), "$1[NAME]$3$4"],
-  [new RegExp(`((?:\\bmy name is|\\bI am called|\\bI'm called|\\bthis is)\\s+)${NAME_SEQ}`, "gi"), "$1[NAME]"],
+  // Case-sensitive on purpose: with an "i" flag [A-Z] matches any letter, so
+  // "this is very important" used to become "this is [NAME] ...". "this is" was
+  // dropped altogether (far too common in ordinary prose).
+  [new RegExp(`((?:\\b[Mm]y name is|\\bI am called|\\bI'm called|\\bI’m called)\\s+)${NAME_SEQ}`, "g"), "$1[NAME]"],
   [new RegExp(`(\\b(?:[Ff][Uu][Ll][Ll][ _-]?[Nn][Aa][Mm][Ee]|[Ff][Ii][Rr][Ss][Tt][ _-]?[Nn][Aa][Mm][Ee]|[Ll][Aa][Ss][Tt][ _-]?[Nn][Aa][Mm][Ee]|[Ss][Uu][Rr][Nn][Aa][Mm][Ee]|[Nn][Aa][Mm][Ee]|[Cc][Oo][Nn][Tt][Aa][Cc][Tt]|[Cc][Uu][Ss][Tt][Oo][Mm][Ee][Rr]|[Cc][Ll][Ii][Ee][Nn][Tt]|[Pp][Aa][Tt][Ii][Ee][Nn][Tt]|[Cc][Aa][Rr][Dd][Hh][Oo][Ll][Dd][Ee][Rr]|[Rr][Ee][Cc][Ii][Pp][Ii][Ee][Nn][Tt]|[Ss][Ee][Nn][Dd][Ee][Rr]|[Aa][Uu][Tt][Hh][Oo][Rr]|[Aa][Pp][Pp][Ll][Ii][Cc][Aa][Nn][Tt]|[Ee][Mm][Pp][Ll][Oo][Yy][Ee][Ee])\\s*[:=]\\s*)${NAME_SEQ}`, "g"), "$1[NAME]"],
-  [new RegExp(`(\\b(?:Dear|Hi|Hello|Hey|Regards,|Sincerely,|Best,|Thanks,|Cheers,)\\s+)${NAME_SEQ}`, "g"), "$1[NAME]"],
+  [new RegExp(`(\\b(?:Dear|Hi|Hello|Hey|Regards,|Sincerely,|Best,|Thanks,|Cheers,)\\s+)(${NAME_SEQ_SHORT})`, "g"), (m, cue, name) => (isGenericTarget(name.split(/\s+/)[0]) ? m : `${cue}[NAME]`)],
   [new RegExp(`(\\b(?:Mr|Mrs|Ms|Miss|Dr|Prof)\\.?\\s+)${NAME_SEQ}`, "g"), "$1[NAME]"],
   [/((?:姓名|名字|联系人|收件人|寄件人|持卡人|客户|申请人|患者|用户名)\s*[:：]\s*)[一-龥·]{2,5}/g, "$1[NAME]"],
   [/((?:我叫|我的名字是|本人)\s*)[一-龥·]{2,4}/g, "$1[NAME]"],
-  [/[一-龥]{1,2}(?=(?:先生|女士|小姐|老师|经理|总监|医生)(?![一-龥]{2}))/g, "[NAME]"],
+  [new RegExp(`[${CN_SURNAMES}][一-龥]?(?=先生|女士|小姐)`, "g"), "[NAME]"],
+  [new RegExp(`[${CN_SURNAMES}](?=老师|经理|总监|医生|教授|博士)`, "g"), "[NAME]"],
 ];
 
 export function redactSensitive(text) {

