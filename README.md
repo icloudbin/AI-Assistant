@@ -1,3 +1,32 @@
+# Privacy filter: Canadian SIN, business number, date of birth, postal code (v1.10.82)
+
+- **Gap.** Testing showed these were sent unredacted: Canadian SIN (`046 454 286`, `046454286`), CRA business number (`123456789 RT0001`), a date after "Date of birth:", and Canadian postal codes (`M5V 3L9`). New rules in `pii-filter.js`:
+  - `[SIN]` - 9 digits, solid or grouped 3-3-3 with the same space/hyphen, **Luhn-checked**, so ordinary 9-digit numbers are left alone. The first digit is not restricted (046 454 286 is a valid SIN). Not matched inside longer digit/letter runs or as a decimal (`046454286.50`).
+  - `[BUSINESS_NUMBER]` - `\d{9}\s?RT\d{4}` (GST/HST account), case-insensitive. Runs before the SIN rule.
+  - `[DATE_OF_BIRTH]` - only the date that follows a birth label (Date of birth, Birth date, Birthday, DOB / D.O.B., Born / Born on, 出生日期, 出生年月(日), 出生时间, 生日, 出生于, 出生). The label stays: `Date of birth: [DATE_OF_BIRTH]`. Date forms: `1985-03-12` / `1985/03/12` / `1985.03.12`, `03/12/1985`, `March 12, 1985`, `12 March 1985`, `1985年3月12日`. A date with no label is never touched. Runs before the name rules so a name rule cannot swallow the "Date" of the label.
+  - `[POSTAL_CODE]` - `A1A 1A1` / `A1A1A1` / `A1A-1A1`, using the real letter restrictions (never D F I O Q U W Z first; never D F I O Q U in the other slots), case-insensitive.
+- **Not covered (unchanged):** street addresses and names that have no cue such as "Name:" ("John Smith approved..."). Detecting those reliably needs more than patterns and would redact ordinary text. Known trade-off: any standalone letter-digit-letter-digit-letter-digit token (e.g. a product code `A1B2C3`) is read as a postal code, and about 1 in 10 random 9-digit numbers pass the Luhn check and are read as a SIN.
+- Checked with a script: every reported example is redacted; look-alikes (Luhn-invalid 9 digits, unlabelled dates, "born in 1985", invalid postal letters) are left alone; 25 inputs from the existing categories give byte-identical output to 1.10.81; about 25 ms for a 1,000,000-character page. The Settings hint text and privacy policy list categories only as examples, so they were not changed.
+- Build bumped to 1.10.82.
+
+# Delete All History now also resets an open side panel (v1.10.81)
+
+- **Bug.** Settings > Delete All History removes `conversationHistory` from storage, but an already-open side panel kept its current conversation in memory. The next send wrote it straight back (`syncCurrentConversationFromHistory`), so the "All history deleted" message was not true for that panel. A request still streaming at that moment could also re-create the history when its reply finished.
+- **Fix (`sidepanel/sidepanel.js`).** The existing `chrome.storage.onChanged` listener for the history key now detects removal (the change has no `newValue`) and resets the panel the same way the Clear button does: stop dictation, `stopActiveRequest()` (so an in-flight reply cannot re-save), then `startNewTopic()`. The listener's normal refresh then empties the in-memory list and the history dropdown. Panels in other windows react the same way. Settings > Restore and the panel's own saves always write an array, so they do not trigger the reset. The old comment that described the stale panel as expected behaviour was updated.
+- Checked in Chromium with stubbed `chrome.*` APIs against the real `sidepanel.js`: with the old code the deleted conversation stayed on screen and came back on the next send (and after a late reply); with the fix the panel shows a blank New Topic, storage holds only new messages, and replacing history (Restore) leaves the displayed conversation alone. Not tested in a real browser profile.
+- Build bumped to 1.10.81.
+
+# Settings page: remove duplicate divider lines (v1.10.80)
+
+- Between "Web Research" and "Privacy filter", and between "Privacy filter" and "Page screenshot and images", the settings page drew two horizontal lines (a `.settings-divider` element plus the next section's own top border). The two redundant `.settings-divider` elements were removed so each gap has a single line. The divider between "Page screenshot and images" and "Custom Prompt" is unchanged.
+- Build bumped to 1.10.80.
+
+# Settings page: toggle alignment + clearer screenshot wording (v1.10.79)
+
+- **Alignment fix (`options/options.html`).** The "Privacy filter" and "Page screenshot and images" checkboxes had no styling on the settings page, so the global `label { display: block }` / `input { width: 100% }` rules stretched each checkbox to full width and stacked it above its text. `label.toggle` now lays the checkbox and its wording out on one line (checkbox aligned to the first line of text); long wording in any language wraps under itself instead of overflowing.
+- **Clearer wording (`i18n.js`).** The Chinese "Page screenshot and images" toggle (Simplified and Traditional) now says that, besides the page text, quick actions also send a screenshot of the visible area and some page images. Behaviour is unchanged.
+- Build bumped to 1.10.79.
+
 # One system message only (v1.10.78)
 
 - `buildMessages()` used to append two or three extra `system` messages after the conversation history (page-context state, a repeated language guard, and for translations the translation protocol). Strict chat templates (some Qwen builds, certain OpenRouter backends) reject a `system` message that is not first. There is now exactly one `system` message, at the start; the per-request instructions are placed at the very start of the current user turn inside an `[INSTRUCTIONS FOR THIS REQUEST ...]` block, before the untrusted page-data block (whose random boundary the page cannot forge). Verified on the real function for page on/off/capture-failed/translate modes: system count 1, first message is system, roles alternate, the instruction block precedes the page data and the question is last. Not tested against a live Qwen/OpenRouter request.

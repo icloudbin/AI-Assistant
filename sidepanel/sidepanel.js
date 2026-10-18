@@ -320,9 +320,26 @@ function escapeHtml(text) {
     .replace(/'/g, "&#39;");
 }
 
+// URL part of a Markdown link or image. Matches text that may contain one level
+// of balanced parentheses, so Wikipedia-style "Foo_(bar)" survives. If the
+// parentheses are unbalanced it falls back to everything up to the first ")".
+const MD_LINK_URL = String.raw`((?:[^()\s]|\([^()\s]*\))+|[^)\s]+)`;
+const MD_IMAGE_RE = new RegExp(String.raw`!\[([^\]]*)\]\(` + MD_LINK_URL + String.raw`(?:\s+"[^"]*")?\)`, "g");
+const MD_LINK_RE = new RegExp(String.raw`\[([^\]]+)\]\(` + MD_LINK_URL + String.raw`(?:\s+"[^"]*")?\)`, "g");
+
 function inlineMarkdownToHtml(text) {
   let s = escapeHtml(text);
   const codeSpans = [];
+  // Generated <a>/<img> tags are kept out of the string while the emphasis
+  // rules below run. Those rules work on the HTML built so far and would
+  // otherwise rewrite characters inside href/src/alt (a URL containing
+  // "_next_" or "*a*" gained <em> tags and led to the wrong address).
+  const htmlTags = [];
+  const stashTag = (html) => {
+    const token = `@@HTMLTAG${htmlTags.length}@@`;
+    htmlTags.push(html);
+    return token;
+  };
   s = s.replace(/`([^`\n]+)`/g, (_, code) => {
     const token = `@@INLINECODE${codeSpans.length}@@`;
     codeSpans.push(`<code>${code}</code>`);
@@ -345,7 +362,7 @@ function inlineMarkdownToHtml(text) {
   // Markdown images. Process images before normal Markdown links so that
   // ![alt](url) is not accidentally consumed as [alt](url). Only allow
   // remote HTTP(S) images and image data URLs.
-  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, alt, src) => {
+  s = s.replace(MD_IMAGE_RE, (_, alt, src) => {
     const rawSrc = src.replace(/&amp;/g, "&");
     try {
       const u = new URL(rawSrc, location.href);
@@ -354,14 +371,14 @@ function inlineMarkdownToHtml(text) {
       if (!isHttpImage && !isDataImage) return `![${alt}](${src})`;
       const safeSrc = escapeHtml(isDataImage ? rawSrc : u.href);
       const safeAlt = escapeHtml(alt);
-      return `<img src="${safeSrc}" alt="${safeAlt}" loading="lazy" decoding="async">`;
+      return stashTag(`<img src="${safeSrc}" alt="${safeAlt}" loading="lazy" decoding="async">`);
     } catch {
       return `![${alt}](${src})`;
     }
   });
 
   // Markdown links: only permit safe navigable protocols.
-  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, label, href) => {
+  s = s.replace(MD_LINK_RE, (_, label, href) => {
     const rawHref = href.replace(/&amp;/g, "&");
     try {
       const u = new URL(rawHref, location.href);
@@ -377,11 +394,11 @@ function inlineMarkdownToHtml(text) {
       if (isImageUrl && (u.protocol === "http:" || u.protocol === "https:")) {
         const safeSrc = escapeHtml(u.href);
         const safeAlt = escapeHtml(label);
-        return `<img src="${safeSrc}" alt="${safeAlt}" loading="lazy" decoding="async">`;
+        return stashTag(`<img src="${safeSrc}" alt="${safeAlt}" loading="lazy" decoding="async">`);
       }
 
       const safeHref = escapeHtml(u.href);
-      return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+      return `${stashTag(`<a href="${safeHref}" target="_blank" rel="noopener noreferrer">`)}${label}</a>`;
     } catch {
       return label;
     }
@@ -403,6 +420,9 @@ function inlineMarkdownToHtml(text) {
     // "$$", "$`" and "$'" inside the code span would be interpreted as special
     // replacement patterns and corrupt the output (e.g. `$&` in a regex).
     s = s.replace(`@@INLINECODE${i}@@`, () => codeSpans[i]);
+  }
+  for (let i = 0; i < htmlTags.length; i++) {
+    s = s.replace(`@@HTMLTAG${i}@@`, () => htmlTags[i]);
   }
   return s;
 }
@@ -1137,6 +1157,8 @@ async function getActivePageContext(retryCount = 0, format = null) {
       // "markdown" when the structure-preserving extractor produced the text.
       format: data?.format === "markdown" ? "markdown" : "text",
       imageUrls,
+      // The extractor cut the page text at its size limit (see content.js).
+      truncated: data?.truncated === true,
     };
   };
 
@@ -1415,6 +1437,10 @@ function toStoredMessage(message) {
     // this message, if any. Read back on the next submission to tell the
     // model explicitly when the page has changed - see handleSubmit() below.
     pageContext: message.pageContext || null,
+    // Translation replies are rendered as plain text (no Markdown) so line
+    // numbering/indentation survive. Without persisting the flag, a reloaded
+    // conversation would re-render them through the Markdown renderer.
+    ...(message.plain === true ? { plain: true } : {}),
   };
 }
 
@@ -2118,7 +2144,7 @@ if (!SpeechRecognitionCtor) {
   });
 }
 
-async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "", noWebResearch = false, includePageImages = false, forceWebResearch = false, translateMode = false, translateSource = null, translateSourceFormat = "text") {
+async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "", noWebResearch = false, includePageImages = false, forceWebResearch = false, translateMode = false, translateSource = null, translateSourceFormat = "text", translateSourceTruncated = false) {
   e?.preventDefault?.();
   const question = forcedQuestion !== null ? String(forcedQuestion).trim() : questionInput.value.trim();
   const attachmentText = attachmentContextText();
@@ -2307,6 +2333,8 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       // Exact selected text for the context-menu translation (page text is
       // used for the quick action when this is null).
       translateSource: translateMode === true && typeof translateSource === "string" ? translateSource : null,
+      // The selection was already cut by the extractor (see content.js).
+      translateSourceTruncated: translateMode === true && translateSourceTruncated === true,
     },
   };
   try {
@@ -2392,7 +2420,7 @@ async function processContextAction(pending) {
   const displayQuestion = isTranslation
     ? `${instruction}\n\n${preview}`
     : `${instruction}\n${t(lang, "contextAction_highlightedText_label")}:\n${preview}`;
-  await handleSubmit(null, prompt, false, displayQuestion, pending.action === "fact-check", pending.action === "fact-check" ? pending.text : "", pending.action !== "fact-check", false, false, isTranslation, isTranslation ? pending.text : null, pending.format === "markdown" ? "markdown" : "text");
+  await handleSubmit(null, prompt, false, displayQuestion, pending.action === "fact-check", pending.action === "fact-check" ? pending.text : "", pending.action !== "fact-check", false, false, isTranslation, isTranslation ? pending.text : null, pending.format === "markdown" ? "markdown" : "text", pending.truncated === true);
 }
 
 // The createdAt timestamp of the context-menu action most recently claimed by
@@ -2638,6 +2666,21 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local" || !changes[HISTORY_STORAGE_KEY]) return;
+  // Settings > Delete All History removes the key outright, so the change has
+  // no newValue (this panel's own saves and Settings > Restore always write an
+  // array). The displayed conversation would otherwise live on in memory and
+  // be written straight back by the next send, making "deleted" untrue. Reset
+  // to a blank New Topic exactly as the Clear button does, stopping an
+  // in-flight request first so its reply cannot re-save the conversation. The
+  // refresh below then empties the in-memory list and the history dropdown.
+  if (changes[HISTORY_STORAGE_KEY].newValue === undefined) {
+    if (isListening) {
+      userStoppedMic = true;
+      stopMic();
+    }
+    stopActiveRequest();
+    startNewTopic();
+  }
   // chrome.storage.onChanged fires for every write to this key, including
   // this same panel's own writes - not just Settings > Restore History.
   // handleSubmit() itself calls saveConversations() before the reply comes
@@ -2656,11 +2699,12 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   //    images in past bubbles, and - with side panels open in two windows -
   //    let one panel's save switch the other panel to a different
   //    conversation. The displayed conversation is only ever changed by
-  //    explicit navigation (the history dropdown) or this panel's own
-  //    submissions; if the displayed conversation was deleted or replaced in
-  //    Settings, it stays visible from memory and is re-persisted on its
-  //    next send. syncModel:false keeps the dropdown from following the
-  //    model of an incidental background sync.
+  //    explicit navigation (the history dropdown), this panel's own
+  //    submissions, or Settings > Delete All History (handled above); if the
+  //    displayed conversation is merely replaced by Settings > Restore, it
+  //    stays visible from memory and is re-persisted on its next send.
+  //    syncModel:false keeps the dropdown from following the model of an
+  //    incidental background sync.
   if (isStreaming) return;
   loadConversations({ activate: false, syncModel: false })
     .catch((err) => console.error("[AI Assistant] Unable to refresh restored history:", err));

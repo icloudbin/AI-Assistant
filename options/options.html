@@ -103,6 +103,25 @@
     line-height: 1.4;
     white-space: nowrap;
   }
+  /* Privacy filter / page screenshot toggles: the global `label` and `input`
+     rules above would stretch the checkbox to full width and stack it above
+     its wording. Keep both on one line; long wording wraps under itself. */
+  label.toggle {
+    display: grid;
+    grid-template-columns: 13px 1fr;
+    align-items: start;
+    gap: 8px;
+    margin: 8px 0 0;
+    cursor: pointer;
+    line-height: 1.4;
+  }
+  label.toggle input[type="checkbox"] {
+    width: 13px;
+    min-width: 13px;
+    height: 13px;
+    margin: 2px 0 0;
+    padding: 0;
+  }
   .web-research-section + .settings-divider {
     margin: 0;
   }
@@ -155,14 +174,12 @@
       </div>
       <div class="hint backup-hint" data-i18n="webResearch_hint">When the current webpage cannot answer a question, the extension automatically sends the question to Tavily to retrieve current web sources, then sends the evidence to the selected AI model. The Tavily key is stored locally.</div>
     </div>
-    <div class="settings-divider" aria-hidden="true"></div>
 
     <div class="history-management">
       <div class="history-management-title" data-i18n="piiFilter_label">Privacy filter</div>
       <label class="toggle"><input type="checkbox" id="piiFilterToggle" checked /> <span data-i18n="piiFilter_toggle">Redact personal and sensitive information before sending to AI</span></label>
       <div class="hint backup-hint" data-i18n="piiFilter_hint">Names (when clearly labelled), phone numbers, emails, credit cards, ID/SSN numbers, IP addresses, API keys, tokens and passwords are replaced with placeholders such as [EMAIL] locally, before the question, page text, attachments or history are sent to the AI provider or web research. Your local history keeps the originals. Pattern-based, so it is a safety net, not a guarantee.</div>
     </div>
-    <div class="settings-divider" aria-hidden="true"></div>
 
     <div class="history-management">
       <div class="history-management-title" data-i18n="pageVisuals_label">Page screenshot and images</div>

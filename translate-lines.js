@@ -42,7 +42,9 @@ const TAG_RE = /^\s*\[(\d+)\]\s?(.*)$/;
 
 export function prepareLineTranslation(source, maxChars = 120000) {
   let text = String(source ?? "").replace(/\r\n?/g, "\n");
+  let truncated = false;
   if (text.length > maxChars) {
+    truncated = true;
     text = text.slice(0, maxChars);
     const cut = text.lastIndexOf("\n");
     if (cut > 0) text = text.slice(0, cut);
@@ -65,7 +67,9 @@ export function prepareLineTranslation(source, maxChars = 120000) {
     .filter((l) => l !== null)
     .join("\n");
   if (!numbered) return null;
-  return { lines, numbered };
+  // truncated: the source was longer than maxChars and was cut here.
+  // keptChars: how much of the source is being translated.
+  return { lines, numbered, truncated, keptChars: text.length };
 }
 
 export class LineTranslator {

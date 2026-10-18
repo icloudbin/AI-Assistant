@@ -36,6 +36,20 @@ const GENERIC_GREETING_TARGETS = new Set([
   "colleagues", "students", "reader", "readers", "hiring", "recruiter", "service", "sales", "help",
 ]);
 const isGenericTarget = (word) => GENERIC_GREETING_TARGETS.has(String(word).toLowerCase());
+// Date of birth: only the date right after a birth label is redacted (the label
+// stays, so the model still sees "Date of birth: [DATE_OF_BIRTH]"). A bare date
+// is never touched - without the label it is usually an ordinary date.
+const DOB_MONTH = "(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
+const DOB_DATE = [
+  "\\d{4}[-/.]\\d{1,2}[-/.]\\d{1,2}", // 1985-03-12, 1985/03/12, 1985.03.12
+  "\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}", // 03/12/1985, 12-03-1985
+  `${DOB_MONTH}\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?,?\\s+\\d{4}`, // March 12, 1985
+  `\\d{1,2}(?:st|nd|rd|th)?\\s+(?:of\\s+)?${DOB_MONTH}\\.?,?\\s+\\d{4}`, // 12 March 1985
+  "\\d{4}\\s?年\\s?\\d{1,2}\\s?月(?:\\s?\\d{1,2}\\s?[日号])?", // 1985年3月12日
+].join("|");
+// \b only guards the English labels: the Chinese ones sit next to other Chinese
+// characters, where \b never matches.
+const DOB_LABEL = "(?:\\b(?:date[\\s_-]*of[\\s_-]*birth|birth[\\s_-]*date|birthday|d\\.?o\\.?b|born(?:\\s+on)?)\\b\\.?|出生日期|出生年月日|出生年月|出生时间|生日|出生于|出生)";
 // Common Chinese surnames: "<surname>先生/女士/老师..." is a name, "产品经理" is not.
 const CN_SURNAMES = "王李张刘陈杨黄赵吴周徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾萧田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤";
 
@@ -74,6 +88,13 @@ const RULES = [
     return d.length >= 13 && d.length <= 19 && luhnValid(d) ? "[CREDIT_CARD]" : m;
   }],
   [/((?:cvv|cvc|cid|security code|安全码)\s*[:=：#]?\s*)\d{3,4}\b/gi, "$1[CVV]"],
+  // Canadian Business Number with its GST/HST program account ("123456789 RT0001").
+  // Must run before the SIN rule so the 9-digit part is not handled on its own.
+  [/(?<![\w.])\d{9}\s?RT\d{4}(?!\w)/gi, "[BUSINESS_NUMBER]"],
+  // Canadian SIN: 9 digits, written solid or grouped 3-3-3 with the same space or
+  // hyphen between groups, and Luhn-checked so ordinary 9-digit numbers stay.
+  // (046 454 286 is a valid SIN, so the first digit is deliberately not limited.)
+  [/(?<![\w.])\d{3}([  -]?)\d{3}\1\d{3}(?!\w|\.\d)/g, (m) => (luhnValid(m.replace(/\D/g, "")) ? "[SIN]" : m)],
 
   // --- phone numbers (specific formats only, to avoid eating dates/ids) ---
   [/(?<![\d])(?:\+?86[ -]?)?1[3-9]\d[ -]?\d{4}[ -]?\d{4}(?![\d])/g, "[PHONE]"],
@@ -84,6 +105,14 @@ const RULES = [
   // --- network ---
   // "Version 1.2.3.4" / "v2.0.1.5" look like IPv4 addresses but are not.
   [/(?<![\d.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\d.])/g, (m, offset, whole) => (/(?:\bversion|\bver\.?|\bv|版本|\brelease|\bbuild)\s*:?\s*$/i.test(whole.slice(Math.max(0, offset - 14), offset)) ? m : "[IP_ADDRESS]")],
+
+  // --- personal details ---
+  // Runs before the name rules: "Name: John Smith Date of birth: ..." would
+  // otherwise have "Date" swallowed as part of the name, hiding the label.
+  [new RegExp(`(${DOB_LABEL}\\s*[:=：]?\\s*)(?:${DOB_DATE})(?!\\d)`, "gi"), "$1[DATE_OF_BIRTH]"],
+  // Canadian postal code (A1A 1A1). Real codes never start with D F I O Q U W Z
+  // and never use D F I O Q U in the other two letter slots.
+  [/(?<![A-Za-z0-9])[ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z][ -]?\d[ABCEGHJ-NPRSTV-Z]\d(?![A-Za-z0-9])/gi, "[POSTAL_CODE]"],
 
   // --- names (only with a clear cue) ---
   [new RegExp(`("?)(${NAME_SEQ})("?)(\\s*<\\[EMAIL\\]>)`, "g"), "$1[NAME]$3$4"],

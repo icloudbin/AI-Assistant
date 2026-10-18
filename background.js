@@ -107,6 +107,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
       action: "translate",
       text: useMarkdown ? md.text : info.selectionText.trim(),
       format: useMarkdown ? "markdown" : "text",
+      truncated: useMarkdown && md.truncated === true,
       tabId: tab.id,
       windowId: tab.windowId,
       url: String(tab.url || ""),
@@ -427,7 +428,7 @@ chrome.runtime.onConnect.addListener((port) => {
       // makes the background service worker resilient if extension local
       // storage was unexpectedly reset between browser sessions.
       await restoreSettingsFromBackup();
-      let { question, pageContext, includePageContext, history, images = [], modelId, factCheck, noWebResearch = false, forceWebResearch = false, translateMode = false, translateSource = null } = msg.payload;
+      let { question, pageContext, includePageContext, history, images = [], modelId, factCheck, noWebResearch = false, forceWebResearch = false, translateMode = false, translateSource = null, translateSourceTruncated = false } = msg.payload;
       const lang = await getStoredLanguage();
       // Privacy filter (on by default): strip names, phones, emails, cards,
       // keys, tokens, etc. from EVERYTHING that leaves the browser - question,
@@ -475,8 +476,11 @@ chrome.runtime.onConnect.addListener((port) => {
       if (normalizedImages.length !== (Array.isArray(images) ? images.length : 0)) throw new Error(t(lang, "bg_error_imagesEncoding"));
 
       // Per-model page budget (free tiers reject/rate-limit big requests).
-      // Translation is never truncated (a cut translation would silently miss
-      // the rest of the page); it relies on the clear error hint below.
+      // Translation is not cut to this per-model budget (it relies on the clear
+      // error hint below). It does have a hard size limit, though; when the
+      // source is cut by it - here or earlier in the content script - the user
+      // is told with a NOTICE (see the translation branch below), because a
+      // cut translation silently misses the rest of the text.
       const pageCap = model.maxPageChars || DEFAULT_MAX_PAGE_CHARS;
       if (translateMode !== true && requestPageContext && !requestPageContext.captureFailed && (requestPageContext.text || "").length > pageCap) {
         let cut = requestPageContext.text.slice(0, pageCap);
@@ -492,12 +496,17 @@ chrome.runtime.onConnect.addListener((port) => {
       // indentation, list markers) is kept in code; the model only translates
       // numbered lines. See translate-lines.js.
       if (translateMode === true) {
-        const source = typeof translateSource === "string" && translateSource.trim()
+        const usingSelection = typeof translateSource === "string" && !!translateSource.trim();
+        const source = usingSelection
           ? translateSource
           : (requestPageContext && !requestPageContext.captureFailed ? requestPageContext.text : "");
         const prepared = source ? prepareLineTranslation(source, MAX_PAGE_CONTEXT_CHARS) : null;
         if (prepared) {
           ctx.translateMode = "lines";
+          const cutUpstream = usingSelection ? translateSourceTruncated === true : requestPageContext?.truncated === true;
+          if (prepared.truncated || cutUpstream) {
+            port.postMessage({ type: "NOTICE", text: t(lang, "bg_notice_translateTruncated", { chars: String(prepared.keptChars) }), requestId });
+          }
           ctx.lineTranslator = new LineTranslator(prepared, (delta) => port.postMessage({ type: "CHUNK", delta, requestId }));
           if (typeof translateSource === "string" && translateSource.trim()) {
             effectiveQuestion = `${question}\n\n${prepared.numbered}`;

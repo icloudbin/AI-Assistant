@@ -169,6 +169,18 @@ function extractProtonMail() {
 // tokens: large enough for a full product page while still leaving room for
 // the user's question, instructions, and conversation history.
 const PAGE_CONTEXT_CHAR_LIMIT = 120000;
+
+// Set whenever extracted text had to be cut at PAGE_CONTEXT_CHAR_LIMIT during the
+// current extraction. It travels with the result as `truncated: true` so that
+// the translation path can tell the user the rest of the page was not translated
+// (a cut that nobody hears about silently drops the end of the page).
+let pageTextTruncated = false;
+
+function capPageText(text) {
+  if (text.length <= PAGE_CONTEXT_CHAR_LIMIT) return text;
+  pageTextTruncated = true;
+  return text.slice(0, PAGE_CONTEXT_CHAR_LIMIT);
+}
 const PAGE_IMAGE_URL_LIMIT = 8;
 const PAGE_IMAGE_MIN_DIMENSION = 120;
 const PAGE_IMAGE_MIN_AREA = 12000;
@@ -209,7 +221,9 @@ function extractPageImageUrls() {
 }
 
 function withPageImages(result) {
-  return result ? { ...result, imageUrls: extractPageImageUrls() } : null;
+  return result
+    ? { ...result, imageUrls: extractPageImageUrls(), ...(pageTextTruncated ? { truncated: true } : {}) }
+    : null;
 }
 
 // A result only counts as a usable "article" if it clears this much text -
@@ -231,24 +245,114 @@ const READER_MODE_MAX_LINK_DENSITY = 0.5;
 const READER_MODE_MAX_CANDIDATES = 60;
 
 // Tag names that are never the article itself and are always stripped out
-// of a candidate before it's scored or its text is read.
+// of a candidate before it's scored or its text is read. <form> is NOT in this
+// list on purpose: ASP.NET WebForms, JSF and Struts pages wrap the whole page
+// (header, article, footer) in a single <form>, so treating every form as
+// chrome emptied those pages. Forms are classified in readerModeClassifyNoise().
 const READER_MODE_NOISE_TAGS = new Set([
   'nav', 'header', 'footer', 'aside', 'script', 'style', 'noscript',
-  'iframe', 'form', 'button', 'svg',
+  'iframe', 'button', 'svg',
 ]);
 
-// id/class text matching this marks an element as noise even when its tag
-// name alone wouldn't (e.g. a <div class="cookie-banner">). Checked against
-// id and className together so it doesn't matter which attribute a given
-// site happens to use.
+// Cheap pre-filter: an id/class that could be noise contains one of these
+// substrings. Only elements that pass it are tokenised and checked against the
+// word lists below, so the common case costs a single regex test.
 const READER_MODE_NOISE_PATTERN =
   /nav|menu|sidebar|footer|header|comment|cookie|consent|banner|subscribe|newsletter|popup|modal|overlay|social|share|related|widget|breadcrumb|pagination|pager|advert|sponsor|promo|masthead|skip-link/i;
+
+// id/class are split into whole words (camelCase, '-', '_' and digits are word
+// boundaries) and compared against these sets. The old substring match flagged
+// "shared-content", "unrelated", "commentary" or "headline-news" as chrome.
+//
+// STRONG words mark chrome whatever it contains.
+const READER_MODE_STRONG_NOISE_WORDS = new Set([
+  'comment', 'comments', 'commentlist', 'cookie', 'cookies', 'consent',
+  'banner', 'banners', 'subscribe', 'newsletter', 'newsletters', 'popup',
+  'popups', 'modal', 'modals', 'overlay', 'overlays', 'social', 'share',
+  'shares', 'sharing', 'related', 'widget', 'widgets', 'breadcrumb',
+  'breadcrumbs', 'pagination', 'pager', 'advert', 'adverts', 'advertisement',
+  'advertisements', 'sponsor', 'sponsors', 'sponsored', 'promo', 'promos',
+  'promoted', 'promotion', 'promotions', 'masthead',
+]);
+// LAYOUT words describe where a block sits ("has-sidebar", "post-header-wrapper",
+// "content-with-sidebar") and are routinely put on wrappers around the real
+// content. Such an element is chrome unless it holds most of the page's text.
+const READER_MODE_LAYOUT_NOISE_WORDS = new Set([
+  'nav', 'navbar', 'navigation', 'mainnav', 'topnav', 'sidenav', 'subnav',
+  'sitenav', 'menu', 'menus', 'sidebar', 'sidebars', 'header', 'headers',
+  'footer', 'footers',
+]);
+const READER_MODE_SKIP_LINK_PATTERN = /skip[-_]?link/i;
+
+// A layout-named element or a <form> counts as the page's content, not chrome,
+// when its non-link text is at least this share of the whole page's.
+const READER_MODE_MAIN_PROSE_SHARE = 0.5;
+
+// Classification results and the page-wide text length are computed lazily and
+// cached for one extraction run (reset at the start of extractPageContent()).
+let readerModeNoiseCache = new WeakMap();
+let readerModePageProse = -1;
+
+function resetReaderModeCache() {
+  readerModeNoiseCache = new WeakMap();
+  readerModePageProse = -1;
+}
+
+// Length of the text in el's subtree that is not inside a link. Scripts,
+// styles and other non-rendered tags are left out. Deliberately does not call
+// readerModeIsNoise(): it is what readerModeIsNoise() uses to decide.
+function readerModeProseLength(el) {
+  let length = 0;
+  const walk = (node, inLink, depth) => {
+    for (let c = node.firstChild; c; c = c.nextSibling) {
+      if (c.nodeType === 3) {
+        if (!inLink) length += c.nodeValue.trim().length;
+      } else if (c.nodeType === 1 && depth < EXTRACT_MAX_DEPTH && !VISIBLE_TEXT_SKIP_TAGS.has(c.localName)) {
+        walk(c, inLink || c.localName === 'a', depth + 1);
+      }
+    }
+  };
+  walk(el, false, 0);
+  return length;
+}
+
+function readerModeHoldsMostOfPage(el) {
+  if (readerModePageProse < 0) {
+    readerModePageProse = document.body ? readerModeProseLength(document.body) : 0;
+  }
+  const own = readerModeProseLength(el);
+  return own >= READER_MODE_MIN_TEXT_LENGTH && own >= readerModePageProse * READER_MODE_MAIN_PROSE_SHARE;
+}
+
+function readerModeNameWords(signature) {
+  return signature.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z]+/).filter(Boolean);
+}
+
+function readerModeClassifyNoise(el) {
+  if (el.localName === 'form') {
+    // A site-search box is chrome; any other form is chrome unless it is the
+    // page (a form-wrapped page, or a form that is the main content).
+    if (el.getAttribute('role') === 'search') return true;
+    return !readerModeHoldsMostOfPage(el);
+  }
+  const signature = `${el.id || ''} ${typeof el.className === 'string' ? el.className : ''}`;
+  if (!READER_MODE_NOISE_PATTERN.test(signature)) return false;
+  if (READER_MODE_SKIP_LINK_PATTERN.test(signature)) return true;
+  const words = readerModeNameWords(signature);
+  if (words.some((w) => READER_MODE_STRONG_NOISE_WORDS.has(w))) return true;
+  if (words.some((w) => READER_MODE_LAYOUT_NOISE_WORDS.has(w))) return !readerModeHoldsMostOfPage(el);
+  return false;
+}
 
 function readerModeIsNoise(el) {
   if (!el.tagName) return false;
   if (READER_MODE_NOISE_TAGS.has(el.tagName.toLowerCase())) return true;
-  const signature = `${el.id || ''} ${el.className || ''}`;
-  return READER_MODE_NOISE_PATTERN.test(signature);
+  let noise = readerModeNoiseCache.get(el);
+  if (noise === undefined) {
+    noise = readerModeClassifyNoise(el);
+    readerModeNoiseCache.set(el, noise);
+  }
+  return noise;
 }
 
 // Removes noise descendants from root in place. root itself is assumed to
@@ -301,7 +405,7 @@ const VISIBLE_TEXT_SKIP_TAGS = new Set([
 // whitespace is collapsed unless the element is preformatted. Noise elements
 // (see readerModeIsNoise) are skipped exactly as readerModeStripNoise() removed
 // them. Nothing is cloned, inserted, or modified.
-function readVisibleText(root) {
+function readVisibleText(root, { filterNoise = true } = {}) {
   const items = []; // text tokens ({ text, pre }) and required-line-break counts (numbers)
   const pushBreak = (n) => {
     const last = items.length - 1;
@@ -338,7 +442,7 @@ function readVisibleText(root) {
         if (text) items.push({ text, pre: preserve });
       } else if (c.nodeType === 1) {
         const tag = c.localName;
-        if (VISIBLE_TEXT_SKIP_TAGS.has(tag) || readerModeIsNoise(c)) continue;
+        if (VISIBLE_TEXT_SKIP_TAGS.has(tag) || (filterNoise && readerModeIsNoise(c))) continue;
         // The body of a collapsed <details> is not rendered; only <summary> is.
         if (closedDetails && tag !== 'summary') continue;
         if (tag === 'br') {
@@ -539,7 +643,7 @@ function extractRedditArticle() {
     source: 'reddit',
     title: title || document.title,
     url: location.href,
-    text: parts.join('\n\n').slice(0, PAGE_CONTEXT_CHAR_LIMIT),
+    text: capPageText(parts.join('\n\n')),
   };
 }
 
@@ -630,7 +734,7 @@ function extractSynologyCommunity() {
     source: 'synology-community',
     title: title || document.title,
     url: location.href,
-    text: parts.join('\n\n').slice(0, PAGE_CONTEXT_CHAR_LIMIT),
+    text: capPageText(parts.join('\n\n')),
   };
 }
 
@@ -678,7 +782,7 @@ function extractReaderModeArticle() {
     source: 'reader-mode',
     title: document.title,
     url: location.href,
-    text: text.slice(0, PAGE_CONTEXT_CHAR_LIMIT),
+    text: capPageText(text),
   };
 }
 
@@ -741,7 +845,7 @@ function extractAmazonProductPage() {
     source: 'amazon-product',
     title: document.title,
     url: location.href,
-    text: text.slice(0, PAGE_CONTEXT_CHAR_LIMIT),
+    text: capPageText(text),
   };
 }
 
@@ -757,7 +861,7 @@ function extractAmazonProductPage() {
 // ---------------------------------------------------------------------------
 const MD_SKIP_TAGS = new Set([
   'script', 'style', 'noscript', 'template', 'svg', 'canvas', 'iframe', 'object',
-  'embed', 'video', 'audio', 'button', 'form', 'select', 'input', 'textarea',
+  'embed', 'video', 'audio', 'button', 'select', 'input', 'textarea',
   'nav', 'aside', 'footer', 'head', 'title', 'meta', 'link',
 ]);
 const MD_NOISE_PATTERN = /cookie|consent|banner|newsletter|popup|modal|overlay|advert|sponsor|skip-link/i;
@@ -776,6 +880,9 @@ function mdDisplay(el) {
 
 function mdSkip(el) {
   if (MD_SKIP_TAGS.has(el.localName)) return true;
+  // <form> is skipped like other chrome, except a form that holds most of the
+  // page's text (form-wrapped pages) - same rule as readerModeIsNoise().
+  if (el.localName === 'form' && readerModeIsNoise(el)) return true;
   if (el.hasAttribute('hidden')) return true;
   if (mdDisplay(el) === 'none') return true;
   const sig = `${el.id || ''} ${typeof el.className === 'string' ? el.className : ''}`;
@@ -926,6 +1033,7 @@ function mdBlocksOf(root, depth = 0) {
 function mdCut(text) {
   let out = text.replace(new RegExp(MD_LIST_MARK, 'g'), '').replace(/\n{3,}/g, '\n\n').trim();
   if (out.length > PAGE_CONTEXT_CHAR_LIMIT) {
+    pageTextTruncated = true;
     out = out.slice(0, PAGE_CONTEXT_CHAR_LIMIT);
     const cut = out.lastIndexOf('\n');
     if (cut > 0) out = out.slice(0, cut);
@@ -936,6 +1044,7 @@ function mdCut(text) {
 function extractPageMarkdownContent() {
   const roots = [findReaderModeBestEl(), document.body].filter(Boolean);
   for (let i = 0; i < roots.length; i++) {
+    pageTextTruncated = false; // only the root that is actually returned counts
     const text = mdCut(mdBlocksOf(roots[i]).join('\n\n'));
     if (text && (text.length >= READER_MODE_MIN_TEXT_LENGTH || i === roots.length - 1)) {
       return { source: 'markdown-page', format: 'markdown', title: document.title, url: location.href, text };
@@ -946,6 +1055,7 @@ function extractPageMarkdownContent() {
 
 // The current selection as Markdown (null when nothing is selected).
 function extractSelectionMarkdown() {
+  pageTextTruncated = false;
   const sel = getSelection();
   if (!sel || !sel.rangeCount || sel.isCollapsed) return null;
   const holder = document.createElement('div');
@@ -953,10 +1063,12 @@ function extractSelectionMarkdown() {
   const text = mdCut(mdBlocksOf(holder).join('\n\n'));
   if (!text) return null;
   const structured = /^(#{1,6} |[-*] |\d+\. |> |\||```)/m.test(text) || /\*\*|\]\(|`/.test(text);
-  return { text, structured };
+  return { text, structured, truncated: pageTextTruncated };
 }
 
 function extractPageContent(opts) {
+  resetReaderModeCache();
+  pageTextTruncated = false;
   const mailPlus = extractSynologyMailPlus();
   if (mailPlus) return withPageImages(mailPlus);
 
@@ -989,7 +1101,14 @@ function extractPageContent(opts) {
 
   // Walk the live tree read-only (see readVisibleText): the page is never
   // cloned, modified, or re-laid-out.
-  const text = readVisibleText(document.body).replace(/\n{3,}/g, '\n\n').trim();
+  let text = readVisibleText(document.body).replace(/\n{3,}/g, '\n\n').trim();
+  // Noise filtering must never be the reason a page comes back empty: when it
+  // left (almost) nothing, read the page again without it. Menus and footers
+  // may come along, but the content is not lost.
+  if (text.length < READER_MODE_MIN_TEXT_LENGTH) {
+    const unfiltered = readVisibleText(document.body, { filterNoise: false }).replace(/\n{3,}/g, '\n\n').trim();
+    if (unfiltered.length > text.length) text = unfiltered;
+  }
   // A page can be meaningful even when it has no extractable text, such as
   // an image gallery or a scanned document. Keep that page available to the
   // quick actions when it contains eligible images, so they can still be
@@ -1010,7 +1129,7 @@ function extractPageContent(opts) {
     source: 'generic-page-cleaned',
     title: document.title,
     url: location.href,
-    text: text.slice(0, PAGE_CONTEXT_CHAR_LIMIT),
+    text: capPageText(text),
   });
 }
 

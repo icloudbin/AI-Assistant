@@ -255,6 +255,7 @@ const translations = {
 
     // ---- Background service worker (errors surfaced to the user) ----
     bg_error_imagesEncoding: `One or more attached images could not be encoded for the AI request`,
+    bg_notice_translateTruncated: `The text is longer than the translation limit, so only the first {chars} characters were translated. Select the remaining text and translate it separately.`,
     bg_error_apiKeyMissing_template: `{provider} API Key is not configured: open the Settings page to configure and save it`,
     bg_error_unknownModel_template: `Unknown model selection: {model}`,
     bg_error_unsupportedProvider_template: `Unsupported model provider: {provider}`,
@@ -405,7 +406,7 @@ const translations = {
     imageRemote_load: `点击加载图片`,
     imageRemote_failed: `图片无法加载`,
     pageVisuals_label: `页面截图和图片`,
-    pageVisuals_toggle: `快速操作时一并发送当前页面的截图和图片`,
+    pageVisuals_toggle: `使用快速操作时，除页面文字外，同时发送当前页面可见区域的截图和部分图片`,
     pageVisuals_hint: `默认关闭。开启后,总结、翻译、解释、要点和事实核查会把页面可见区域的截图以及少量页面图片一并发送给所选 AI 服务商。隐私过滤无法处理图片,页面上可见的任何内容(包括姓名、邮箱和账户信息)都会原样发送。你自己添加的图片始终会发送。`,
     copyMessage_title: `复制消息`,
     copyMessage_copiedFeedback: `✓ 已复制`,
@@ -460,6 +461,7 @@ const translations = {
     micPermission_genericError_template: `无法访问麦克风：{detail}`,
 
     bg_error_imagesEncoding: `一个或多个附加图片无法编码以用于 AI 请求`,
+    bg_notice_translateTruncated: `文本超过翻译长度上限,只翻译了前 {chars} 个字符。请选中其余部分单独翻译。`,
     bg_error_apiKeyMissing_template: `尚未配置 {provider} API 密钥：请打开设置页面进行配置并保存`,
     bg_error_unknownModel_template: `未知的模型选择：{model}`,
     bg_error_unsupportedProvider_template: `不支持的模型提供方：{provider}`,
@@ -607,7 +609,7 @@ const translations = {
     imageRemote_load: `點擊載入圖片`,
     imageRemote_failed: `圖片無法載入`,
     pageVisuals_label: `頁面截圖和圖片`,
-    pageVisuals_toggle: `快速操作時一併傳送目前頁面的截圖和圖片`,
+    pageVisuals_toggle: `使用快速操作時，除頁面文字外，同時傳送目前頁面可見區域的截圖和部分圖片`,
     pageVisuals_hint: `預設關閉。開啟後,摘要、翻譯、解釋、重點和事實查核會把頁面可見區域的截圖以及少量頁面圖片一併傳送給所選 AI 服務商。隱私過濾無法處理圖片,頁面上可見的任何內容(包括姓名、電子郵件和帳戶資訊)都會原樣傳送。你自己附加的圖片一律會傳送。`,
     copyMessage_title: `複製訊息`,
     copyMessage_copiedFeedback: `✓ 已複製`,
@@ -658,6 +660,7 @@ const translations = {
     micPermission_genericError_template: `無法存取麥克風：{detail}`,
 
     bg_error_imagesEncoding: `一個或多個附加圖片無法編碼以用於 AI 請求`,
+    bg_notice_translateTruncated: `文字超過翻譯長度上限,只翻譯了前 {chars} 個字元。請選取其餘部分另行翻譯。`,
     bg_error_apiKeyMissing_template: `尚未設定 {provider} API 金鑰：請開啟設定頁面進行設定並儲存`,
     bg_error_unknownModel_template: `未知的模型選擇：{model}`,
     bg_error_unsupportedProvider_template: `不支援的模型提供方：{provider}`,
@@ -856,6 +859,7 @@ const translations = {
     micPermission_genericError_template: `Impossible d'accéder au microphone : {detail}`,
 
     bg_error_imagesEncoding: `Une ou plusieurs images jointes n'ont pas pu être encodées pour la requête IA`,
+    bg_notice_translateTruncated: `Le texte dépasse la limite de traduction : seuls les {chars} premiers caractères ont été traduits. Sélectionnez le reste du texte et traduisez-le séparément.`,
     bg_error_apiKeyMissing_template: `La clé API {provider} n'est pas configurée : ouvrez la page des paramètres pour la configurer et l'enregistrer`,
     bg_error_unknownModel_template: `Sélection de modèle inconnue : {model}`,
     bg_error_unsupportedProvider_template: `Fournisseur de modèle non pris en charge : {provider}`,
@@ -1054,6 +1058,7 @@ const translations = {
     micPermission_genericError_template: `マイクにアクセスできません: {detail}`,
 
     bg_error_imagesEncoding: `1つ以上の添付画像をAIリクエスト用にエンコードできませんでした`,
+    bg_notice_translateTruncated: `テキストが翻訳の上限を超えているため、最初の {chars} 文字のみを翻訳しました。残りの部分は選択して別途翻訳してください。`,
     bg_error_apiKeyMissing_template: `{provider} APIキーが設定されていません。設定ページを開いて設定・保存してください`,
     bg_error_unknownModel_template: `不明なモデルが選択されました: {model}`,
     bg_error_unsupportedProvider_template: `サポートされていないモデルプロバイダーです: {provider}`,
@@ -1252,6 +1257,7 @@ const translations = {
     micPermission_genericError_template: `No se pudo acceder al micrófono: {detail}`,
 
     bg_error_imagesEncoding: `No se pudieron codificar una o más imágenes adjuntas para la solicitud de IA`,
+    bg_notice_translateTruncated: `El texto supera el límite de traducción, por lo que solo se tradujeron los primeros {chars} caracteres. Selecciona el resto del texto y tradúcelo por separado.`,
     bg_error_apiKeyMissing_template: `La clave de API de {provider} no está configurada: abre la página de configuración para configurarla y guardarla`,
     bg_error_unknownModel_template: `Selección de modelo desconocida: {model}`,
     bg_error_unsupportedProvider_template: `Proveedor de modelo no admitido: {provider}`,

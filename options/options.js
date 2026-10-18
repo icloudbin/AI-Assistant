@@ -541,6 +541,14 @@ function normalizeRestoredConversation(conversation, index) {
           displayContent: String(m.displayContent || m.content || ""),
           modelLabel: String(m.modelLabel || ""),
           modelId: String(m.modelId || ""),
+          // Same shape the side panel writes (see toStoredMessage()): the
+          // page title/url the message was sent with, and the plain-text
+          // render flag for translation replies.
+          pageContext:
+            m.pageContext && typeof m.pageContext === "object" && typeof m.pageContext.url === "string"
+              ? { title: String(m.pageContext.title || ""), url: m.pageContext.url }
+              : null,
+          ...(m.plain === true ? { plain: true } : {}),
         }))
     : [];
 
