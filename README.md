@@ -1,3 +1,55 @@
+# Packaging: required modules tracked, import check, .gitignore (v1.10.87)
+
+- **Issue.** `background.js` imports `pii-filter.js`, `translate-lines.js` and `url-safety.js` (and, through `settings-storage.js`, `settings-crypto.js`). If those were untracked in git, any package built from git (`git archive`, CI, a clean clone) would omit them and the service worker would fail to load. The source ZIP supplied for this build contains all four, but it has no `.git` folder, so the repository state itself could not be inspected here: run `git add` on them in your checkout (`git add pii-filter.js settings-crypto.js translate-lines.js url-safety.js`).
+- **Added.** `scripts/check-package.mjs` (follows all imports from the manifest entry points, checks the manifest's icons and pages exist, and in a git checkout fails on any required file that is untracked or ignored) and `.gitignore` (zip/crx/pem/dist/node_modules/env files). The validation checklist below was out of date and now lists every runtime file.
+- **Verified.** Passes on this tree (22 required files). In a throwaway git repo with the four modules left unstaged it exits 1 and names each one; after staging them it passes.
+- No extension code changed. Build bumped to 1.10.87.
+
+# Fix: initialization and port lifecycle races (v1.10.86)
+
+- **Bugs.** (1) The `CONTEXT_ACTION` listener was live before `init()` finished, so an early context-menu action could submit and then have `init()` run `startNewTopic()`/`connectPort()` over it, wiping the new conversation or bubble. (2) `connectPort()` always created a new port, so `init()` after an earlier `ensurePort()` overwrote the global and left the first port alive. (3) A stale port's `onDisconnect` unconditionally set `port = null` and showed "connection lost", even when a newer port was current and streaming.
+- **Fix (`sidepanel/sidepanel.js`).**
+  - `init()` is now a named function run once as `initPromise`. The `CONTEXT_ACTION` handler waits on `initPromise`; `init()` still consumes the stored action itself, and the existing claim logic (`claimedContextActionAt`) de-duplicates the two paths.
+  - `handleSubmit()` returns early until `initCoreDone` (blank topic created and port opened). The composer (input, send, quick actions, model, upload, mic) is disabled at load and re-enabled at that point, unless a request is already streaming.
+  - `connectPort()` is idempotent (`if (port) return port`); `init()` calls `ensurePort()`. `postToBackground()` disconnects a dead port before reconnecting.
+  - Each port's `onMessage`/`onDisconnect` closure captures `thisPort` and ignores events when `port !== thisPort`.
+  - If a late `init()` step throws, the composer is not left locked.
+- **Verified** with the real port functions under a stubbed `chrome.runtime`: repeated connect returns one port; a dead-port retry opens exactly one new port; messages from the old port are dropped; a stale disconnect changes nothing; the current port's disconnect still recovers the UI. Not tested in a real browser (context menu clicked during panel startup).
+- Build bumped to 1.10.86.
+
+# Fix: two side panels could silently delete each other's conversations (v1.10.85)
+
+- **Bug.** `saveConversations()` wrote the panel's whole in-memory list. A panel that is streaming ignores `chrome.storage.onChanged`, so it never saw the other panel's saves; when its reply finished it overwrote storage with a stale array and the other panel's conversation vanished (last writer wins).
+- **Fix (`sidepanel/sidepanel.js`).**
+  - Before writing, a save re-reads `conversationHistory` and merges it with the in-memory list by conversation id (`mergeConversationLists()`). The conversation this panel is showing is authoritative; for any other id the copy with the newest `updatedAt` wins (ties keep the local one); conversations that exist only in storage are kept.
+  - The merged list is then sorted, trimmed to `MAX_SAVED_CONVERSATIONS` and written; the quota-drop retry now halves the merged list. The panel's in-memory list is replaced by what was written, so it also picks up the other panel's conversations.
+  - Saves are serialized through a promise queue (`saveQueue`), so two saves from one panel cannot interleave. A failed save still rejects to its caller but does not block later saves.
+- **Verified** with the real functions under a stubbed `chrome.storage` (delayed get/set): a stale panel's save keeps the other panel's conversation, concurrent saves from two panels keep both with their newest content, a quota failure retries on the merged list and keeps the current conversation, and the queue keeps working after a failed save. Not tested with two real browser windows.
+- Build bumped to 1.10.85.
+
+# Fix: page context could come from the wrong browser window (v1.10.84)
+
+- **Bug.** `getCurrentActiveTab()` in `sidepanel.js` returned the active tab of the globally *focused* normal window, not the window that owns the side panel. With panels open in windows A and B, focusing B and submitting from A made A read, display and send B's page, and capture B's screenshot (`captureVisibleTab` was called with B's window id). That is both a correctness and a privacy problem.
+- **Fix (`sidepanel/sidepanel.js`).**
+  - The panel resolves its own window once with `chrome.windows.getCurrent()` and keeps it in `panelWindowId` (`getPanelWindowId()`). A failed lookup is not cached, so the next call retries.
+  - `getCurrentActiveTab()` now runs `chrome.tabs.query({ active: true, windowId: panelWindowId })`. That one tab is used for text extraction, the "page changed" re-checks, the viewport screenshot (its `windowId` is the panel's) and the `pageUrl` passed with page images and click-to-load images.
+  - If the window is known but the query fails or finds no tab, the result is `null` (no page context). It never falls back to another window.
+  - Only when the window lookup itself fails does it use the previous focused-window logic (`getFocusedWindowActiveTab()`).
+  - `tabs.onActivated`, `tabs.onUpdated` and `windows.onFocusChanged` ignore events from other windows (`isOwnWindowEvent()`), so a tab switch or focus change elsewhere no longer refreshes this panel. When the window is unknown they behave as before.
+  - `consumePendingContextAction()` reuses `getPanelWindowId()` instead of its own `getCurrent()` call (same behaviour).
+- Build bumped to 1.10.84.
+
+# ZIP / text attachments: no silent skips, ignore list, GBK (v1.10.83)
+
+- **The entry limit counts text files only.** `MAX_ZIP_ENTRIES` (80) was checked against every entry of the ZIP, directories and images included, and rejected the whole archive above it. It now limits the text files that are actually read; directories, images and other non-text entries do not count, and text files past the limit are left out and reported instead of failing the attachment. The unused `sp_zip_error_tooManyFiles_template` string was removed.
+- **Ignore list.** Text files under `node_modules`, `bower_components`, `.git`, `.svn`, `.hg`, `.idea`, `__pycache__`, `.venv`, `venv`, `.next`, `.nuxt` and `__MACOSX`, minified bundles (`*.min.js`, `.mjs`, `.cjs`, `.css`) and lock files (`package-lock.json`, `pnpm-lock.yaml`, `*.lock`, `go.sum`, ...) are not read. The list is `ZIP_IGNORED_DIRS` and `zipIgnoreReason()` in `sidepanel.js`; matching is by whole path segment, so `node_modules.txt` or `.gitignore` are not affected.
+- **Nothing is skipped or cut silently any more.** `extractZipText()` returns `{ text, report }`. Text files that were too large (over 720 KB uncompressed, `MAX_ZIP_ENTRY_BYTES`), not read because the 80-file or 180,000-character limit was reached, cut at that limit, unreadable (unsupported compression, damaged entry) or ignored are counted per category. The attachment chip gets a second line ("Not fully included — Truncated 1 · Over limit 14 · Ignored 120 (node_modules/, .git/)"); its tooltip lists the file names and the limits. An English `===== ZIP NOTE =====` block at the start of the attachment text tells the model that the archive is partial; it sits at the start so the 4,000-character preview that history keeps still contains it. A plain text file cut at 180,000 characters gets the same chip line and a `[NOTE: ...]` line. If nothing could be read, the error says why ("... — Ignored 2 (node_modules/)") instead of only "no text files". Images and other non-text entries are never listed as skipped.
+- **The ZIP loop no longer stops at the character limit.** It keeps walking the directory (cheap header parsing; at most 80 entries are ever inflated) so the left-out files can be counted. A ZIP with 60,000 entries is processed in about 0.2 s.
+- **GBK / GB18030 text.** Attachments were decoded with `file.text()` (UTF-8 only), so GBK files (Windows Notepad, Excel's CSV export) came out as mojibake. `decodeTextBytes()` decodes as UTF-8 first; if the result contains U+FFFD and the bytes are not valid UTF-8, it retries with `TextDecoder("gb18030")` in fatal mode and uses that result only if the whole file decodes. Valid UTF-8 that merely contains a U+FFFD character is left alone. It is used for plain text attachments and for the contents of ZIP entries (entry names are unchanged). This is a heuristic: a UTF-8 file of only a few characters that also contains invalid bytes can be misread.
+- New `attachment_note_*` strings in all six languages. The chip note is rebuilt in the current language when the interface language changes. `.attachment-note` / `.attachment.has-note` styles added to `sidepanel.css`.
+- Behaviour change: ZIPs with more than 80 entries used to be rejected; they are now read, and only text files beyond the 80th are left out (and reported).
+- Build bumped to 1.10.83.
+
 # Privacy filter: Canadian SIN, business number, date of birth, postal code (v1.10.82)
 
 - **Gap.** Testing showed these were sent unredacted: Canadian SIN (`046 454 286`, `046454286`), CRA business number (`123456789 RT0001`), a date after "Date of birth:", and Canadian postal codes (`M5V 3L9`). New rules in `pii-filter.js`:
@@ -275,10 +327,14 @@ That's it — no removal, no "Load unpacked" again, settings intact. (If you ins
 **Key management:** the matching RSA private key must never be committed to or shipped inside the extension folder. It is kept outside the project as `ai-assistant-private-key.pem`; it is required to build signed CRX updates or to preserve this same ID when publishing to the Chrome Web Store, so keep a backup of it. If it is ever lost, a new key can be pinned the same way — but that changes the ID and resets storage again.
 
 # Validation checklist (file names must match exactly, UTF-8, no .txt suffix)
-manifest.json / models.js / background.js / content.js / storage-keys.js /
-options/options.html / options/options.js /
-sidepanel/sidepanel.html / sidepanel/sidepanel.css / sidepanel/sidepanel.js /
-sidepanel/mic-permission.html / sidepanel/mic-permission.css / sidepanel/mic-permission.js
+Every file below is imported or loaded at runtime and must be present in any package and tracked by git:
+
+- Root: `manifest.json`, `background.js`, `content.js`, `models.js`, `storage-keys.js`, `i18n.js`, `settings-storage.js`, `settings-crypto.js`, `pii-filter.js`, `translate-lines.js`, `url-safety.js`
+- `options/`: `options.html`, `options.js`, `options.css`
+- `sidepanel/`: `sidepanel.html`, `sidepanel.css`, `sidepanel.js`, `mic-permission.html`, `mic-permission.css`, `mic-permission.js`
+- `icons/`: `icon16.png`, `icon48.png`, `icon128.png`
+
+**Run before every build or commit:** `node scripts/check-package.mjs`. It follows every static `import` from the manifest entry points, fails if a required file is missing, and (in a git checkout) fails if one is untracked or git-ignored. `background.js` imports `pii-filter.js`, `settings-crypto.js` (via settings-storage), `translate-lines.js` and `url-safety.js`; a package built from git without them makes the service worker fail to load. `.gitignore` keeps build artifacts (`*.zip`, `*.crx`, `*.pem`, `dist/`) out of version control.
 
 ## File Uploads (v1.0.6)
 

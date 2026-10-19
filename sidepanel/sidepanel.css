@@ -438,6 +438,13 @@ textarea#questionInput:focus { outline: none; border-color: var(--accent); }
 }
 .attachment-state { color: var(--muted); }
 .attachment-state.error { color: var(--danger); }
+.attachment.has-note { flex-wrap: wrap; }
+.attachment-note {
+  flex: 1 0 100%;
+  color: var(--muted);
+  line-height: 1.35;
+  cursor: help;
+}
 .remove-attachment {
   border: none;
   background: transparent;

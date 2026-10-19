@@ -668,7 +668,35 @@ function candidateFactClaims(text, title = "") {
   return claims;
 }
 
+const TAVILY_TIMEOUT_MS = 15000;
+
 async function tavilySearch(query, apiKey, signal, topic = "news", maxResults = FACT_CHECK_RESULTS_PER_CLAIM) {
+  // Bound the request so a hung Tavily call cannot stall the whole question.
+  // A user STOP (the caller's signal) still surfaces as an AbortError; a
+  // timeout is reported as an ordinary error instead, so it is not mistaken
+  // for a deliberate cancel.
+  const timeoutController = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; timeoutController.abort(); }, TAVILY_TIMEOUT_MS);
+  const onCallerAbort = () => timeoutController.abort();
+  if (signal) {
+    if (signal.aborted) timeoutController.abort();
+    else signal.addEventListener("abort", onCallerAbort, { once: true });
+  }
+  try {
+    return await tavilySearchRequest(query, apiKey, timeoutController.signal, topic, maxResults);
+  } catch (err) {
+    if (timedOut && !signal?.aborted) {
+      throw new Error(`Tavily request timed out after ${TAVILY_TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onCallerAbort);
+  }
+}
+
+async function tavilySearchRequest(query, apiKey, signal, topic, maxResults) {
   const resp = await fetch("https://api.tavily.com/search", {
     method: "POST",
     headers: {
@@ -829,47 +857,62 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
     throw new Error(t(ctx.lang, 'bg_error_tavilyKeyMissing'));
   }
 
-  // Ordinary questions use the user's wording (without attachment text). A
-  // forced Explain action has a fixed instruction, so it instead searches the
-  // current page's title and excerpt for relevant supporting sources.
-  const searchQuery = force ? pageResearchQuery(questionText, pageContext) : questionText;
-  const result = await tavilySearch(searchQuery, apiKey, ctx.signal, 'general', ONLINE_RESEARCH_MAX_RESULTS);
-  const byUrl = new Map();
-  for (const item of result?.results || []) {
-    const url = String(item.url || '').trim();
-    const title = cleanResearchText(item.title, 220);
-    const content = cleanResearchText(item.content, 1400);
-    if (!url || (!title && !content)) continue;
-    const prior = byUrl.get(url);
-    if (!prior || Number(item.score || 0) > prior.score) {
-      byUrl.set(url, {
-        title,
-        url,
-        content,
-        published: item.published_date || item.publishedDate || '',
-        score: Number(item.score || 0),
-      });
+  // Automatic (implicit) research is an optional enhancement: if Tavily times
+  // out, returns HTTP 429/5xx or yields no results, log it and let the model
+  // answer from the page / its own knowledge. Explicit or forced research
+  // still reports the error. A deliberate STOP is always re-thrown.
+  if (trigger !== 'implicit') return await fetchTavilyEvidence();
+  try {
+    return await fetchTavilyEvidence();
+  } catch (err) {
+    if (err?.name === 'AbortError' || ctx.signal?.aborted) throw err;
+    console.warn('Automatic Tavily research failed; answering without it:', err);
+    return null;
+  }
+
+  async function fetchTavilyEvidence() {
+    // Ordinary questions use the user's wording (without attachment text). A
+    // forced Explain action has a fixed instruction, so it instead searches the
+    // current page's title and excerpt for relevant supporting sources.
+    const searchQuery = force ? pageResearchQuery(questionText, pageContext) : questionText;
+    const result = await tavilySearch(searchQuery, apiKey, ctx.signal, 'general', ONLINE_RESEARCH_MAX_RESULTS);
+    const byUrl = new Map();
+    for (const item of result?.results || []) {
+      const url = String(item.url || '').trim();
+      const title = cleanResearchText(item.title, 220);
+      const content = cleanResearchText(item.content, 1400);
+      if (!url || (!title && !content)) continue;
+      const prior = byUrl.get(url);
+      if (!prior || Number(item.score || 0) > prior.score) {
+        byUrl.set(url, {
+          title,
+          url,
+          content,
+          published: item.published_date || item.publishedDate || '',
+          score: Number(item.score || 0),
+        });
+      }
     }
+
+    const sources = [...byUrl.values()].sort((a, b) => b.score - a.score);
+    if (!sources.length) throw new Error(t(ctx.lang, 'bg_error_factCheckNoResults'));
+
+    let evidenceText = '';
+    for (const source of sources) {
+      const block =
+        `SOURCE: ${source.title || source.url}\n` +
+        `PUBLISHED: ${source.published || 'unknown'}\n` +
+        `URL: ${source.url}\n` +
+        `EVIDENCE: ${source.content}\n\n`;
+      if (evidenceText.length + block.length > ONLINE_RESEARCH_MAX_EVIDENCE_CHARS) break;
+      evidenceText += block;
+    }
+    if (!evidenceText) throw new Error(t(ctx.lang, 'bg_error_factCheckNoResults'));
+
+    return {
+      prompt: `${question}\n\nONLINE RESEARCH EVIDENCE:\n${evidenceText}\nAnswer the user's question using the supplied evidence for time-sensitive or missing-page facts. Do not infer a newer version from an older page. Prefer official sources when the evidence identifies them. If the sources do not establish the answer, say that it is unverified. Cite the supplied source URLs and do not invent sources, dates, specifications, or quotes.`,
+    };
   }
-
-  const sources = [...byUrl.values()].sort((a, b) => b.score - a.score);
-  if (!sources.length) throw new Error(t(ctx.lang, 'bg_error_factCheckNoResults'));
-
-  let evidenceText = '';
-  for (const source of sources) {
-    const block =
-      `SOURCE: ${source.title || source.url}\n` +
-      `PUBLISHED: ${source.published || 'unknown'}\n` +
-      `URL: ${source.url}\n` +
-      `EVIDENCE: ${source.content}\n\n`;
-    if (evidenceText.length + block.length > ONLINE_RESEARCH_MAX_EVIDENCE_CHARS) break;
-    evidenceText += block;
-  }
-  if (!evidenceText) throw new Error(t(ctx.lang, 'bg_error_factCheckNoResults'));
-
-  return {
-    prompt: `${question}\n\nONLINE RESEARCH EVIDENCE:\n${evidenceText}\nAnswer the user's question using the supplied evidence for time-sensitive or missing-page facts. Do not infer a newer version from an older page. Prefer official sources when the evidence identifies them. If the sources do not establish the answer, say that it is unverified. Cite the supplied source URLs and do not invent sources, dates, specifications, or quotes.`,
-  };
 }
 
 async function runTavilyFactCheckResearch({ question, pageContext, ctx, selectedText = "" }) {

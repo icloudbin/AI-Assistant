@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "AI Assistant",
+  "version": "1.10.82",
+  "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuD2SE2mfvMwzg400TjAarXSdqyWWe7aj8h9x+1FpYNUN9SlVMDT6pL3thE1w7cNmop6ERH2wZeita9FFlZGPSc0jbiIzY7T0+qIEh7d/sfb63yl+b5PUvadmqJOOXQDnW0FVfxQDHai1sOyPxS9oY8mkE6d0Mga4FTGX0W2mMvKF3WabX+lzm9u5WA2lIBwBcLgtmoJgDktBoTVypWVIIjpMzdgQihHf+zz9IQ+mwIQvL+yDrKlk7/XD7BgCK60gFvgATtsfA8GQy9o8uGIJVAamf4rSQSp6wQgh+eifrW90LFBMfFpGPh//3nsHsO5IKk3BV9pX1lQZ0/1TPl7BFQIDAQAB",
+  "description": "Answers via pages, files, prompts, local history, ZIP backup, tab sync, safe Markdown, voice, AI models & menu actions.",
+  "permissions": [
+    "contextMenus",
+    "sidePanel",
+    "storage",
+    "tabs",
+    "scripting"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "action": {
+    "default_title": "Open AI Assistant",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' data:;"
+  }
+}

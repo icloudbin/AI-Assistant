@@ -196,7 +196,22 @@ restoreComposerHeight();
 
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
 const MAX_TOTAL_EXTRACTED_CHARS = 180000;
+// At most this many TEXT files are read from one ZIP. Only text entries count:
+// directories, images and other non-text entries cost nothing, and neither do
+// entries skipped by the ignore list below. Text files past the limit are left
+// out and reported to the user (see describeZipReport) instead of rejecting the
+// whole archive.
 const MAX_ZIP_ENTRIES = 80;
+// Largest single ZIP entry (uncompressed bytes) that is read. 4 bytes per
+// character is the UTF-8 worst case for the character budget above.
+const MAX_ZIP_ENTRY_BYTES = MAX_TOTAL_EXTRACTED_CHARS * 4;
+// Folders that hold dependencies, version-control data, IDE/cache output or OS
+// junk: thousands of files that are never what the user is asking about and
+// would use up the whole character budget. Compared in lower case.
+const ZIP_IGNORED_DIRS = new Set([
+  "node_modules", "bower_components", ".git", ".svn", ".hg", ".idea",
+  "__pycache__", ".venv", "venv", ".next", ".nuxt", "__macosx"
+]);
 const TEXT_EXTENSIONS = new Set([
   "txt", "md", "markdown", "csv", "json", "xml", "yaml", "yml", "html", "htm",
   "css", "scss", "js", "mjs", "cjs", "ts", "tsx", "jsx", "java", "kt", "kts",
@@ -231,10 +246,32 @@ let currentRequestId = null;
 let autoScrollEnabled = false;
 let programmaticScroll = false;
 
+// Initialization gate. init() (bottom of this file) resets the conversation
+// and opens the port; nothing that submits a request may run before that is
+// done, or startNewTopic() would wipe the new conversation/bubble.
+// initCoreDone flips once the blank topic and the port exist; initPromise
+// settles when all of init() has finished. Late-arriving events (a CONTEXT_ACTION
+// message from the worker) wait on initPromise.
+let initCoreDone = false;
+let initPromise = Promise.resolve();
+
+// Idempotent: returns the live port, creating it only if there is none. A
+// second call (init() after an earlier ensurePort(), say) must not overwrite
+// the global and leave the first port alive.
 function connectPort() {
-  port = chrome.runtime.connect({ name: PORT_NAME });
-  port.onMessage.addListener(handlePortMessage);
-  port.onDisconnect.addListener(() => {
+  if (port) return port;
+  const thisPort = chrome.runtime.connect({ name: PORT_NAME });
+  port = thisPort;
+  thisPort.onMessage.addListener((message) => {
+    // A superseded port can still deliver queued messages; only the current
+    // port may drive the UI.
+    if (port !== thisPort) return;
+    handlePortMessage(message);
+  });
+  thisPort.onDisconnect.addListener(() => {
+    // A stale port's disconnect must not null out (or report a lost
+    // connection for) a newer port that is current and possibly streaming.
+    if (port !== thisPort) return;
     port = null;
     // The long-lived port drops when the MV3 service worker is recycled
     // (normal after ~30s idle - a slow stream producing fewer chunks than
@@ -269,11 +306,11 @@ function connectPort() {
     setStreaming(false);
     addBubble("error", t(currentLang, "error_connectionLost"));
   });
+  return thisPort;
 }
 
 function ensurePort() {
-  if (!port) connectPort();
-  return port;
+  return port || connectPort();
 }
 
 // Sends a message to the background worker. If the cached port turns out to be
@@ -283,7 +320,10 @@ function postToBackground(message) {
   try {
     ensurePort().postMessage(message);
   } catch {
+    // Drop the dead port for good (its handlers ignore events once superseded).
+    const dead = port;
     port = null;
+    try { dead?.disconnect(); } catch {}
     ensurePort().postMessage(message);
   }
 }
@@ -1094,12 +1134,74 @@ const MAX_AUTO_PAGE_IMAGE_URLS = 8;
 const PAGE_SCREENSHOT_MAX_DIMENSION = 1600;
 const PAGE_SCREENSHOT_MAX_BYTES = 2 * 1024 * 1024;
 
+// The id of the browser window that owns THIS side panel document. There is
+// one panel per window, so every page read (text, screenshot, image pageUrl)
+// must come from this window's active tab - never from whichever window
+// happens to have focus when the request is submitted. Otherwise, with panels
+// open in windows A and B, submitting from A while B is focused would read,
+// display, screenshot and send B's page to the provider (a correctness and a
+// privacy bug).
+//
+// Resolved once and then cached. A failed lookup is NOT cached, so a transient
+// error cannot permanently downgrade this panel to the focused-window fallback;
+// the next call simply tries again. The in-flight promise is shared so that
+// concurrent callers (init, tab listeners, a submit) trigger a single lookup.
+let panelWindowId = null;
+let panelWindowIdLookup = null;
+
+function getPanelWindowId() {
+  if (panelWindowId !== null) return Promise.resolve(panelWindowId);
+  if (!panelWindowIdLookup) {
+    panelWindowIdLookup = (async () => {
+      try {
+        const win = await chrome.windows.getCurrent();
+        if (Number.isInteger(win?.id) && win.id !== chrome.windows.WINDOW_ID_NONE) {
+          panelWindowId = win.id;
+        }
+      } catch (err) {
+        console.debug("[AI Assistant] Unable to resolve this panel's window:", err);
+      }
+      return panelWindowId;
+    })().finally(() => {
+      panelWindowIdLookup = null;
+    });
+  }
+  return panelWindowIdLookup;
+}
+
+// True when a tab/window event belongs to this panel's window. When the
+// panel's own window is unknown (lookup failed) every event is treated as
+// relevant, which is the pre-existing behaviour.
+async function isOwnWindowEvent(windowId) {
+  const own = await getPanelWindowId();
+  return own === null || windowId === own;
+}
+
 async function getCurrentActiveTab() {
-  // A side panel can remain alive while the user changes tabs. Do not use the
-  // panel's window or a cached tab. Query all active tabs and select the active
-  // tab belonging to the currently focused NORMAL browser window. This is more
-  // reliable in Brave than lastFocusedWindow alone, which can occasionally
-  // retain the tab that was active when the panel was opened.
+  // A side panel can remain alive while the user changes tabs, so the tab is
+  // never cached: it is re-queried each time, but always inside the panel's
+  // own window.
+  const ownWindowId = await getPanelWindowId();
+  if (ownWindowId !== null) {
+    try {
+      const tabs = await chrome.tabs.query({ active: true, windowId: ownWindowId });
+      return tabs?.[0]?.id ? tabs[0] : null;
+    } catch (err) {
+      // Deliberately no fallback to another window here: a failure must never
+      // turn into reading a different window's page.
+      console.debug("[AI Assistant] Unable to query this window's active tab:", err);
+      return null;
+    }
+  }
+  return getFocusedWindowActiveTab();
+}
+
+// Legacy behaviour, used ONLY when the panel's own window could not be
+// determined. Query all active tabs and select the active tab belonging to the
+// currently focused NORMAL browser window. This is more reliable in Brave than
+// lastFocusedWindow alone, which can occasionally retain the tab that was
+// active when the panel was opened.
+async function getFocusedWindowActiveTab() {
   try {
     const [windows, activeTabs] = await Promise.all([
       chrome.windows.getAll({ populate: false }),
@@ -1461,26 +1563,68 @@ function syncCurrentConversationFromHistory() {
   convo.updatedAt = Date.now();
 }
 
-async function saveConversations() {
+// Two side panels (two windows) share one chrome.storage.local history key.
+// Writing this panel's whole in-memory array would let a stale copy silently
+// delete the other panel's conversations (this panel's onChanged handler
+// returns early while it streams, so it never sees the other panel's saves).
+// So every save (1) runs one at a time through a promise queue, (2) re-reads
+// storage and merges by conversation id, and (3) only then trims and writes.
+let saveQueue = Promise.resolve();
+
+function sortedByNewest(list) {
+  return list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
+// Merge the stored list with this panel's list by id. The conversation this
+// panel is showing is authoritative; any other id keeps the copy with the
+// newest updatedAt (ties keep the local one). Conversations that exist only in
+// storage (saved by another panel) are preserved.
+function mergeConversationLists(stored, local, currentId) {
+  const byId = new Map();
+  for (const c of Array.isArray(stored) ? stored : []) {
+    if (c && c.id && c.messages?.length) byId.set(c.id, c);
+  }
+  for (const c of local) {
+    if (!c || !c.id) continue;
+    const other = byId.get(c.id);
+    if (!other || c.id === currentId || (c.updatedAt || 0) >= (other.updatedAt || 0)) {
+      byId.set(c.id, c);
+    }
+  }
+  return [...byId.values()].filter((c) => c.messages?.length);
+}
+
+function saveConversations() {
+  const run = saveConversationsNow();
+  // Keep the queue alive after a failed save; the caller still sees the error.
+  saveQueue = run.catch(() => {});
+  return run;
+}
+
+async function saveConversationsNow() {
+  await saveQueue;
+  const stored = await chrome.storage.local.get(HISTORY_STORAGE_KEY);
+  // Snapshot the live history only after the read, so the freshest copy of the
+  // current conversation is what gets merged and written.
   syncCurrentConversationFromHistory();
-  conversations = conversations
-    .filter((c) => c.messages?.length)
-    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
-    .slice(0, MAX_SAVED_CONVERSATIONS);
+  let merged = sortedByNewest(
+    mergeConversationLists(stored[HISTORY_STORAGE_KEY], conversations, currentConversationId)
+  ).slice(0, MAX_SAVED_CONVERSATIONS);
   // If the storage quota is exceeded, drop the oldest saved conversations and
-  // retry instead of silently losing every later save.
+  // retry (on the merged list) instead of silently losing every later save.
   for (let attempt = 0; ; attempt++) {
     try {
       await chrome.storage.local.set({
-        [HISTORY_STORAGE_KEY]: conversations,
+        [HISTORY_STORAGE_KEY]: merged,
         [CURRENT_CONVERSATION_KEY]: currentConversationId || "",
       });
       break;
     } catch (err) {
-      if (attempt >= 4 || conversations.length <= 1) throw err;
-      conversations = conversations.slice(0, Math.max(1, Math.floor(conversations.length / 2)));
+      if (attempt >= 4 || merged.length <= 1) throw err;
+      merged = merged.slice(0, Math.max(1, Math.floor(merged.length / 2)));
     }
   }
+  conversations = merged;
   renderHistorySelect();
   scheduleHistoryRender();
 }
@@ -1660,6 +1804,27 @@ function decodeUtf8(bytes) {
   return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 }
 
+// Decodes the bytes of a text attachment. UTF-8 comes first; U+FFFD in the
+// result usually means the bytes are not valid UTF-8, which for Chinese users is
+// almost always a GBK/GB18030 file (the default of Windows Notepad and of Excel's CSV
+// export), so the bytes are decoded again as GB18030 (a superset of GBK).
+// Two guards keep UTF-8 files from being "fixed" by mistake: bytes that ARE
+// valid UTF-8 keep that reading even if they contain a real U+FFFD character,
+// and the GB18030 reading is used only if it decodes the whole file without an
+// error. Anything else keeps the old lenient UTF-8 result.
+function decodeTextBytes(bytes) {
+  const utf8 = decodeUtf8(bytes);
+  if (!utf8.includes("\uFFFD")) return utf8;
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return utf8;
+  } catch { /* not valid UTF-8 */ }
+  try {
+    return new TextDecoder("gb18030", { fatal: true }).decode(bytes);
+  } catch { /* not valid GB18030 either (or the decoder is unavailable) */ }
+  return utf8;
+}
+
 function readU16(view, offset) { return view.getUint16(offset, true); }
 function readU32(view, offset) { return view.getUint32(offset, true); }
 
@@ -1671,7 +1836,7 @@ async function inflateRaw(bytes) {
   // Read incrementally and stop at a hard cap: the uncompressed size declared
   // in a ZIP header is attacker-controlled, so a small "zip bomb" could
   // otherwise expand to gigabytes in memory.
-  const limit = MAX_TOTAL_EXTRACTED_CHARS * 4;
+  const limit = MAX_ZIP_ENTRY_BYTES;
   const reader = stream.getReader();
   const chunks = [];
   let total = 0;
@@ -1691,6 +1856,41 @@ async function inflateRaw(bytes) {
   return out;
 }
 
+// What extractZipText() leaves out is reported to the user, never dropped
+// silently. For each category of left-out text files the report keeps the count
+// and only the first few names, so a ZIP with thousands of entries cannot bloat
+// the tooltip or the note sent to the model.
+const ZIP_REPORT_MAX_NAMES = 10;
+
+function newZipBucket() {
+  return { count: 0, names: [] };
+}
+
+function addToZipBucket(bucket, name) {
+  bucket.count++;
+  // One bounded line: the name ends up in a tooltip and in the model note.
+  if (bucket.names.length < ZIP_REPORT_MAX_NAMES) {
+    bucket.names.push(String(name).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").trim().slice(0, 120));
+  }
+}
+
+// Why a text entry is skipped by the ignore list ("" = keep it). The label is
+// shown to the user as it is, so it is language-neutral: a folder name, a glob
+// or a file name.
+function zipIgnoreReason(name) {
+  const parts = name.replace(/\\/g, "/").split("/");
+  const base = parts.pop();
+  const dir = parts.find((part) => ZIP_IGNORED_DIRS.has(part.toLowerCase()));
+  if (dir) return `${dir}/`;
+  // Minified bundles are one huge line each; lock files are machine-generated.
+  const minified = base.match(/\.min\.(js|mjs|cjs|css)$/i);
+  if (minified) return `*.min.${minified[1].toLowerCase()}`;
+  if (/\.lock$|-lock\.(?:json|ya?ml)$|^(?:npm-shrinkwrap\.json|go\.sum)$/i.test(base)) return base;
+  return "";
+}
+
+// Returns { text, report }: the text of the entries that were read, and what was
+// left out of it (see describeZipReport).
 async function extractZipText(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -1704,13 +1904,25 @@ async function extractZipText(file) {
   const entryCount = readU16(view, eocd + 10);
   const centralSize = readU32(view, eocd + 12);
   const centralOffset = readU32(view, eocd + 16);
-  if (entryCount > MAX_ZIP_ENTRIES) throw new Error(t(currentLang, "sp_zip_error_tooManyFiles_template", { max: MAX_ZIP_ENTRIES }));
   if (centralOffset + centralSize > bytes.length) throw new Error(t(currentLang, "sp_zip_error_invalidCentralDir"));
 
   let offset = centralOffset;
   let totalChars = 0;
   const parts = [];
   let entriesRead = 0;
+  // Text entries read so far, and whether more may still be read. Once the entry
+  // or the character limit is hit the loop keeps walking the directory only to
+  // count and name the text files that are left out.
+  let textEntriesRead = 0;
+  let limitReached = false;
+  const report = {
+    truncated: newZipBucket(),
+    overLimit: newZipBucket(),
+    tooLarge: newZipBucket(),
+    unreadable: newZipBucket(),
+    ignored: newZipBucket(),
+    ignoredReasons: new Set() // which rules matched (node_modules/ ...), not file names
+  };
 
   while (offset + 46 <= bytes.length && entriesRead < entryCount) {
     if (readU32(view, offset) !== 0x02014b50) break;
@@ -1731,41 +1943,91 @@ async function extractZipText(file) {
     const lowerName = name.toLowerCase();
     const ext = fileExtension(name);
     const looksText = TEXT_EXTENSIONS.has(ext) || lowerName.endsWith(".html") || lowerName.endsWith(".htm");
+    // Images, binaries and the like are not text entries: not counted, not reported.
     if (!looksText) continue;
+    const ignoreReason = zipIgnoreReason(name);
+    if (ignoreReason) {
+      addToZipBucket(report.ignored, name);
+      report.ignoredReasons.add(ignoreReason);
+      continue;
+    }
+    // From here on the entry is a text file the user may want, so whenever it is
+    // not read in full below it ends up in the report.
+    if (limitReached) { addToZipBucket(report.overLimit, name); continue; }
     // The general-purpose bit 0 marks the entry as password-encrypted, which
     // this reader cannot decrypt - inflating it would yield garbage bytes
     // that decode to mojibake rather than real text. Fail with a clear
     // message instead.
     if (flags & 1) throw new Error(t(currentLang, "sp_zip_error_encrypted"));
-    if (uncompressedSize > MAX_TOTAL_EXTRACTED_CHARS * 4) continue;
-    if (localOffset + 30 > bytes.length || readU32(view, localOffset) !== 0x04034b50) continue;
+    if (uncompressedSize > MAX_ZIP_ENTRY_BYTES) { addToZipBucket(report.tooLarge, name); continue; }
+    if (localOffset + 30 > bytes.length || readU32(view, localOffset) !== 0x04034b50) { addToZipBucket(report.unreadable, name); continue; }
 
     const localNameLen = readU16(view, localOffset + 26);
     const localExtraLen = readU16(view, localOffset + 28);
     const dataStart = localOffset + 30 + localNameLen + localExtraLen;
     const dataEnd = dataStart + compressedSize;
-    if (dataEnd > bytes.length) continue;
+    // Only "stored" (0) and "deflate" (8) entries can be read.
+    if (dataEnd > bytes.length || (method !== 0 && method !== 8)) { addToZipBucket(report.unreadable, name); continue; }
 
+    textEntriesRead++;
+    if (textEntriesRead >= MAX_ZIP_ENTRIES) limitReached = true; // the last entry that gets read
     const compressed = bytes.slice(dataStart, dataEnd);
-    let content;
-    if (method === 0) content = compressed;
-    else if (method === 8) content = await inflateRaw(compressed);
-    else continue;
-    if (!content) continue; // exceeded the decompression cap
+    const content = method === 0 ? compressed : await inflateRaw(compressed);
+    if (!content) { addToZipBucket(report.tooLarge, name); continue; } // grew past the size cap while inflating
 
-    const text = decodeUtf8(content);
+    const text = decodeTextBytes(content);
     if (!text.trim()) continue;
-    if (totalChars + text.length > MAX_TOTAL_EXTRACTED_CHARS) {
-      const remain = Math.max(0, MAX_TOTAL_EXTRACTED_CHARS - totalChars);
-      if (remain > 0) parts.push(`\n===== ZIP ENTRY: ${name} =====\n${text.slice(0, remain)}`);
-      totalChars = MAX_TOTAL_EXTRACTED_CHARS;
-      break;
-    }
-    parts.push(`\n===== ZIP ENTRY: ${name} =====\n${text}`);
-    totalChars += text.length;
+    // totalChars is below the budget here: limitReached is set the moment it is used up.
+    const remain = MAX_TOTAL_EXTRACTED_CHARS - totalChars;
+    const kept = text.length > remain ? text.slice(0, remain) : text;
+    if (kept.length < text.length) addToZipBucket(report.truncated, name);
+    parts.push(`\n===== ZIP ENTRY: ${name} =====\n${kept}`);
+    totalChars += kept.length;
+    if (totalChars >= MAX_TOTAL_EXTRACTED_CHARS) limitReached = true;
   }
 
-  return parts.join("\n");
+  return { text: parts.join("\n"), report };
+}
+
+// Describes what extractZipText() left out, as `items` (one line for the
+// attachment chip), `detail` (the tooltip, with file names) and `forModel` (an
+// English note that goes first in the attachment text, so the model does not
+// mistake a partial ZIP for the whole archive). Returns null if nothing was left out.
+function describeZipReport(report) {
+  const kb = Math.round(MAX_ZIP_ENTRY_BYTES / 1000);
+  // `list` is what is shown (file names), `more` how many are not shown.
+  const fromBucket = (key, model, bucket) => ({ label: t(currentLang, key), model, count: bucket.count, list: bucket.names, more: bucket.count - bucket.names.length });
+  const rules = [...report.ignoredReasons];
+  const rows = [
+    fromBucket("attachment_note_truncated", "cut at the character limit", report.truncated),
+    fromBucket("attachment_note_overLimit", "not read, file or character limit reached", report.overLimit),
+    fromBucket("attachment_note_tooLarge", `too large, over ${kb} KB`, report.tooLarge),
+    fromBucket("attachment_note_unreadable", "unreadable", report.unreadable),
+    // For ignored files the list holds the rules that matched, not every file name.
+    { label: t(currentLang, "attachment_note_ignored"), model: "ignored by rule", count: report.ignored.count, list: rules.slice(0, ZIP_REPORT_MAX_NAMES), more: Math.max(0, rules.length - ZIP_REPORT_MAX_NAMES), rules: true }
+  ].filter((row) => row.count > 0);
+  if (!rows.length) return null;
+
+  const listed = (row) => `${row.list.join(", ")}${row.more > 0 ? ` … +${row.more}` : ""}`;
+  return {
+    items: rows.map((row) => `${row.label} ${row.count}${row.rules ? ` (${listed(row)})` : ""}`).join(" · "),
+    detail: [
+      ...rows.map((row) => `${row.label}: ${listed(row)}`),
+      "",
+      t(currentLang, "attachment_note_limits_template", { entries: MAX_ZIP_ENTRIES, chars: MAX_TOTAL_EXTRACTED_CHARS, kb })
+    ].join("\n"),
+    forModel: `\n===== ZIP NOTE =====\nNot every file of this ZIP is included below. Left out - ${rows.map((row) => `${row.model}: ${row.count} (${listed(row)})`).join("; ")}.`
+  };
+}
+
+// The same three texts for a plain text file that was cut at the character limit.
+function describeTextTruncation(totalChars) {
+  const kept = MAX_TOTAL_EXTRACTED_CHARS;
+  return {
+    items: t(currentLang, "attachment_note_truncatedChars_template", { kept, total: totalChars }),
+    detail: "",
+    forModel: `[NOTE: this file is cut after the first ${kept} of ${totalChars} characters.]`
+  };
 }
 
 function setAttachmentStatus(item, status, message = "") {
@@ -1775,6 +2037,27 @@ function setAttachmentStatus(item, status, message = "") {
     state.textContent = message || (status === "ready" ? t(currentLang, "attachment_ready") : status === "reading" ? t(currentLang, "attachment_reading") : t(currentLang, "attachment_error"));
     state.classList.toggle("error", status === "error");
   }
+}
+
+// A second line on the attachment chip telling the user what was left out of a
+// ZIP or cut from a long text file. `note` is the raw data ({ report } or
+// { totalChars }), not text, so renderAttachments() can build it again in the
+// current language when the interface language changes.
+function buildAttachmentNote(note) {
+  const text = note.report ? describeZipReport(note.report) : describeTextTruncation(note.totalChars);
+  const el = document.createElement("div");
+  el.className = "attachment-note";
+  el.textContent = `⚠️ ${t(currentLang, "attachment_note_heading")} — ${text.items}`;
+  if (text.detail) el.title = text.detail;
+  return el;
+}
+
+function setAttachmentNote(item, note) {
+  item.note = note || null;
+  if (!item.el) return;
+  item.el.querySelector(".attachment-note")?.remove();
+  item.el.classList.toggle("has-note", !!item.note);
+  if (item.note) item.el.appendChild(buildAttachmentNote(item.note));
 }
 
 function renderAttachments() {
@@ -1801,6 +2084,10 @@ function renderAttachments() {
       renderAttachments();
     });
     chip.append(icon, name, state, remove);
+    if (item.note) {
+      chip.classList.add("has-note");
+      chip.appendChild(buildAttachmentNote(item.note));
+    }
     item.el = chip;
     attachmentList.appendChild(chip);
   }
@@ -1830,18 +2117,30 @@ async function processFile(file) {
       return;
     }
     if (isTextFile(file)) {
-      item.text = await file.text();
+      item.text = decodeTextBytes(new Uint8Array(await file.arrayBuffer()));
       if (!item.text.trim()) throw new Error(t(currentLang, "attachment_error_emptyFile"));
-      if (item.text.length > MAX_TOTAL_EXTRACTED_CHARS) item.text = item.text.slice(0, MAX_TOTAL_EXTRACTED_CHARS);
+      let cutFrom = 0;
+      if (item.text.length > MAX_TOTAL_EXTRACTED_CHARS) {
+        cutFrom = item.text.length;
+        item.text = `${describeTextTruncation(cutFrom).forModel}\n${item.text.slice(0, MAX_TOTAL_EXTRACTED_CHARS)}`;
+      }
       item.kind = "text";
       setAttachmentStatus(item, "ready", t(currentLang, "attachment_ready"));
+      setAttachmentNote(item, cutFrom ? { totalChars: cutFrom } : null);
       return;
     }
     if (isZipFile(file)) {
-      item.text = await extractZipText(file);
-      if (!item.text.trim()) throw new Error(t(currentLang, "attachment_error_noZipText"));
+      const { text, report } = await extractZipText(file);
+      const note = describeZipReport(report);
+      if (!text.trim()) {
+        // Nothing was read. If text files were left out (ignored, too large ...) say so: "no text files" alone would be wrong.
+        const reason = t(currentLang, "attachment_error_noZipText");
+        throw new Error(note ? `${reason} — ${note.items}` : reason);
+      }
+      item.text = note ? `${note.forModel}\n${text}` : text;
       item.kind = "zip";
       setAttachmentStatus(item, "ready", t(currentLang, "attachment_ready"));
+      setAttachmentNote(item, note ? { report } : null);
       return;
     }
     throw new Error(t(currentLang, "attachment_error_unsupportedType"));
@@ -2149,6 +2448,8 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   const question = forcedQuestion !== null ? String(forcedQuestion).trim() : questionInput.value.trim();
   const attachmentText = attachmentContextText();
   if ((!question && !attachmentText) || isStreaming) return;
+  // Not before init() has reset the topic and opened the port.
+  if (!initCoreDone) return;
 
   const selectedModel = getSelectedModel();
   // Text-only models (GPT-OSS) reject any request containing an image part with
@@ -2447,12 +2748,10 @@ async function consumePendingContextAction(pending = null) {
   // scoping a second panel could claim the same action and submit the same
   // prompt in parallel with the intended one. Skipping (instead of claiming
   // and clearing) leaves the record for the window it belongs to.
-  try {
-    const thisWindow = await chrome.windows.getCurrent();
-    if (action.windowId && thisWindow?.id && action.windowId !== thisWindow.id) return;
-  } catch {
-    // windows.getCurrent unavailable - fall through and process as before.
-  }
+  // (If this panel's window cannot be determined, fall through and process as
+  // before.)
+  const thisWindowId = await getPanelWindowId();
+  if (action.windowId && thisWindowId !== null && action.windowId !== thisWindowId) return;
   // Claim the record BEFORE processing it. background.js delivers a context
   // action through two independent channels - the storage record (consumed
   // here when a freshly opened panel initializes) and a delayed
@@ -2494,7 +2793,9 @@ function isTrustedExtensionSender(sender) {
 chrome.runtime.onMessage.addListener((message, sender) => {
   if (!isTrustedExtensionSender(sender)) return false;
   if (message?.type === "CONTEXT_ACTION") {
-    consumePendingContextAction(message.pending).catch((err) => console.debug("[AI Assistant] Context action failed:", err));
+    // Queue behind initialization: init() itself consumes the stored record
+    // once it is ready, and the claim logic below de-duplicates the two paths.
+    initPromise.then(() => consumePendingContextAction(message.pending)).catch((err) => console.debug("[AI Assistant] Context action failed:", err));
   }
 });
 
@@ -2613,25 +2914,53 @@ async function refreshActivePageContext() {
   }
 }
 
-chrome.tabs.onActivated.addListener(() => {
-  refreshActivePageContext().catch(() => {});
+// Every listener below ignores events from other browser windows: this panel
+// only ever shows (and sends) the active tab of its OWN window, so a tab switch
+// or focus change elsewhere cannot affect it.
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  (async () => {
+    if (!(await isOwnWindowEvent(activeInfo?.windowId))) return;
+    await refreshActivePageContext();
+  })().catch(() => {});
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!includeContextToggle.checked || tabId !== lastPageContextTabId) return;
   // Refresh after navigation commits or when the document title changes.
   if (changeInfo.status === "complete" || changeInfo.title) {
-    refreshActivePageContext().catch(() => {});
+    (async () => {
+      // `tab` is absent in some browsers; the tabId check above still applies.
+      if (tab && !(await isOwnWindowEvent(tab.windowId))) return;
+      await refreshActivePageContext();
+    })().catch(() => {});
   }
 });
 
 chrome.windows.onFocusChanged.addListener((windowId) => {
-  if (windowId !== chrome.windows.WINDOW_ID_NONE) {
-    refreshActivePageContext().catch(() => {});
-  }
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  (async () => {
+    // Focus moving to another window does not change this panel's page; only
+    // refresh when focus comes back to this panel's own window.
+    if (!(await isOwnWindowEvent(windowId))) return;
+    await refreshActivePageContext();
+  })().catch(() => {});
 });
 
-(async function init() {
+// Lock the composer until initialization has reset the topic and opened the
+// port (setStreaming(false) re-enables everything afterwards).
+function setInitLocked() {
+  sendBtn.disabled = true;
+  questionInput.disabled = true;
+  quickActionButtons.forEach((button) => { button.disabled = true; });
+  modelSelect.disabled = true;
+  uploadBtn.disabled = true;
+  if (SpeechRecognitionCtor) {
+    micBtn.disabled = true;
+    micLangBtn.disabled = true;
+  }
+}
+
+async function init() {
   populateModelSelect();
   // Render the selector immediately so the control is never dependent on the
   // timing of asynchronous model/storage initialization.
@@ -2650,7 +2979,9 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
   startNewTopic();
   renderHistorySelect();
   scheduleHistoryRender();
-  connectPort();
+  ensurePort();
+  initCoreDone = true;
+  if (!isStreaming) setStreaming(false);
   try {
     // "Read current page" is ON every time the panel opens. A previously
     // saved opt-out is deliberately not restored; toggling it off only
@@ -2662,7 +2993,17 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
   if (includeContextToggle.checked) {
     await refreshActivePageContext();
   }
-})();
+}
+
+setInitLocked();
+initPromise = init().catch((err) => {
+  console.error("[AI Assistant] Initialization failed:", err);
+  // Do not leave the composer locked forever if a late init step threw.
+  if (!initCoreDone) {
+    initCoreDone = true;
+    if (!isStreaming) setStreaming(false);
+  }
+});
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local" || !changes[HISTORY_STORAGE_KEY]) return;
