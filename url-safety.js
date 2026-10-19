@@ -95,6 +95,10 @@ function isNonPublicIPv6(g) {
 // ---------- Hostnames ----------
 const LOCAL_NAME_SUFFIXES = [
   '.localhost', '.local', '.localdomain', '.internal', '.intranet', '.lan', '.home.arpa',
+  // Names that are reserved or commonly used only inside private networks
+  // (RFC 2606 / 6761 reserved TLDs, ICANN name-collision labels, Windows
+  // domains, Tailscale MagicDNS).
+  '.corp', '.home', '.private', '.domain', '.workgroup', '.test', '.example', '.invalid', '.ts.net',
   // Wildcard-DNS services that resolve a name embedding any IP (best effort).
   '.nip.io', '.sslip.io', '.xip.io', '.traefik.me', '.localtest.me', '.lvh.me',
 ];
@@ -124,11 +128,11 @@ export function isNonPublicHost(hostname) {
 // Decides whether the service worker may fetch `rawUrl` as an image.
 //  - only http(s), no embedded credentials;
 //  - public hosts are allowed;
-//  - a non-public host is allowed ONLY when it is the same host as the page the
-//    user is currently looking at (`pageUrl`), so images on an intranet or
-//    localhost page still work while that page is open, but a public page
-//    (or a model reply) can never point the extension at some other internal
-//    address.
+//  - a non-public host is allowed ONLY when it is the same host AND PORT as the
+//    page the user is currently looking at (`pageUrl`), so images on an
+//    intranet or localhost page still work while that page is open, but a
+//    page on localhost:3000 (or a model reply) can never point the extension
+//    at another service on the same machine such as localhost:6379 or :22.
 // Returns the parsed URL when allowed, otherwise null.
 export function checkImageUrl(rawUrl, pageUrl = '') {
   let url;
@@ -142,7 +146,7 @@ export function checkImageUrl(rawUrl, pageUrl = '') {
   if (!isNonPublicHost(url.hostname)) return url;
   try {
     const page = new URL(String(pageUrl));
-    if ((page.protocol === 'http:' || page.protocol === 'https:') && page.hostname === url.hostname) return url;
+    if ((page.protocol === 'http:' || page.protocol === 'https:') && page.host === url.host) return url; // host = hostname + non-default port
   } catch {
     // no usable page URL: fall through to blocked
   }

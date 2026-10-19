@@ -72,6 +72,30 @@ export function prepareLineTranslation(source, maxChars = 120000) {
   return { lines, numbered, truncated, keptChars: text.length };
 }
 
+// Splits the numbered translatable lines into batches of at most `maxChars`
+// characters (never splitting a line), so a long page is translated with
+// several moderate requests instead of one whose reply can hit the model's
+// output limit and be cut off. Line numbers stay global, so LineTranslator
+// maps every batch back onto the right source line.
+export function numberedBatches(prepared, maxChars = 8000) {
+  const batches = [];
+  let cur = [];
+  let len = 0;
+  prepared.lines.forEach((l, i) => {
+    if (!l.translatable) return;
+    const row = `[${i + 1}] ${l.safe}`;
+    if (cur.length && len + row.length + 1 > maxChars) {
+      batches.push(cur.join("\n"));
+      cur = [];
+      len = 0;
+    }
+    cur.push(row);
+    len += row.length + 1;
+  });
+  if (cur.length) batches.push(cur.join("\n"));
+  return batches;
+}
+
 export class LineTranslator {
   constructor(prepared, emit) {
     this.lines = prepared.lines;
@@ -82,6 +106,14 @@ export class LineTranslator {
     this.heldText = "";
     this.skipping = false;  // inside a duplicate / out-of-range model line
     this.wrote = false;
+    this.expected = prepared.lines.filter((l) => l.translatable).length;
+    this.translated = 0;    // lines for which the model actually returned text
+  }
+
+  // Source lines that fell back to their original text because the model never
+  // returned a translation for them (e.g. its reply was cut off).
+  get missing() {
+    return Math.max(0, this.expected - this.translated);
   }
 
   write(line) {
@@ -101,7 +133,9 @@ export class LineTranslator {
     if (this.heldId < 0) return;
     this.fill(this.heldId);
     const l = this.lines[this.heldId];
-    this.write(`${l.prefix}${restore(this.heldText.trim(), l.tokens) || l.body}`);
+    const translatedText = restore(this.heldText.trim(), l.tokens);
+    if (translatedText) this.translated++;
+    this.write(`${l.prefix}${translatedText || l.body}`);
     this.next = this.heldId + 1;
     this.heldId = -1;
     this.heldText = "";
@@ -132,6 +166,15 @@ export class LineTranslator {
       this.handleLine(this.buf.slice(0, nl));
       this.buf = this.buf.slice(nl + 1);
     }
+  }
+
+  // End of one batch's reply: process what is buffered, but do not fill the
+  // rest of the document yet - the next batch continues from here.
+  endBatch() {
+    if (this.buf) this.handleLine(this.buf);
+    this.buf = "";
+    this.flushHeld();
+    this.skipping = false;
   }
 
   finish() {

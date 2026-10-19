@@ -39,7 +39,9 @@ The Extension is designed to use the current active webpage and refresh its cont
 
 When the Read current page option is disabled, ordinary questions are not sent with the current webpage content as context.
 
-The quick actions (Summarize, Translate, Explain, Key Points and Fact Check) always read the current page, even when the Read current page option is unchecked, because they operate on that page. The Read current page option is switched on each time the side panel is opened.
+The quick actions (Summarize, Translate, Explain, Key Points and Fact Check) always read the current page, even when the Read current page option is unchecked, because they operate on that page. The Read current page option is on by default; if the user turns it off, that choice is remembered until they turn it back on. The side panel's context bar shows which page (title and site) would be sent with the next question.
+
+Webmail and online-banking/payment sites (for example Gmail, Outlook, Proton Mail, PayPal and major banks, plus self-hosted mail pages recognised by the extension's mail extractors) are treated as sensitive: for ordinary questions the page is not sent, even when Read current page is on, unless the user clicks "Send this site this session" in the context bar. That permission applies only to that site and only until the side panel is closed. The quick actions are explicit actions on the page and still read it. The site list is a heuristic and does not cover every mail or banking site.
 
 Page screenshot and images: only if the user turns on "Page screenshot and images" in Settings (off by default), the quick actions also capture a screenshot of the visible part of the current tab and up to a few of the page's images and send them to the selected AI provider. These images are sent as they appear, including any personal information visible on the page; the privacy filter described below cannot redact images. Images the user attaches themselves are sent as described in section 3.
 

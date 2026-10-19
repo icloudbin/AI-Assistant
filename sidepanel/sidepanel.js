@@ -1,6 +1,7 @@
 // sidepanel/sidepanel.js —— Fixed version: no trailing spaces; keeps import "../models.js"; API Key configuration moved to Settings
 import { MODELS, findModelById, findKnownModel, resolveModelId, findModelIdByLabel, modelSupportsVision } from "../models.js";
 import { HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY, PENDING_CONTEXT_ACTION_KEY, PREFERRED_TRANSLATION_LANGUAGE_KEY, MAX_SAVED_CONVERSATIONS } from "../storage-keys.js";
+import { sensitiveHostOf, hostOf } from "../sensitive-sites.js";
 import { getStoredLanguage, applyStaticTranslations, t, LANGUAGE_STORAGE_KEY } from "../i18n.js";
 
 // ---------- Theme ----------
@@ -96,11 +97,28 @@ const optionsBtn = document.getElementById("optionsBtn");
 const includeContextToggle = document.getElementById("includeContextToggle");
 // Privacy: reading the current page (text + screenshot, including Proton Mail
 // message bodies) is ON by default; once the user turns it off, that explicit
-// choice is remembered across sessions.
+// choice is remembered across sessions. On webmail / banking sites (see
+// sensitive-sites.js) ordinary questions never send the page unless the user
+// allows that site for this panel session.
 const INCLUDE_CONTEXT_STORAGE_KEY = "includeCurrentPageContext";
 const PAGE_VISUALS_STORAGE_KEY = "pageVisualsEnabled";
 const pageContextBar = document.getElementById("pageContextBar");
 const pageContextTitle = document.getElementById("pageContextTitle");
+const pageContextAllowBtn = document.getElementById("pageContextAllowBtn");
+// Sensitive hosts the user explicitly allowed for ordinary questions during
+// this panel session only (never persisted).
+const allowedSensitiveHosts = new Set();
+// True when an ordinary question would NOT send this page: it is a webmail /
+// banking site the user has not allowed. Quick actions are explicit actions
+// on the page and are not blocked.
+// `source` is the content-script extractor that produced the page text: the
+// webmail extractors identify self-hosted mail (e.g. Synology MailPlus) that no
+// hostname list can know about.
+const MAIL_EXTRACTOR_SOURCES = new Set(["synology-mailplus", "proton-mail"]);
+function isBlockedSensitivePage(url, source = "") {
+  const sensitive = sensitiveHostOf(url) !== "" || MAIL_EXTRACTOR_SOURCES.has(source);
+  return sensitive && !allowedSensitiveHosts.has(hostOf(url));
+}
 const modelSelect = document.getElementById("modelSelect");
 const uploadBtn = document.getElementById("uploadBtn");
 const fileInput = document.getElementById("fileInput");
@@ -1258,6 +1276,7 @@ async function getActivePageContext(retryCount = 0, format = null) {
       text: text.slice(0, MAX_PAGE_CONTEXT_CHARS),
       // "markdown" when the structure-preserving extractor produced the text.
       format: data?.format === "markdown" ? "markdown" : "text",
+      source: String(data?.source || ""),
       imageUrls,
       // The extractor cut the page text at its size limit (see content.js).
       truncated: data?.truncated === true,
@@ -1401,12 +1420,21 @@ async function captureVisiblePageScreenshot(expectedTabId, expectedUrl) {
   }
 }
 function updateContextBar(pageContext) {
+  pageContextAllowBtn.hidden = true;
   if (!pageContext) {
     pageContextBar.hidden = true;
     return;
   }
   pageContextBar.hidden = false;
-  pageContextTitle.textContent = `📄 ${pageContext.title || pageContext.url}`;
+  const host = hostOf(pageContext.url);
+  if (isBlockedSensitivePage(pageContext.url, pageContext.source)) {
+    // Webmail / banking: make it unmistakable that nothing is sent.
+    pageContextTitle.textContent = `🔒 ${t(currentLang, "contextBar_sensitiveBlocked_template", { host })}`;
+    pageContextAllowBtn.textContent = t(currentLang, "contextBar_allowSensitive");
+    pageContextAllowBtn.hidden = false;
+    return;
+  }
+  pageContextTitle.textContent = `📄 ${t(currentLang, "contextBar_willSend_template", { title: pageContext.title || pageContext.url, host })}`;
 }
 
 // Shown when a request asked for page context but the capture failed. The
@@ -2508,12 +2536,27 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   const shouldIncludePageContext = forcedIncludePageContext === null
     ? includeContextToggle.checked === true
     : forcedIncludePageContext === true;
-  if (shouldIncludePageContext) {
+  // Webmail / banking: an ordinary question must not send the page unless the
+  // user allowed this site. Checked against the tab's URL before capture and
+  // again on the captured page below (the tab can change in between).
+  let sensitiveBlocked = false;
+  if (shouldIncludePageContext && forcedIncludePageContext === null) {
+    const tabNow = await getCurrentActiveTab();
+    if (isBlockedSensitivePage(tabNow?.url)) {
+      sensitiveBlocked = true;
+      updateContextBar({ title: String(tabNow?.title || ""), url: String(tabNow?.url || "") });
+    }
+  }
+  if (shouldIncludePageContext && !sensitiveBlocked) {
     // Capture the page at the moment the user submits the request. The API
     // request must never reuse the page context shown or captured earlier.
     pageContext = await getActivePageContext(0, translateMode === true && !translateSource ? "markdown" : null);
     if (isCancelled()) return;
-    if (pageContext) {
+    if (pageContext && forcedIncludePageContext === null && isBlockedSensitivePage(pageContext.url, pageContext.source)) {
+      sensitiveBlocked = true;
+      updateContextBar({ title: pageContext.title, url: pageContext.url, source: pageContext.source });
+      pageContext = null;
+    } else if (pageContext) {
       updateContextBar(pageContext);
     } else {
       // Capture failed - the page may still be loading, or may not be a
@@ -2605,8 +2648,8 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       // non-null here by mistake. This is independent of attached images
       // (below), which are unrelated to this toggle and always sent when
       // present.
-      includePageContext: shouldIncludePageContext,
-      pageContext: shouldIncludePageContext ? pageContext : null,
+      includePageContext: shouldIncludePageContext && !sensitiveBlocked,
+      pageContext: shouldIncludePageContext && !sensitiveBlocked ? pageContext : null,
       // When the user changes pages, do not send the previous page's
       // conversation turns to the model. The UI history remains intact, but
       // old assistant answers can themselves contain facts from Page B and
@@ -2867,6 +2910,13 @@ historySelect.addEventListener("change", async () => {
   await selectConversation(historySelect.value);
 });
 
+pageContextAllowBtn.addEventListener("click", async () => {
+  const tab = await getCurrentActiveTab().catch(() => null);
+  const host = hostOf(tab?.url);
+  if (host) allowedSensitiveHosts.add(host);
+  await refreshActivePageContext();
+});
+
 includeContextToggle.addEventListener("change", async () => {
   try { await chrome.storage.local.set({ [INCLUDE_CONTEXT_STORAGE_KEY]: includeContextToggle.checked }); } catch {}
   if (includeContextToggle.checked) {
@@ -2983,11 +3033,10 @@ async function init() {
   initCoreDone = true;
   if (!isStreaming) setStreaming(false);
   try {
-    // "Read current page" is ON every time the panel opens. A previously
-    // saved opt-out is deliberately not restored; toggling it off only
-    // lasts until the panel is closed.
-    includeContextToggle.checked = true;
-    await chrome.storage.local.set({ [INCLUDE_CONTEXT_STORAGE_KEY]: true });
+    // "Read current page" defaults to ON, but an explicit opt-out is
+    // remembered across sessions (it used to be reset to ON on every open).
+    const saved = (await chrome.storage.local.get(INCLUDE_CONTEXT_STORAGE_KEY))[INCLUDE_CONTEXT_STORAGE_KEY];
+    includeContextToggle.checked = saved !== false;
   } catch {}
   await consumePendingContextAction();
   if (includeContextToggle.checked) {

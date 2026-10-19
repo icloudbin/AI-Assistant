@@ -77,6 +77,60 @@ if (inGit) {
   console.log("(not a git checkout: skipped the tracked-files check)");
 }
 
+// 4. i18n consistency. English is the reference: every other language must
+// have exactly the same keys (a missing key silently falls back to English,
+// which is how the privacy-filter switch ended up untranslated) and the same
+// {placeholders} in each message. Every key the code or HTML asks for must
+// exist in English.
+{
+  const src = fs.readFileSync(path.join(root, "i18n.js"), "utf8");
+  const langs = {};
+  let cur = null;
+  for (const line of src.split("\n")) {
+    const lm = line.match(/^  (?:"([\w-]+)"|(\w+)): \{$/);
+    if (lm) { cur = lm[1] || lm[2]; langs[cur] = {}; continue; }
+    const km = line.match(/^    ([A-Za-z0-9_]+):\s*(.*)$/);
+    if (km && cur) {
+      if (km[1] in langs[cur]) problems.push(`i18n: duplicate key "${km[1]}" in ${cur}`);
+      langs[cur][km[1]] = km[2];
+    }
+  }
+  const en = langs.en;
+  if (!en) {
+    problems.push("i18n: could not find the English table in i18n.js");
+  } else {
+    // {count} is ignored on "_one" keys: English writes "1 conversation" while
+    // languages without a singular form (zh, ja) reuse the {count} wording.
+    const ph = (v, key) => [...new Set([...String(v).matchAll(/\{(\w+)\}/g)].map((m) => m[1]))].filter((p) => !(p === "count" && key.endsWith("_one"))).sort().join(",");
+    for (const [lang, table] of Object.entries(langs)) {
+      if (lang === "en") continue;
+      const missing = Object.keys(en).filter((k) => !(k in table));
+      const extra = Object.keys(table).filter((k) => !(k in en));
+      if (missing.length) problems.push(`i18n: ${lang} is missing ${missing.length} key(s): ${missing.join(", ")}`);
+      if (extra.length) problems.push(`i18n: ${lang} has key(s) not in English: ${extra.join(", ")}`);
+      for (const k of Object.keys(en)) {
+        if (k in table && ph(en[k], k) !== ph(table[k], k)) problems.push(`i18n: ${lang}.${k} placeholders {${ph(table[k], k)}} differ from English {${ph(en[k], k)}}`);
+      }
+    }
+    const used = new Map();
+    const note = (k, f) => { if (!used.has(k)) used.set(k, f); };
+    const walk = (dir) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) { walk(p); continue; }
+        if (![".js", ".mjs", ".html"].includes(path.extname(e.name)) || e.name === "i18n.js") continue;
+        const text = fs.readFileSync(p, "utf8");
+        for (const m of text.matchAll(/\bt\(\s*[\w.?]+\s*,\s*["']([A-Za-z0-9_]+)["']/g)) note(m[1], rel(p));
+        for (const m of text.matchAll(/data-i18n(?:-[a-z-]+)?=["']([A-Za-z0-9_]+)["']/g)) note(m[1], rel(p));
+      }
+    };
+    walk(root);
+    for (const [k, f] of used) if (!(k in en)) problems.push(`i18n: key "${k}" used in ${f} does not exist in English`);
+    console.log(`i18n: ${Object.keys(langs).length} languages x ${Object.keys(en).length} keys checked.`);
+  }
+}
+
 console.log(`Required files (${required.size}):`);
 for (const f of [...required].sort()) console.log("  " + f);
 if (problems.length) {

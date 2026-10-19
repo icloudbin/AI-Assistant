@@ -1,3 +1,25 @@
+# SSRF guard: compare host and port, more private suffixes (v1.10.90)
+
+- **Bug.** `checkImageUrl` let a non-public image host through when its *hostname* matched the current page's, ignoring the port. On any `localhost:3000` page, `http://localhost:6379/...` or `:22` passed, so a prompt-injected reply could make the service worker send GET requests to any local port. Private-network suffixes such as `.corp`, `.home`, `.test` were also treated as public.
+- **Fix (`url-safety.js`).** The exemption now compares `URL.host` (hostname + non-default port). Added suffixes: `.corp`, `.home`, `.private`, `.domain`, `.workgroup`, `.test`, `.example`, `.invalid`, `.ts.net`. The redirect/final-URL check in `background.js` uses the same function, so it is covered too.
+- **Tested** with `scripts/test-url-safety.mjs` (37 checks: same host+port allowed, other ports/hosts/metadata endpoints blocked, public hosts incl. look-alikes such as `homeland.org` still allowed). With the old hostname comparison the port cases fail. Still true: DNS rebinding to a private address cannot be detected from an extension.
+- Build bumped to 1.10.90.
+
+# i18n: 7 missing keys filled in; key-consistency check (v1.10.89)
+
+- **Bug.** `zh-TW`, `fr`, `ja` and `es` lacked 7 keys that `en` and `zh-CN` had (`piiFilter_label/toggle/hint`, `bg_notice_pageTruncated_template`, `bg_hint_pageTooLarge`, `imageBlockedHttp_label/open`), so those strings fell back to English - including the Privacy filter switch itself.
+- **Fix (`i18n.js`).** All 7 keys added to the four languages, using each language's own wording for "Read current page".
+- **Check (`scripts/check-package.mjs`).** Now also fails when a language has a key English lacks (or vice versa), a duplicate key, different `{placeholders}` than English (`{count}` is ignored on `_one` keys), or when code/HTML asks for a key that does not exist (`t(lang, "key")`, `data-i18n*="key"`). Verified on a scratch copy: a removed key, a changed placeholder and an unknown `data-i18n` key each make it exit 1. The real tree passes (6 languages x 212 keys).
+- The translations are mine, not reviewed by a native speaker.
+- Build bumped to 1.10.89.
+
+# "Read current page" remembered; mail/banking pages not sent by default (v1.10.88)
+
+- **Bug.** The side panel forced "Read current page" back to ON every time it opened (`sidepanel.js` wrote `true` to `includeCurrentPageContext` and never read it), although the comment said an opt-out was remembered. With `<all_urls>` and the Proton / MailPlus extractors, a casual question on a mail or banking page sent the whole page to the AI provider.
+- **Fix.** (1) The saved choice is now read on open (default stays ON; an explicit opt-out persists). (2) New `sensitive-sites.js`: webmail and banking/payment hosts, plus any page produced by the Proton / MailPlus extractors, are not sent for ordinary questions unless the user clicks "Send this site this session" (in-memory, per host, gone when the panel closes). Quick actions are explicit and unchanged. (3) The context bar now says what will be sent ("Will send: title (host)") or that nothing will be ("Not sent: host is an email/banking site") with the allow button. Six languages; privacy policy updated (it previously said the option is switched on at every open).
+- **Verified** with `scripts/test-sidepanel-context.py`: real `sidepanel.js` in Chromium with stubbed `chrome.*` - default ON, bar text, opt-out survives reopening, Gmail page not sent / allow works / allow not persisted, self-hosted mail detected via extractor source. The host list is a heuristic (it also blocks e.g. proton.me marketing pages; the allow button covers that). Not tested in a real browser profile.
+- Build bumped to 1.10.88.
+
 # Packaging: required modules tracked, import check, .gitignore (v1.10.87)
 
 - **Issue.** `background.js` imports `pii-filter.js`, `translate-lines.js` and `url-safety.js` (and, through `settings-storage.js`, `settings-crypto.js`). If those were untracked in git, any package built from git (`git archive`, CI, a clean clone) would omit them and the service worker would fail to load. The source ZIP supplied for this build contains all four, but it has no `.git` folder, so the repository state itself could not be inspected here: run `git add` on them in your checkout (`git add pii-filter.js settings-crypto.js translate-lines.js url-safety.js`).
@@ -271,6 +293,7 @@ AI-Assistant/
 ├── storage-keys.js
 ├── settings-storage.js
 ├── url-safety.js
+├── sensitive-sites.js
 ├── i18n.js
 ├── privacy-policy.md
 ├── icons/
@@ -329,7 +352,7 @@ That's it — no removal, no "Load unpacked" again, settings intact. (If you ins
 # Validation checklist (file names must match exactly, UTF-8, no .txt suffix)
 Every file below is imported or loaded at runtime and must be present in any package and tracked by git:
 
-- Root: `manifest.json`, `background.js`, `content.js`, `models.js`, `storage-keys.js`, `i18n.js`, `settings-storage.js`, `settings-crypto.js`, `pii-filter.js`, `translate-lines.js`, `url-safety.js`
+- Root: `manifest.json`, `background.js`, `content.js`, `models.js`, `storage-keys.js`, `i18n.js`, `settings-storage.js`, `settings-crypto.js`, `pii-filter.js`, `translate-lines.js`, `url-safety.js`, `sensitive-sites.js` (imported by the side panel)
 - `options/`: `options.html`, `options.js`, `options.css`
 - `sidepanel/`: `sidepanel.html`, `sidepanel.css`, `sidepanel.js`, `mic-permission.html`, `mic-permission.css`, `mic-permission.js`
 - `icons/`: `icon16.png`, `icon48.png`, `icon128.png`

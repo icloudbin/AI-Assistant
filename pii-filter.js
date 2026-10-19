@@ -157,3 +157,31 @@ export function redactPayload({ question, pageContext, history }) {
       : history,
   };
 }
+
+// Single choke point for EVERYTHING in an ASK payload that can leave the
+// browser (provider requests and Tavily queries are both built from these
+// fields). Every string leaf is redacted, so a field added to the payload later
+// (e.g. factCheck.selectedText, which previously bypassed the filter) is
+// covered by default. Structural keys are left alone. Images are binary and
+// cannot be redacted (see the privacy policy).
+const STRUCTURAL_KEYS = new Set(["role", "type", "id", "requestId", "modelId", "tabId"]);
+function deepRedact(value, key) {
+  if (typeof value === "string") return STRUCTURAL_KEYS.has(key) ? value : redactSensitive(value);
+  if (Array.isArray(value)) return value.map((v) => deepRedact(v, key));
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = deepRedact(v, k);
+    return out;
+  }
+  return value;
+}
+
+export function redactOutbound({ question, pageContext, history, translateSource, factCheck }) {
+  return {
+    question: deepRedact(question),
+    pageContext: deepRedact(pageContext),
+    history: deepRedact(history),
+    translateSource: deepRedact(translateSource),
+    factCheck: deepRedact(factCheck),
+  };
+}

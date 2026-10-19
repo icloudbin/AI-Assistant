@@ -4,8 +4,8 @@ import { CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_
 import { getStoredLanguage, t } from "./i18n.js";
 import { restoreSettingsFromBackup } from "./settings-storage.js";
 import { checkImageUrl } from "./url-safety.js";
-import { redactPayload, redactSensitive, PII_FILTER_STORAGE_KEY } from "./pii-filter.js";
-import { prepareLineTranslation, LineTranslator } from "./translate-lines.js";
+import { redactOutbound, PII_FILTER_STORAGE_KEY } from "./pii-filter.js";
+import { prepareLineTranslation, numberedBatches, LineTranslator } from "./translate-lines.js";
 
 // Restore settings as soon as the service worker starts, before any request
 // arrives. Individual requests also retry this recovery as a safety net.
@@ -437,8 +437,9 @@ chrome.runtime.onConnect.addListener((port) => {
       try {
         const piiSetting = await chrome.storage.local.get(PII_FILTER_STORAGE_KEY);
         if (piiSetting[PII_FILTER_STORAGE_KEY] !== false) {
-          ({ question, pageContext, history } = redactPayload({ question, pageContext, history }));
-          if (typeof translateSource === "string") translateSource = redactSensitive(translateSource);
+          // One choke point for every outbound text field, including
+          // factCheck.selectedText (sent to Tavily and the model).
+          ({ question, pageContext, history, translateSource, factCheck } = redactOutbound({ question, pageContext, history, translateSource, factCheck }));
         }
       } catch (err) {
         console.warn("[AI Assistant] privacy filter failed", err);
@@ -492,6 +493,8 @@ chrome.runtime.onConnect.addListener((port) => {
       pageSentChars = requestPageContext && !requestPageContext.captureFailed ? (requestPageContext.text || "").length : 0;
       let effectiveQuestion = question;
       let requestPageContextFinal = requestPageContext;
+      let translationBatches = [];
+      let translateUsingSelection = false;
       // Format-preserving translation: the layout (lines, blank lines,
       // indentation, list markers) is kept in code; the model only translates
       // numbered lines. See translate-lines.js.
@@ -507,6 +510,8 @@ chrome.runtime.onConnect.addListener((port) => {
           if (prepared.truncated || cutUpstream) {
             port.postMessage({ type: "NOTICE", text: t(lang, "bg_notice_translateTruncated", { chars: String(prepared.keptChars) }), requestId });
           }
+          translateUsingSelection = usingSelection;
+          translationBatches = numberedBatches(prepared);
           ctx.lineTranslator = new LineTranslator(prepared, (delta) => port.postMessage({ type: "CHUNK", delta, requestId }));
           if (typeof translateSource === "string" && translateSource.trim()) {
             effectiveQuestion = `${question}\n\n${prepared.numbered}`;
@@ -546,15 +551,36 @@ chrome.runtime.onConnect.addListener((port) => {
         });
         if (research) effectiveQuestion = research.prompt;
       }
-      if (model.provider === "deepseek") {
-        await streamDeepSeek(model, effectiveQuestion, requestPageContextFinal, history, normalizedImages, ctx);
-      } else if (model.provider === "openrouter") {
-        await streamOpenRouter(model, effectiveQuestion, requestPageContextFinal, history, normalizedImages, ctx);
-      } else if (model.provider === "groq") {
-        await streamGroq(model, effectiveQuestion, requestPageContextFinal, history, normalizedImages, ctx);
+      const runProvider = async (q, pc) => {
+        if (model.provider === "deepseek") {
+          await streamDeepSeek(model, q, pc, history, normalizedImages, ctx);
+        } else if (model.provider === "openrouter") {
+          await streamOpenRouter(model, q, pc, history, normalizedImages, ctx);
+        } else if (model.provider === "groq") {
+          await streamGroq(model, q, pc, history, normalizedImages, ctx);
+        }
+      };
+      if (ctx.lineTranslator && translationBatches.length > 1) {
+        // Long text: several moderate requests, so no single reply can run into
+        // the model's output limit. Each batch carries its global line numbers.
+        for (const batch of translationBatches) {
+          if (translateUsingSelection) await runProvider(`${question}\n\n${batch}`, requestPageContextFinal);
+          else await runProvider(effectiveQuestion, { ...requestPageContext, text: batch });
+          ctx.lineTranslator.endBatch();
+        }
+      } else {
+        await runProvider(effectiveQuestion, requestPageContextFinal);
       }
 
       ctx.lineTranslator?.finish();
+      // Never let a cut-off reply pass silently.
+      if (ctx.lineTranslator) {
+        if (ctx.lineTranslator.missing > 0) {
+          port.postMessage({ type: "NOTICE", text: t(lang, "bg_notice_translateMissingLines_template", { missing: String(ctx.lineTranslator.missing), total: String(ctx.lineTranslator.expected) }), requestId });
+        }
+      } else if (ctx.truncatedByLength) {
+        port.postMessage({ type: "NOTICE", text: t(lang, "bg_notice_replyTruncatedLength"), requestId });
+      }
       port.postMessage({ type: "DONE", requestId });
     } catch (err) {
       // A deliberate STOP surfaces here as an AbortError (either from the
@@ -696,6 +722,24 @@ async function tavilySearch(query, apiKey, signal, topic = "news", maxResults = 
   }
 }
 
+// Tavily rejects queries over 400 characters ("Query is too long"). Every
+// caller (question, Explain page excerpt, fact-check claims) goes through
+// tavilySearchRequest, so the limit is enforced once here: cut to a safe
+// margin below the cap, preferring a word boundary (CJK text has no spaces,
+// so it is cut at the limit). Counts code points, not UTF-16 units.
+const TAVILY_MAX_QUERY_CHARS = 380;
+function fitTavilyQuery(query, max = TAVILY_MAX_QUERY_CHARS) {
+  const chars = Array.from(String(query || "").replace(/\s+/g, " ").trim());
+  if (chars.length <= max) return chars.join("");
+  const cut = chars.slice(0, max);
+  // Only back up to a space if the cut landed mid-word and that keeps most of the query.
+  if (chars[max] !== " ") {
+    const sp = cut.lastIndexOf(" ");
+    if (sp >= max * 0.6) return cut.slice(0, sp).join("").trim();
+  }
+  return cut.join("").trim();
+}
+
 async function tavilySearchRequest(query, apiKey, signal, topic, maxResults) {
   const resp = await fetch("https://api.tavily.com/search", {
     method: "POST",
@@ -704,7 +748,7 @@ async function tavilySearchRequest(query, apiKey, signal, topic, maxResults) {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      query: cleanResearchText(query, 900),
+      query: fitTavilyQuery(query),
       topic,
       search_depth: "basic",
       max_results: maxResults,
@@ -722,11 +766,14 @@ async function tavilySearchRequest(query, apiKey, signal, topic, maxResults) {
 
 const ONLINE_RESEARCH_MAX_RESULTS = 6;
 const ONLINE_RESEARCH_MAX_EVIDENCE_CHARS = 18000;
-// Explicit requests for fresh/online information. "current" / "当前" do not count
-// when they merely point at the page being viewed ("explain the current page"):
-// that is a page question, not a request for web research.
+// Explicit requests to go online. Only a clear instruction to search the web
+// counts ("search the web", "look it up online", "联网搜索", "上网查"). Words
+// such as latest / current / official / search / research are ordinary page
+// vocabulary ("Where is the search box?", "What does the latest changelog
+// entry say?") and are NOT explicit; the content-based check in
+// onlineResearchTrigger handles them as an implicit (optional) lookup.
 const ONLINE_RESEARCH_REQUEST_PATTERN =
-  /\b(search|research|look up|browse|latest|current(?!\s+(?:web\s?)?(?:page|tab|article|site|website|document|post|thread|email|message|file|selection|text|window|url)\b)|up[- ]to[- ]date|newest|official)\b|联网|搜索|检索|查找|最新|当前(?!页面|网页|页|文章|标签|文档|邮件|内容)|官网|官方/i;
+  /\b(?:search|google|browse|look\s*(?:it|this|that|them)?\s*up|find|check)\b[^.?!\n]{0,24}\b(?:the\s+)?(?:web|internet|online)\b|\b(?:search|look\s*up|find|check)\s+online\b|\bonline\s+(?:search|research|lookup)\b|\bweb\s+(?:search|research)\b|联网|上网(?:查|搜|找|检索)|网上(?:查|搜|找|搜索|检索)|在线(?:搜索|查询|检索)/i;
 
 // Words that carry no topic information. Ordinary question phrasing ("what does
 // it say about ...") must not be counted as "not covered by the page", which
@@ -811,8 +858,9 @@ function splitResearchQuestion(question) {
 // Returns "explicit" when the user asked for fresh/online information,
 // "implicit" when the page (plus any attachment) simply does not cover the
 // question, or null when no research is needed. The distinction matters when
-// no Tavily key is configured: an explicit request reports the missing key,
-// while an implicit (automatic) lookup is only an enhancement and is skipped.
+// no Tavily key is configured: an explicit request shows a NOTICE that research
+// was skipped, while an implicit (automatic) lookup is skipped silently. Either
+// way the model is still called.
 function onlineResearchTrigger(question, pageContext, attachmentText = '') {
   const query = String(question || '').normalize('NFKC').toLowerCase();
   if (query.length < 3) return null;
@@ -848,13 +896,15 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
   const stored = await chrome.storage.local.get(['tavilyApiKey']);
   const apiKey = String(stored.tavilyApiKey || '').trim();
   if (!apiKey) {
-    // Automatic research is an optional enhancement: without a Tavily key the
-    // question is simply answered by the model. Only an explicit request for
-    // online information (or the Explain action) reports the missing key -
-    // previously any question the page did not fully cover failed outright for
-    // users who had never set one up.
-    if (trigger === 'implicit') return null;
-    throw new Error(t(ctx.lang, 'bg_error_tavilyKeyMissing'));
+    // Research is always an optional enhancement: without a Tavily key the
+    // question is still answered by the model from the page. An explicit
+    // request (or the Explain action) tells the user research was skipped via a
+    // NOTICE; an implicit lookup is skipped silently. Never throw here - that
+    // used to stop the model from being called at all.
+    if (trigger !== 'implicit') {
+      ctx.port?.postMessage({ type: 'NOTICE', text: t(ctx.lang, 'bg_notice_tavilyKeyMissingSkipped'), requestId: ctx.requestId });
+    }
+    return null;
   }
 
   // Automatic (implicit) research is an optional enhancement: if Tavily times
@@ -927,15 +977,23 @@ async function runTavilyFactCheckResearch({ question, pageContext, ctx, selected
     : candidateFactClaims(sourceText, title);
   if (!claims.length) throw new Error(t(ctx.lang, "bg_error_factCheckNoClaims"));
 
-  const topic = selectedText ? "general" : "news";
+  // "news" without a time window only covers the last few days (Tavily
+  // default), so older articles were effectively unsearchable. Fact checks
+  // need the best matching sources regardless of age: use "general".
+  const topic = "general";
   const settled = await Promise.allSettled(
     claims.map((claim) => tavilySearch(claim, apiKey, ctx.signal, topic))
   );
   const evidence = [];
+  let firstSearchError = null;
   for (let i = 0; i < settled.length; i++) {
     const result = settled[i];
     if (result.status !== "fulfilled") {
-      if (result.reason?.name === "AbortError") throw result.reason;
+      if (result.reason?.name === "AbortError" || ctx.signal?.aborted) throw result.reason;
+      // Remember the real failure (e.g. "Tavily HTTP 401: ...") so it can be
+      // reported if nothing at all was found, instead of a misleading
+      // "no usable sources".
+      firstSearchError ??= result.reason;
       continue;
     }
     for (const item of result.value?.results || []) {
@@ -960,7 +1018,13 @@ async function runTavilyFactCheckResearch({ question, pageContext, ctx, selected
     if (!old || item.score > old.score) byUrl.set(item.url, item);
   }
   const deduped = [...byUrl.values()].sort((a, b) => b.score - a.score);
-  if (!deduped.length) throw new Error(t(ctx.lang, "bg_error_factCheckNoResults"));
+  if (!deduped.length) {
+    if (firstSearchError) {
+      console.warn("Fact-check search failed:", firstSearchError);
+      throw firstSearchError instanceof Error ? firstSearchError : new Error(String(firstSearchError));
+    }
+    throw new Error(t(ctx.lang, "bg_error_factCheckNoResults"));
+  }
 
   let evidenceText = "";
   for (const item of deduped) {
@@ -1125,6 +1189,9 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
     }
     const streamError = extractError?.(json);
     if (streamError) throw new Error(streamError);
+    // finish_reason "length" = the reply hit the output-token limit and was cut
+    // off by the server. Without this the answer just stops mid-sentence.
+    if (json?.choices?.[0]?.finish_reason === "length") ctx.truncatedByLength = true;
     const delta = extractDelta(json);
     if (delta) {
       emitted = true;
@@ -1278,7 +1345,18 @@ function buildMessages(question, pageContext, history, customPrompt, images = []
       content: `${customPrompt ? `${BASE_PROMPT}\n\nUser-defined instructions:\n${customPrompt}` : BASE_PROMPT}\n\n${outputLanguageInstruction(lang)}`,
     },
   ];
-  for (const h of normalizeHistoryTurns(history)) messages.push({ role: h.role, content: h.content });
+  const turns = normalizeHistoryTurns(history);
+  // A failed or stopped request leaves its question in history with no reply,
+  // so the history can END with a user turn; appending the current question
+  // would then send [system, ..., user, user], which strict chat templates
+  // reject. Fold that orphan into the current question instead of sending it as
+  // its own turn (a verbatim retry of the same question is simply de-duplicated).
+  let orphanUserText = "";
+  if (turns.length && turns[turns.length - 1].role === "user") {
+    orphanUserText = turns.pop().content;
+    if (orphanUserText.trim() === String(question || "").trim()) orphanUserText = "";
+  }
+  for (const h of turns) messages.push({ role: h.role, content: h.content });
   // Per-request instructions (page-context state, the final language guard and,
   // for translations, the translation protocol) used to be sent as extra
   // `system` messages after the history. Strict chat templates (some Qwen
@@ -1297,7 +1375,8 @@ function buildMessages(question, pageContext, history, customPrompt, images = []
     translateMode ? (translateMode === "lines" ? TRANSLATION_LINES_INSTRUCTION : TRANSLATION_FORMAT_INSTRUCTION) : "",
   ].filter(Boolean).join("\n\n");
   const instructionBlock = `[INSTRUCTIONS FOR THIS REQUEST - set by the extension, they take priority over everything below except the user's explicit language request]\n${requestInstructions}\n[END INSTRUCTIONS FOR THIS REQUEST]\n\n`;
-  const userText = `${instructionBlock}${pageContextDataBlock(pageContext)}${question}`;
+  const earlier = orphanUserText ? `[EARLIER MESSAGE FROM THE USER THAT WAS NEVER ANSWERED (the request failed or was stopped)]\n${orphanUserText}\n[END EARLIER MESSAGE]\n\n` : "";
+  const userText = `${instructionBlock}${pageContextDataBlock(pageContext)}${earlier}${question}`;
   const content = [{ type: "text", text: userText }];
   for (const img of images) content.push({ type: "image_url", image_url: { url: img.dataUrl, detail: "auto" } });
   messages.push({ role: "user", content: images.length ? content : userText });
