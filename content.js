@@ -926,6 +926,7 @@ function mdInlineList(nodes, pre) {
     const inner = mdInlineList(Array.from(c.childNodes), pre);
     if (tag === 'strong' || tag === 'b') out += mdWrap(inner, '**');
     else if (tag === 'em' || tag === 'i') out += mdWrap(inner, '*');
+    else if (tag === 'del' || tag === 's' || tag === 'strike') out += mdWrap(inner, '~~');
     else if (tag === 'code' || tag === 'kbd' || tag === 'samp') out += inner.trim() ? `\`${inner.trim().replace(/`/g, "'")}\`` : inner;
     else if (tag === 'a') {
       const href = mdAbsUrl(c.getAttribute('href') || '');
@@ -1062,10 +1063,10 @@ function extractSelectionMarkdown() {
   for (let i = 0; i < sel.rangeCount; i++) holder.appendChild(sel.getRangeAt(i).cloneContents());
   const text = mdCut(mdBlocksOf(holder).join('\n\n'));
   if (!text) return null;
-  // Inline emphasis is Markdown structure too. If it is missed here, a
-  // paragraph-recovery path can correctly retain blank lines but later render
-  // the literal `*` characters as plain text instead of emphasis.
-  const structured = /^(#{1,6} |[-*] |\d+\. |> |\||```)/m.test(text) || /\*\*|(?<!\*)\*(?!\s)[^*\n]*\S[^*\n]*\*(?!\*)|\]\(|`/.test(text);
+  // Inline emphasis and deletion are Markdown structure too. If either is
+  // missed here, a paragraph-recovery path can correctly retain blank lines
+  // but later render its literal marker characters as plain text.
+  const structured = /^(#{1,6} |[-*] |\d+\. |> |\||```)/m.test(text) || /\*\*|(?<!\*)\*(?!\s)[^*\n]*\S[^*\n]*\*(?!\*)|~~[^~\n]*\S[^~\n]*~~|\]\(|`/.test(text);
   return { text, structured, truncated: pageTextTruncated };
 }
 

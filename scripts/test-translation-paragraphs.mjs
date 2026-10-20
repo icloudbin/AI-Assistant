@@ -48,6 +48,22 @@ const inlineEmphasis = chooseTranslationSelection("First\nSecond", {
 });
 assert.deepEqual(inlineEmphasis, { text: "*First*\n\nSecond", format: "markdown", truncated: false });
 
+const strikethroughSource = "~~Removed source~~";
+const strikethroughPrepared = prepareLineTranslation(strikethroughSource);
+assert.ok(strikethroughPrepared, "strikethrough source should prepare for translation");
+let strikethroughTranslated = "";
+const strikethroughTranslator = new LineTranslator(strikethroughPrepared, (delta) => { strikethroughTranslated += delta; });
+strikethroughTranslator.push("[1] ~~已删除文本~~");
+strikethroughTranslator.finish();
+assert.equal(strikethroughTranslated, "~~已删除文本~~", "line translator must retain strikethrough markers");
+
+const inlineStrikethrough = chooseTranslationSelection("First\nSecond", {
+  text: "~~First~~\n\nSecond",
+  structured: true,
+  truncated: false,
+});
+assert.deepEqual(inlineStrikethrough, { text: "~~First~~\n\nSecond", format: "markdown", truncated: false });
+
 const browserPreferred = chooseTranslationSelection("One\n\nTwo", {
   text: "One\n\nTwo",
   structured: false,
