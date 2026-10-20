@@ -38,6 +38,16 @@ const structured = chooseTranslationSelection("Heading\nBody", {
 });
 assert.deepEqual(structured, { text: "# Heading\n\nBody", format: "markdown", truncated: true });
 
+// A selection extractor must flag one-pair emphasis as structured. This
+// mirrors content.js' inline-emphasis branch and ensures the selector sends
+// recovered paragraphs through the Markdown renderer rather than pre-wrap.
+const inlineEmphasis = chooseTranslationSelection("First\nSecond", {
+  text: "*First*\n\nSecond",
+  structured: true,
+  truncated: false,
+});
+assert.deepEqual(inlineEmphasis, { text: "*First*\n\nSecond", format: "markdown", truncated: false });
+
 const browserPreferred = chooseTranslationSelection("One\n\nTwo", {
   text: "One\n\nTwo",
   structured: false,
