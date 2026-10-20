@@ -25,6 +25,38 @@ assert.equal(
   "line translator must retain all blank-line paragraph separators"
 );
 
+const sourceWithTrailingWhitespace = [
+  "```js",
+  "const value = 1;  ",
+  "```",
+  "",
+  "First source line with Markdown hard break  ",
+  "Second source line.",
+  "",
+].join("\n");
+const preparedWithTrailingWhitespace = prepareLineTranslation(sourceWithTrailingWhitespace);
+assert.ok(preparedWithTrailingWhitespace, "source with trailing whitespace should prepare for translation");
+let translatedWithTrailingWhitespace = "";
+const trailingWhitespaceTranslator = new LineTranslator(
+  preparedWithTrailingWhitespace,
+  (delta) => { translatedWithTrailingWhitespace += delta; }
+);
+trailingWhitespaceTranslator.push("[5] 第一条翻译行\n[6] 第二条翻译行。");
+trailingWhitespaceTranslator.finish();
+assert.equal(
+  translatedWithTrailingWhitespace,
+  [
+    "```js",
+    "const value = 1;  ",
+    "```",
+    "",
+    "第一条翻译行  ",
+    "第二条翻译行。",
+    "",
+  ].join("\n"),
+  "line translator must retain trailing spaces, Markdown hard breaks, and a final newline"
+);
+
 const recovered = chooseTranslationSelection(
   "First source paragraph.\nSecond source paragraph.\nThird source paragraph.\nFourth source paragraph.",
   { text: source, structured: false, truncated: false }
@@ -71,4 +103,4 @@ const browserPreferred = chooseTranslationSelection("One\n\nTwo", {
 });
 assert.deepEqual(browserPreferred, { text: "One\n\nTwo", format: "text", truncated: false });
 
-console.log("OK: translated paragraphs and selection-source precedence are preserved.");
+console.log("OK: translated paragraphs, trailing whitespace, and selection-source precedence are preserved.");

@@ -2,9 +2,9 @@
 //
 // Deterministic, format-preserving translation. Asking a model to "keep the
 // format" is unreliable, so the layout is never delegated to it:
-//   1. The source text is split into lines. Blank lines, indentation, list
-//      markers / numbering ("1.", "-", "•", "#", ">") and lines with no
-//      letters (separators, bare numbers) stay in code.
+//   1. The source text is split into lines. Blank lines, indentation, trailing
+//      horizontal whitespace, list markers / numbering ("1.", "-", "•", "#",
+//      ">") and lines with no letters (separators, bare numbers) stay in code.
 //   2. Only the translatable text of each remaining line is sent to the model,
 //      tagged "[n] text".
 //   3. The model's "[n] translation" lines are streamed back through
@@ -49,18 +49,21 @@ export function prepareLineTranslation(source, maxChars = 120000) {
     const cut = text.lastIndexOf("\n");
     if (cut > 0) text = text.slice(0, cut);
   }
-  text = text.replace(/\s+$/, "");
   const rawLines = text.split("\n");
   let inFence = false;
   const lines = rawLines.map((raw) => {
     const isFence = FENCE_RE.test(raw);
     if (isFence) inFence = !inFence;
     const prefix = raw.match(PREFIX_RE)[1];
-    const body = raw.slice(prefix.length).replace(/\s+$/, "");
+    const bodyAndTrailingWhitespace = raw.slice(prefix.length);
+    const trailingWhitespace = bodyAndTrailingWhitespace.match(/[ \t]+$/)?.[0] || "";
+    const body = trailingWhitespace
+      ? bodyAndTrailingWhitespace.slice(0, -trailingWhitespace.length)
+      : bodyAndTrailingWhitespace;
     // Code (inside fences), fence lines, image lines and letter-less lines stay as they are.
     const translatable = !isFence && !inFence && !IMAGE_LINE_RE.test(raw) && HAS_LETTER_RE.test(body);
     const p = translatable ? protect(body) : { text: body, tokens: [] };
-    return { raw: raw.replace(/\s+$/, ""), prefix, body, safe: p.text, tokens: p.tokens, translatable };
+    return { raw, prefix, body, trailingWhitespace, safe: p.text, tokens: p.tokens, translatable };
   });
   const numbered = lines
     .map((l, i) => (l.translatable ? `[${i + 1}] ${l.safe}` : null))
@@ -135,7 +138,7 @@ export class LineTranslator {
     const l = this.lines[this.heldId];
     const translatedText = restore(this.heldText.trim(), l.tokens);
     if (translatedText) this.translated++;
-    this.write(`${l.prefix}${translatedText || l.body}`);
+    this.write(`${l.prefix}${translatedText || l.body}${l.trailingWhitespace}`);
     this.next = this.heldId + 1;
     this.heldId = -1;
     this.heldText = "";
