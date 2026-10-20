@@ -46,7 +46,7 @@ function isNonPublicIPv4([a, b, c]) {
 
 // ---------- IPv6 ----------
 // Returns eight 16-bit groups, or null if `text` is not a valid IPv6 literal.
-function parseIPv6(text) {
+export function parseIPv6(text) {
   let s = text;
   let tail = [];
   const v4 = /(\d{1,3}(?:\.\d{1,3}){3})$/.exec(s);

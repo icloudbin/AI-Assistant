@@ -135,6 +135,26 @@ const pageOut = r.out.split("\n");
 check("page translation is batched and complete", r.sent.length > 1 && pageOut.length === 400 && pageOut.every((l, i) => l.startsWith(`T:Line ${i + 1}:`)) && r.notices.length === 0, `${r.sent.length} requests, ${pageOut.length} lines`);
 providerReply = () => 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
 
+// --- Placeholders are numbered and the real values come back in the reply ----
+const lastUser = (body) => { const c = JSON.parse(body).messages.at(-1).content; return typeof c === "string" ? c : c.map((p) => p.text || "").join(""); };
+// A model that mentions the email placeholder, split across two streamed chunks.
+providerReply = (body) => {
+  const ph = lastUser(body).match(/\[EMAIL#\d+\]/)?.[0] || "[none]";
+  const half = Math.ceil(ph.length / 2);
+  return chunk(`Sure, I will write to ${ph.slice(0, half)}`) + chunk(`${ph.slice(half)} right away.`, "stop") + "data: [DONE]\n\n";
+};
+r = await ask({ question: "Write a note to jane.doe@example.com", pageContext: null, includePageContext: false, noWebResearch: true });
+check("provider only saw a numbered placeholder", r.sent.every((s) => !s.body.includes("jane.doe@example.com")) && /\[EMAIL#1\]/.test(lastUser(r.sent[0].body)));
+check("reply shows the real address (placeholder split across chunks)", r.out === "Sure, I will write to jane.doe@example.com right away.", JSON.stringify(r.out));
+check("no placeholder text reaches the user", !/\[[A-Z_]+#\d+\]/.test(r.out));
+// Translation: placeholders in the source must not appear in the translated text.
+const trSrc = ["Contact jane.doe@example.com or call +1 415 555 0132 today.", "", "Second line mentions bob@example.org only."];
+providerReply = echoTranslate(Infinity);
+r = await ask({ question: "Translate", pageContext: null, includePageContext: false, translateMode: true, translateSource: trSrc.join("\n"), noWebResearch: true });
+check("translation output has real email/phone, not placeholders", r.out.includes("jane.doe@example.com") && r.out.includes("+1 415 555 0132") && r.out.includes("bob@example.org") && !/\[[A-Z_]+(#\d+)?\]/.test(r.out), JSON.stringify(r.out));
+check("translation request never contained the real values", r.sent.every((s) => !/jane\.doe@|bob@example|415 555 0132/.test(s.body)));
+providerReply = () => 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
+
 // Filter off: the same data must pass through unchanged (proves the test can detect leaks).
 store.piiFilterEnabled = false;
 const off = await ask({ question: "x", pageContext, noWebResearch: true });

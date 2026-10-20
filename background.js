@@ -4,7 +4,7 @@ import { CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_
 import { getStoredLanguage, t } from "./i18n.js";
 import { restoreSettingsFromBackup } from "./settings-storage.js";
 import { checkImageUrl } from "./url-safety.js";
-import { redactOutbound, PII_FILTER_STORAGE_KEY } from "./pii-filter.js";
+import { redactOutbound, createRedactionSession, PlaceholderRestorer, PII_FILTER_STORAGE_KEY } from "./pii-filter.js";
 import { prepareLineTranslation, numberedBatches, LineTranslator } from "./translate-lines.js";
 
 // Restore settings as soon as the service worker starts, before any request
@@ -434,12 +434,16 @@ chrome.runtime.onConnect.addListener((port) => {
       // keys, tokens, etc. from EVERYTHING that leaves the browser - question,
       // attachments, page text and history - before any provider or web
       // research request is built. Only the local copy keeps the originals.
+      // Placeholders are numbered ([EMAIL#1]) and the mapping stays in this
+      // request's memory only; it is used to restore the real values in the reply.
+      let piiSession = null;
       try {
         const piiSetting = await chrome.storage.local.get(PII_FILTER_STORAGE_KEY);
         if (piiSetting[PII_FILTER_STORAGE_KEY] !== false) {
+          piiSession = createRedactionSession();
           // One choke point for every outbound text field, including
           // factCheck.selectedText (sent to Tavily and the model).
-          ({ question, pageContext, history, translateSource, factCheck } = redactOutbound({ question, pageContext, history, translateSource, factCheck }));
+          ({ question, pageContext, history, translateSource, factCheck } = redactOutbound({ question, pageContext, history, translateSource, factCheck }, piiSession));
         }
       } catch (err) {
         console.warn("[AI Assistant] privacy filter failed", err);
@@ -473,6 +477,11 @@ chrome.runtime.onConnect.addListener((port) => {
       port.postMessage({ type: "START", requestId });
 
       const ctx = { port, requestId, signal: abortController.signal, lang, translateMode: translateMode === true ? "free" : false, lineTranslator: null };
+      // Everything shown to the user goes through here so the real values replace
+      // the placeholders (also when one is split across two streamed chunks).
+      const chunkRestorer = new PlaceholderRestorer(piiSession, (delta) => port.postMessage({ type: "CHUNK", delta, requestId }));
+      ctx.sendChunk = (delta) => chunkRestorer.push(delta);
+      ctx.flushChunks = () => chunkRestorer.flush();
       const normalizedImages = Array.isArray(images) ? images.filter((img) => img && typeof img.dataUrl === "string" && /^data:image\/(jpeg|png|gif|webp);base64,/i.test(img.dataUrl)) : [];
       if (normalizedImages.length !== (Array.isArray(images) ? images.length : 0)) throw new Error(t(lang, "bg_error_imagesEncoding"));
 
@@ -512,7 +521,7 @@ chrome.runtime.onConnect.addListener((port) => {
           }
           translateUsingSelection = usingSelection;
           translationBatches = numberedBatches(prepared);
-          ctx.lineTranslator = new LineTranslator(prepared, (delta) => port.postMessage({ type: "CHUNK", delta, requestId }));
+          ctx.lineTranslator = new LineTranslator(prepared, (delta) => ctx.sendChunk(delta));
           if (typeof translateSource === "string" && translateSource.trim()) {
             effectiveQuestion = `${question}\n\n${prepared.numbered}`;
           } else {
@@ -573,6 +582,7 @@ chrome.runtime.onConnect.addListener((port) => {
       }
 
       ctx.lineTranslator?.finish();
+      ctx.flushChunks?.();
       // Never let a cut-off reply pass silently.
       if (ctx.lineTranslator) {
         if (ctx.lineTranslator.missing > 0) {
@@ -1196,7 +1206,7 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
     if (delta) {
       emitted = true;
       if (ctx.lineTranslator) ctx.lineTranslator.push(delta);
-      else ctx.port.postMessage({ type: "CHUNK", delta, requestId: ctx.requestId });
+      else ctx.sendChunk(delta);
     }
   };
 
@@ -1236,7 +1246,7 @@ function openAICompatibleStreamError(json) {
 // duplicated in more than one place, which risked the copies drifting apart on
 // a future edit; it now lives in this single copy, read via
 // pageContextInstruction().
-const BASE_PROMPT = "You are an assistant running in the browser side panel.";
+const BASE_PROMPT = "You are an assistant running in the browser side panel. The user's message may contain privacy placeholders such as [EMAIL#1], [PHONE#2] or [NAME#3]: they stand for real values that were hidden from you. Treat each one as that value, and whenever you mention or reproduce it write the placeholder exactly as given (never translate, alter, merge or invent one).";
 const MAX_PAGE_CONTEXT_CHARS = 120000;
 
 // Returns this request's page-context instruction (used by buildMessages).
