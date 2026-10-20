@@ -6,6 +6,7 @@ import { restoreSettingsFromBackup } from "./settings-storage.js";
 import { checkImageUrl } from "./url-safety.js";
 import { redactOutbound, createRedactionSession, PlaceholderRestorer, PII_FILTER_STORAGE_KEY } from "./pii-filter.js";
 import { prepareLineTranslation, numberedBatches, LineTranslator } from "./translate-lines.js";
+import { chooseTranslationSelection } from "./translation-selection.js";
 
 // Restore settings as soon as the service worker starts, before any request
 // arrives. Individual requests also retry this recovery as a safety net.
@@ -99,15 +100,16 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   });
 
   (async () => {
-    // Prefer the structured (Markdown) selection when it carries structure;
-    // otherwise the browser's own selection text keeps the exact line breaks.
+    // Keep Markdown only for selections that actually contain Markdown
+    // structure. For plain text, also prefer the extractor when it recovered
+    // paragraph separators that Chrome's selection serialization dropped.
     const md = await readSelectionMarkdown(tab.id, info.frameId);
-    const useMarkdown = !!(md && md.structured && md.text.trim());
+    const selection = chooseTranslationSelection(info.selectionText, md);
     const pending = {
       action: "translate",
-      text: useMarkdown ? md.text : info.selectionText.trim(),
-      format: useMarkdown ? "markdown" : "text",
-      truncated: useMarkdown && md.truncated === true,
+      text: selection.text,
+      format: selection.format,
+      truncated: selection.truncated,
       tabId: tab.id,
       windowId: tab.windowId,
       url: String(tab.url || ""),
