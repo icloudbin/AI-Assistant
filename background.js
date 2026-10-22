@@ -1,6 +1,6 @@
 // background.js (root directory)
-import { findKnownModel, DEFAULT_MAX_PAGE_CHARS } from "./models.js";
-import { CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY } from "./storage-keys.js";
+import { findKnownModel, DEFAULT_MAX_PAGE_CHARS, MAX_PAGE_CONTEXT_CHARS } from "./models.js";
+import { AUTO_WEB_RESEARCH_KEY, CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY } from "./storage-keys.js";
 import { getStoredLanguage, t } from "./i18n.js";
 import { restoreSettingsFromBackup } from "./settings-storage.js";
 import { checkImageUrl } from "./url-safety.js";
@@ -154,8 +154,9 @@ function isOwnExtensionPage(sender) {
 //  * only public internet hosts, never localhost / private / link-local /
 //    cloud-metadata addresses, unless the host is the one the user is currently
 //    viewing (so images on an intranet or localhost page still work there);
-//  * redirects are followed by the browser, so the FINAL url is re-checked and
-//    the response discarded if it landed somewhere not allowed;
+//  * redirects are refused (redirect: "error") because a redirect target can
+//    only be checked after the request has been sent; the final URL is still
+//    re-checked as defense in depth;
 //  * a timeout and a hard byte cap, enforced while streaming;
 //  * the body must really be an image (file signature), not merely labelled one;
 //  * SVG is not accepted (the side panel's sanitizer already refuses SVG data
@@ -220,10 +221,16 @@ async function fetchImageDataUrl(rawUrl, maxBytes, allowedTypes, pageUrl = "") {
       method: "GET",
       credentials: "omit",
       cache: "force-cache",
+      // Never follow redirects. The destination of a redirect cannot be checked
+      // BEFORE the request is sent (extension fetch() cannot read Location with
+      // redirect:"manual"), so a public URL could 302 the worker to localhost,
+      // a router or a cloud-metadata endpoint and the request would already
+      // have reached it. A redirecting image URL simply fails as "unavailable".
+      redirect: "error",
       signal: controller.signal,
     });
-    // The browser has already followed any redirects; make sure the response
-    // that came back is from a destination we would have allowed.
+    // Defense in depth: with redirects refused this should always equal the
+    // requested URL, but keep verifying the final destination.
     if (resp.url && !checkImageUrl(resp.url, pageUrl)) {
       resp.body?.cancel().catch(() => {});
       throw new Error("blocked");
@@ -343,6 +350,56 @@ function startRequestKeepAlive() {
 // live and die with the service worker instance, so it always matches reality.
 const connectedPanelPorts = new Set();
 
+// Long translations are sent as several requests in a row. Free tiers (Groq
+// especially) answer a later batch with HTTP 429 or a transient 5xx, which used
+// to end the whole translation at that batch. Such a batch is retried up to
+// BATCH_MAX_RETRIES times with exponential backoff (3 s, then 6 s) before the
+// translation is stopped there.
+//
+// Only a refusal that arrives before the reply starts is retried: providerHttpError()
+// is thrown on a non-2xx response, before readSse() has pushed a single line to the
+// LineTranslator, so a retry cannot duplicate or reorder already-translated lines.
+// A failure in the middle of a stream has a different message and is not retried.
+const BATCH_MAX_RETRIES = 2;
+const BATCH_RETRY_BASE_MS = 3000;
+const RETRYABLE_HTTP_ERROR_RE = /^HTTP (429|5\d\d)\b/;
+
+function retryableHttpStatus(err) {
+  return String(err?.message || "").match(RETRYABLE_HTTP_ERROR_RE)?.[1] || null;
+}
+
+// setTimeout that ends with an AbortError as soon as the request is aborted
+// (STOP, a newer ASK, panel closed), so a stopped request never sits out the
+// remaining backoff and then sends another request.
+function abortableDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function runBatchWithRetry(run, signal) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await run();
+    } catch (err) {
+      if (!retryableHttpStatus(err) || attempt >= BATCH_MAX_RETRIES) throw err;
+      await abortableDelay(BATCH_RETRY_BASE_MS * 2 ** attempt, signal);
+    }
+  }
+}
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "ai-chat") return;
   // The chat port carries API-key-backed requests; serve only our own pages.
@@ -415,6 +472,13 @@ chrome.runtime.onConnect.addListener((port) => {
     if (msg?.type !== "ASK") return;
 
     const requestId = msg.payload?.requestId ?? null;
+    // A second ASK on this port while a request is still running must not leave
+    // that request running: its controller is about to be overwritten below,
+    // after which nothing could abort it any more (STOP, panel closed) and it
+    // would keep spending quota and pushing to this port. Abort it first. It
+    // ends through the AbortError path (silent), and its finally block leaves
+    // the new request's state alone because the request ids differ.
+    activeAbortController?.abort();
     const abortController = new AbortController();
     activeRequestId = requestId;
     activeAbortController = abortController;
@@ -540,9 +604,10 @@ chrome.runtime.onConnect.addListener((port) => {
         });
         effectiveQuestion = research.prompt;
       } else if (!noWebResearch && translateMode !== true) {
-        // Normal questions use web research only when the current page cannot
-        // cover their key conditions. This avoids a separate mode switch while
-        // preserving local-only answers for questions the page already covers.
+        // Normal questions use web research when the user asks for it
+        // explicitly, or - only if "Automatically search the web" is on in
+        // Settings (off by default) - when the current page cannot cover their
+        // key conditions. Questions the page already covers stay local.
         //
         // noWebResearch is sent by the predefined page/selection transforms
         // (quick actions Summarize/Translate/Explain/Key Points and their
@@ -571,12 +636,30 @@ chrome.runtime.onConnect.addListener((port) => {
           await streamGroq(model, q, pc, history, normalizedImages, ctx);
         }
       };
+      let translationStoppedAt = null;
       if (ctx.lineTranslator && translationBatches.length > 1) {
         // Long text: several moderate requests, so no single reply can run into
         // the model's output limit. Each batch carries its global line numbers.
         for (const batch of translationBatches) {
-          if (translateUsingSelection) await runProvider(`${question}\n\n${batch}`, requestPageContextFinal);
-          else await runProvider(effectiveQuestion, { ...requestPageContext, text: batch });
+          try {
+            await runBatchWithRetry(
+              () => (translateUsingSelection
+                ? runProvider(`${question}\n\n${batch}`, requestPageContextFinal)
+                : runProvider(effectiveQuestion, { ...requestPageContext, text: batch })),
+              abortController.signal,
+            );
+          } catch (err) {
+            // Still refused after the retries (rate limit / server error). If
+            // earlier batches were translated, keep them: stop here, let
+            // finish() fill the rest with the original text (same layout as
+            // for any untranslated line) and say below where it broke off.
+            // With nothing translated yet there is nothing to keep, so the
+            // error is reported as before.
+            const status = retryableHttpStatus(err);
+            if (!status || ctx.lineTranslator.translated === 0) throw err;
+            translationStoppedAt = { status, line: Number(batch.match(/^\[(\d+)\]/)?.[1]) || 0 };
+            break;
+          }
           ctx.lineTranslator.endBatch();
         }
       } else {
@@ -587,7 +670,11 @@ chrome.runtime.onConnect.addListener((port) => {
       ctx.flushChunks?.();
       // Never let a cut-off reply pass silently.
       if (ctx.lineTranslator) {
-        if (ctx.lineTranslator.missing > 0) {
+        if (translationStoppedAt) {
+          // Replaces the generic "lines not translated" notice: it names the
+          // line where the translation broke off and why.
+          port.postMessage({ type: "NOTICE", text: t(lang, "bg_notice_translateStoppedAtLine_template", { line: String(translationStoppedAt.line), status: translationStoppedAt.status, translated: String(ctx.lineTranslator.translated), total: String(ctx.lineTranslator.expected) }), requestId });
+        } else if (ctx.lineTranslator.missing > 0) {
           port.postMessage({ type: "NOTICE", text: t(lang, "bg_notice_translateMissingLines_template", { missing: String(ctx.lineTranslator.missing), total: String(ctx.lineTranslator.expected) }), requestId });
         }
       } else if (ctx.truncatedByLength) {
@@ -900,10 +987,27 @@ function pageResearchQuery(question, pageContext) {
   return cleanResearchText([title, excerpt].filter(Boolean).join("\n"), 900) || question;
 }
 
+// "Automatically search the web" in Settings. OFF unless the user turned it on
+// (anything but a stored `true`, including a failed read, counts as off).
+async function autoWebResearchEnabled() {
+  try {
+    return (await chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY))[AUTO_WEB_RESEARCH_KEY] === true;
+  } catch {
+    return false;
+  }
+}
+
 async function runTavilyQuestionResearch({ question, pageContext, ctx, force = false }) {
   const { text: questionText, attachmentText } = splitResearchQuestion(question);
   const trigger = force ? 'explicit' : onlineResearchTrigger(questionText, pageContext, attachmentText);
   if (!trigger) return null;
+  // An implicit trigger is only the extension's guess that the page cannot
+  // answer the question (a year the page does not contain, low keyword overlap,
+  // or no page text at all). Acting on it sends the user's question to Tavily
+  // although the user never asked for a web search, so it needs the user's
+  // opt-in. An explicit request ("search the web"), the Explain action and
+  // Fact Check are the user's own request and are not affected by the switch.
+  if (trigger === 'implicit' && !(await autoWebResearchEnabled())) return null;
 
   const stored = await chrome.storage.local.get(['tavilyApiKey']);
   const apiKey = String(stored.tavilyApiKey || '').trim();
@@ -1086,7 +1190,11 @@ async function providerHttpError(resp) {
 }
 
 async function streamDeepSeek(model, question, pageContext, history, images, ctx) {
-  const { apiKey, customPrompt } = await chrome.storage.local.get(["apiKey", "customPrompt"]);
+  const stored = await chrome.storage.local.get(["apiKey", "customPrompt"]);
+  // Trim: a key imported from a settings file may carry a trailing newline,
+  // which is an illegal character in an HTTP header value.
+  const apiKey = String(stored.apiKey || "").trim();
+  const customPrompt = stored.customPrompt;
   if (!apiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "DeepSeek" }));
 
   // `deepseek-flash` (DeepSeek-V4.1-Flash) accepts image input directly, so
@@ -1147,7 +1255,10 @@ async function streamGroq(model, question, pageContext, history, images, ctx) {
 // The endpoint is OpenAI-Chat-Completions-compatible, so the request shape
 // and SSE response handling below stay unchanged.
 async function streamOpenRouter(model, question, pageContext, history, images, ctx) {
-  const { openrouterApiKey, customPrompt } = await chrome.storage.local.get(["openrouterApiKey", "customPrompt"]);
+  const stored = await chrome.storage.local.get(["openrouterApiKey", "customPrompt"]);
+  // Trim: see streamDeepSeek() - a newline in an imported key breaks the header.
+  const openrouterApiKey = String(stored.openrouterApiKey || "").trim();
+  const customPrompt = stored.customPrompt;
   if (!openrouterApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "OpenRouter" }));
 
   const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -1249,7 +1360,6 @@ function openAICompatibleStreamError(json) {
 // a future edit; it now lives in this single copy, read via
 // pageContextInstruction().
 const BASE_PROMPT = "You are an assistant running in the browser side panel. The user's message may contain privacy placeholders such as [EMAIL#1], [PHONE#2] or [NAME#3]: they stand for real values that were hidden from you. Treat each one as that value, and whenever you mention or reproduce it write the placeholder exactly as given (never translate, alter, merge or invent one).";
-const MAX_PAGE_CONTEXT_CHARS = 120000;
 
 // Returns this request's page-context instruction (used by buildMessages).
 // Unconditional - always returns something, rather
@@ -1354,7 +1464,11 @@ function buildMessages(question, pageContext, history, customPrompt, images = []
   const messages = [
     {
       role: "system",
-      content: `${customPrompt ? `${BASE_PROMPT}\n\nUser-defined instructions:\n${customPrompt}` : BASE_PROMPT}\n\n${outputLanguageInstruction(lang)}`,
+      // The output-language requirement is NOT repeated here: it is sent once,
+      // as the final guard in the current user turn below. Sending the same
+      // ~400-500 token block in both places doubled its cost on every request
+      // (and counts against TPM-limited free tiers).
+      content: customPrompt ? `${BASE_PROMPT}\n\nUser-defined instructions:\n${customPrompt}` : BASE_PROMPT,
     },
   ];
   const turns = normalizeHistoryTurns(history);
@@ -1381,8 +1495,9 @@ function buildMessages(question, pageContext, history, customPrompt, images = []
   // never be treated as current - see pageContextInstruction() above.
   const requestInstructions = [
     pageContextInstruction(pageContext),
-    // Final language guard: keep the reply in the Settings > Language choice
-    // even when the question, page, history or custom prompt use another language.
+    // Language guard (the only copy sent): keep the reply in the Settings >
+    // Language choice even when the question, page, history or custom prompt
+    // use another language.
     outputLanguageInstruction(lang),
     translateMode ? (translateMode === "lines" ? TRANSLATION_LINES_INSTRUCTION : TRANSLATION_FORMAT_INSTRUCTION) : "",
   ].filter(Boolean).join("\n\n");

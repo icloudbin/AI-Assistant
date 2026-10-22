@@ -1,6 +1,6 @@
 Privacy Policy for AI Assistant
 
-Effective Date: October 17, 2026
+Effective Date: October 21, 2026
 
 AI Assistant ("the Extension") is a browser extension that provides AI assistance for webpages, selected webpage text, and user-provided files. This Privacy Policy explains what information the Extension processes, how it is used, and when it is shared with third-party services.
 
@@ -14,7 +14,7 @@ Custom prompts configured by the user
 Interface language and translation preferences
 Voice input language preference
 Locally saved conversation history
-Privacy filter and page screenshot preferences
+Privacy filter, page screenshot and automatic web search preferences
 Temporary information required to pass a user-initiated context-menu action to the Side Panel
 
 The Extension does not transmit these locally stored settings to the Extension developer's servers.
@@ -44,6 +44,8 @@ The quick actions (Summarize, Translate, Explain, Key Points and Fact Check) alw
 Webmail and online-banking/payment sites (for example Gmail, Outlook, Proton Mail, PayPal and major banks, plus self-hosted mail pages recognised by the extension's mail extractors) are treated as sensitive: for ordinary questions the page is not sent, even when Read current page is on, unless the user clicks "Send this site this session" in the context bar. That permission applies only to that site and only until the side panel is closed. The quick actions are explicit actions on the page and still read it. The site list is a heuristic and does not cover every mail or banking site.
 
 Page screenshot and images: only if the user turns on "Page screenshot and images" in Settings (off by default), the quick actions also capture a screenshot of the visible part of the current tab and up to a few of the page's images and send them to the selected AI provider. These images are sent as they appear, including any personal information visible on the page; the privacy filter described below cannot redact images. Images the user attaches themselves are sent as described in section 3.
+
+Automatic web search: only if the user turns on "Automatically search the web when the page cannot answer a question" in Settings (off by default) and has added a Tavily API key, the Extension sends the user's question text to Tavily whenever it judges that the current page cannot answer it (for example, the question mentions a year that the page does not contain). With this setting off, a question is sent to Tavily only when the user explicitly asks for a web search (for example "search the web"), uses the Explain quick action, or runs Fact Check. The privacy filter described below is applied to what is sent to Tavily.
 
 Privacy filter: unless the user turns it off in Settings (on by default), the Extension locally replaces recognisable personal and sensitive text (such as emails, phone numbers, card and ID numbers, IP addresses, API keys, tokens, passwords, session cookies, MAC addresses, street addresses, and clearly labelled names or common given names followed by a surname) with numbered placeholders such as [EMAIL#1] before the question, page text, attachment text and conversation history are sent to an AI provider or to Tavily. The filter is pattern based and is a safety net, not a guarantee. The mapping between a placeholder and the original text is kept only in the Extension's memory for the duration of that one request and is never sent anywhere; it is used to put your original text back into the reply you see (for example in a translation). Locally stored history keeps the original text.
 
@@ -84,7 +86,7 @@ The Extension does not provide its own AI inference server. Depending on the mod
 DeepSeek — https://api.deepseek.com
 Groq — https://api.groq.com
 OpenRouter — https://openrouter.ai
-- Tavily — https://api.tavily.com (only when the user has added a Tavily API key; used for online research such as Fact Check, Explain, and automatic lookups for questions the current page cannot answer)
+- Tavily — https://api.tavily.com (only when the user has added a Tavily API key; used for online research when the user asks for a web search, uses Explain, or runs Fact Check, and for automatic lookups for questions the current page cannot answer only if the user has turned on "Automatically search the web" in Settings, which is off by default)
 
 The information sent to the selected provider may include the user's question, relevant conversation history, custom prompt, webpage context, selected webpage text, and attached images or extracted file content.
 

@@ -11,6 +11,9 @@ export const LANGUAGE_STORAGE_KEY = "languagePreference";
 // Text selected from a webpage for the AI context menu.
 export const PENDING_CONTEXT_ACTION_KEY = "pendingContextAction";
 export const PREFERRED_TRANSLATION_LANGUAGE_KEY = "preferredTranslationLanguage";
+// "Automatically search the web" (Settings > Web Research). Boolean, OFF unless
+// it is exactly true. Read by background.js, written by options.js.
+export const AUTO_WEB_RESEARCH_KEY = "autoWebResearchEnabled";
 
 // Upper bound on saved conversations kept in chrome.storage.local. Shared by
 // sidepanel.js (which trims to this on every save) and options.js (which

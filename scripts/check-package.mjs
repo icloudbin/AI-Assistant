@@ -131,6 +131,22 @@ if (inGit) {
   }
 }
 
+// 5. The page-text limit has ONE definition: MAX_PAGE_CONTEXT_CHARS in
+// models.js. background.js and sidepanel.js must import it rather than declare
+// their own copy. content.js is injected as a classic script and cannot import
+// a module, so it keeps PAGE_CONTEXT_CHAR_LIMIT; its value must match.
+{
+  const read = (f) => fs.readFileSync(path.join(root, f), "utf8");
+  const shared = read("models.js").match(/export const MAX_PAGE_CONTEXT_CHARS = (\d+);/);
+  const content = read("content.js").match(/const PAGE_CONTEXT_CHAR_LIMIT = (\d+);/);
+  if (!shared) problems.push("page limit: models.js does not export MAX_PAGE_CONTEXT_CHARS");
+  else if (!content) problems.push("page limit: PAGE_CONTEXT_CHAR_LIMIT not found in content.js");
+  else if (shared[1] !== content[1]) problems.push(`page limit: content.js PAGE_CONTEXT_CHAR_LIMIT (${content[1]}) differs from models.js MAX_PAGE_CONTEXT_CHARS (${shared[1]})`);
+  for (const f of ["background.js", "sidepanel/sidepanel.js"]) {
+    if (/^\s*(?:export\s+)?(?:const|let|var)\s+MAX_PAGE_CONTEXT_CHARS\b/m.test(read(f))) problems.push(`page limit: ${f} declares its own MAX_PAGE_CONTEXT_CHARS; import it from models.js instead`);
+  }
+}
+
 console.log(`Required files (${required.size}):`);
 for (const f of [...required].sort()) console.log("  " + f);
 if (problems.length) {

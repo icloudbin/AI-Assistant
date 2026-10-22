@@ -168,6 +168,9 @@ function extractProtonMail() {
 // before it could reach the model. 120,000 characters is about 30,000 English
 // tokens: large enough for a full product page while still leaving room for
 // the user's question, instructions, and conversation history.
+// Must equal MAX_PAGE_CONTEXT_CHARS in models.js. This file is injected with
+// chrome.scripting.executeScript as a classic script, so it cannot import that
+// module; scripts/check-package.mjs fails if the two values differ.
 const PAGE_CONTEXT_CHAR_LIMIT = 120000;
 
 // Set whenever extracted text had to be cut at PAGE_CONTEXT_CHAR_LIMIT during the

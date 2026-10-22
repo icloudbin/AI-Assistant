@@ -1,5 +1,5 @@
 // sidepanel/sidepanel.js —— Fixed version: no trailing spaces; keeps import "../models.js"; API Key configuration moved to Settings
-import { MODELS, findModelById, findKnownModel, resolveModelId, findModelIdByLabel, modelSupportsVision } from "../models.js";
+import { MODELS, MAX_PAGE_CONTEXT_CHARS, findModelById, findKnownModel, resolveModelId, findModelIdByLabel, modelSupportsVision } from "../models.js";
 import { HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY, PENDING_CONTEXT_ACTION_KEY, PREFERRED_TRANSLATION_LANGUAGE_KEY, MAX_SAVED_CONVERSATIONS } from "../storage-keys.js";
 import { sensitiveHostOf, hostOf } from "../sensitive-sites.js";
 import { getStoredLanguage, applyStaticTranslations, t, LANGUAGE_STORAGE_KEY } from "../i18n.js";
@@ -386,7 +386,18 @@ const MD_IMAGE_RE = new RegExp(String.raw`!\[([^\]]*)\]\(` + MD_LINK_URL + Strin
 const MD_LINK_RE = new RegExp(String.raw`\[([^\]]+)\]\(` + MD_LINK_URL + String.raw`(?:\s+"[^"]*")?\)`, "g");
 
 function inlineMarkdownToHtml(text) {
-  let s = escapeHtml(text);
+  // Code spans and the generated tags below are swapped for placeholders while
+  // the rules run and put back at the end. A placeholder is a private-use
+  // character, the index and a second private-use character (U+E000..U+E003),
+  // not printable text such as "@@HTMLTAG0@@": a model can write any printable
+  // string, and a literal "@@INLINECODE0@@" in a reply used to be replaced by
+  // the first code span while the real placeholder stayed in the output.
+  // Private-use characters are not Markdown syntax, letters or digits, so no
+  // rule below treats them specially, and any that are already in the text are
+  // removed first, so the text can never contain a placeholder of its own.
+  let s = escapeHtml(text).replace(/[\uE000-\uE003]/g, "");
+  const codeToken = (i) => `\uE000${i}\uE001`;
+  const tagToken = (i) => `\uE002${i}\uE003`;
   const codeSpans = [];
   // Generated <a>/<img> tags are kept out of the string while the emphasis
   // rules below run. Those rules work on the HTML built so far and would
@@ -394,12 +405,12 @@ function inlineMarkdownToHtml(text) {
   // "_next_" or "*a*" gained <em> tags and led to the wrong address).
   const htmlTags = [];
   const stashTag = (html) => {
-    const token = `@@HTMLTAG${htmlTags.length}@@`;
+    const token = tagToken(htmlTags.length);
     htmlTags.push(html);
     return token;
   };
   s = s.replace(/`([^`\n]+)`/g, (_, code) => {
-    const token = `@@INLINECODE${codeSpans.length}@@`;
+    const token = codeToken(codeSpans.length);
     codeSpans.push(`<code>${code}</code>`);
     return token;
   });
@@ -477,10 +488,10 @@ function inlineMarkdownToHtml(text) {
     // A replacer function is required: with a plain replacement string, "$&",
     // "$$", "$`" and "$'" inside the code span would be interpreted as special
     // replacement patterns and corrupt the output (e.g. `$&` in a regex).
-    s = s.replace(`@@INLINECODE${i}@@`, () => codeSpans[i]);
+    s = s.replace(codeToken(i), () => codeSpans[i]);
   }
   for (let i = 0; i < htmlTags.length; i++) {
-    s = s.replace(`@@HTMLTAG${i}@@`, () => htmlTags[i]);
+    s = s.replace(tagToken(i), () => htmlTags[i]);
   }
   return s;
 }
@@ -1144,10 +1155,10 @@ function stopActiveRequest() {
   setStreaming(false);
 }
 
-// This must match content.js and background.js. Keeping the value here avoids
-// silently reintroducing a smaller truncation after the content script has
-// already captured the full readable page.
-const MAX_PAGE_CONTEXT_CHARS = 120000;
+// MAX_PAGE_CONTEXT_CHARS (imported from models.js, shared with background.js)
+// must stay equal to content.js's PAGE_CONTEXT_CHAR_LIMIT, so the panel never
+// reintroduces a smaller truncation after the content script has already
+// captured the full readable page. scripts/check-package.mjs enforces this.
 const MAX_AUTO_PAGE_IMAGE_URLS = 8;
 const PAGE_SCREENSHOT_MAX_DIMENSION = 1600;
 const PAGE_SCREENSHOT_MAX_BYTES = 2 * 1024 * 1024;
@@ -1932,6 +1943,14 @@ async function extractZipText(file) {
   const entryCount = readU16(view, eocd + 10);
   const centralSize = readU32(view, eocd + 12);
   const centralOffset = readU32(view, eocd + 16);
+  // A ZIP64 archive writes 0xFFFF / 0xFFFFFFFF into each of these fields whose real
+  // value does not fit, and keeps it in a ZIP64 record that this reader does not
+  // parse. Say so here: left to the range check below, a saturated offset or size is
+  // reported as an "invalid central directory" (misleading), and a saturated entry
+  // count would silently read only the first 65,535 entries.
+  if (entryCount === 0xffff || centralSize === 0xffffffff || centralOffset === 0xffffffff) {
+    throw new Error(t(currentLang, "sp_zip_error_zip64Unsupported"));
+  }
   if (centralOffset + centralSize > bytes.length) throw new Error(t(currentLang, "sp_zip_error_invalidCentralDir"));
 
   let offset = centralOffset;
@@ -2000,7 +2019,18 @@ async function extractZipText(file) {
     textEntriesRead++;
     if (textEntriesRead >= MAX_ZIP_ENTRIES) limitReached = true; // the last entry that gets read
     const compressed = bytes.slice(dataStart, dataEnd);
-    const content = method === 0 ? compressed : await inflateRaw(compressed);
+    let content;
+    try {
+      content = method === 0 ? compressed : await inflateRaw(compressed);
+    } catch (err) {
+      // No DecompressionStream at all is a limit of the browser, not damage to this
+      // entry: that still fails the attachment, with its own message.
+      if (typeof DecompressionStream === "undefined") throw err;
+      // Damaged Deflate data makes the stream throw. Only this entry is lost: report
+      // it as unreadable and go on with the rest of the archive.
+      addToZipBucket(report.unreadable, name);
+      continue;
+    }
     if (!content) { addToZipBucket(report.tooLarge, name); continue; } // grew past the size cap while inflating
 
     const text = decodeTextBytes(content);
@@ -2499,210 +2529,231 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   // abandoned this request while it was still gathering page context.
   const isCancelled = () => currentRequestId !== requestId;
 
-  // Only clear the composer when the submission came from it. Quick actions
-  // and context-menu actions pass a forcedQuestion; wiping the input then
-  // would destroy a draft the user typed but had not sent yet.
-  if (forcedQuestion === null) questionInput.value = "";
-  autoScrollEnabled = true;
-  const displayQuestion = forcedDisplayQuestion !== null
-    ? String(forcedDisplayQuestion).trim()
-    : (question || t(currentLang, "attachedFilesFallback"));
-  const readyAttachments = attachments.filter((a) => a.status === "ready");
-  const displayContent = attachmentText
-    ? `${displayQuestion}\n\n📎 ${readyAttachments.map((a) => a.name).join(", ")}`
-    : displayQuestion;
-  addBubble("user", displayContent);
-  const baseQuestionForApi = `${question || "Please analyze the attached files."}${attachmentText}`;
-  history.push({ role: "user", content: baseQuestionForApi, displayContent, modelLabel: "" });
-  if (!currentConversationId) {
-    currentConversationId = createConversation().id;
-  }
-  let convo = currentConversation();
-  if (!convo) {
-    convo = { id: currentConversationId, title: "", messages: [], updatedAt: Date.now() };
-    conversations.unshift(convo);
-  }
-  convo.title = convo.title || makeTopicTitle(history);
-  renderHistorySelect();
+  // From here on anything can throw (storage, tab queries, page capture,
+  // screenshots, rendering). setStreaming(true) above has locked the composer,
+  // so an unexpected exception must unlock it and tell the user; otherwise the
+  // panel stays disabled until it is reopened. `posted` marks the point where
+  // the request is in flight and the background worker owns the unlock (DONE /
+  // ERROR / STOP), so an error after that must not unlock a live request.
+  let posted = false;
   try {
-    await saveConversations();
-  } catch (err) {
-    // A storage failure must not leave the composer locked or block the answer.
-    console.error("[AI Assistant] Unable to save conversation:", err);
-  }
-  if (isCancelled()) return;
 
-  let pageContext = null;
-  const shouldIncludePageContext = forcedIncludePageContext === null
-    ? includeContextToggle.checked === true
-    : forcedIncludePageContext === true;
-  // Webmail / banking: an ordinary question must not send the page unless the
-  // user allowed this site. Checked against the tab's URL before capture and
-  // again on the captured page below (the tab can change in between).
-  let sensitiveBlocked = false;
-  if (shouldIncludePageContext && forcedIncludePageContext === null) {
-    const tabNow = await getCurrentActiveTab();
-    if (isBlockedSensitivePage(tabNow?.url)) {
-      sensitiveBlocked = true;
-      updateContextBar({ title: String(tabNow?.title || ""), url: String(tabNow?.url || "") });
+    // Only clear the composer when the submission came from it. Quick actions
+    // and context-menu actions pass a forcedQuestion; wiping the input then
+    // would destroy a draft the user typed but had not sent yet.
+    if (forcedQuestion === null) questionInput.value = "";
+    autoScrollEnabled = true;
+    const displayQuestion = forcedDisplayQuestion !== null
+      ? String(forcedDisplayQuestion).trim()
+      : (question || t(currentLang, "attachedFilesFallback"));
+    const readyAttachments = attachments.filter((a) => a.status === "ready");
+    const displayContent = attachmentText
+      ? `${displayQuestion}\n\n📎 ${readyAttachments.map((a) => a.name).join(", ")}`
+      : displayQuestion;
+    addBubble("user", displayContent);
+    const baseQuestionForApi = `${question || "Please analyze the attached files."}${attachmentText}`;
+    history.push({ role: "user", content: baseQuestionForApi, displayContent, modelLabel: "" });
+    if (!currentConversationId) {
+      currentConversationId = createConversation().id;
     }
-  }
-  if (shouldIncludePageContext && !sensitiveBlocked) {
-    // Capture the page at the moment the user submits the request. The API
-    // request must never reuse the page context shown or captured earlier.
-    pageContext = await getActivePageContext(0, translateMode === true && !translateSource ? "markdown" : null);
-    if (isCancelled()) return;
-    if (pageContext && forcedIncludePageContext === null && isBlockedSensitivePage(pageContext.url, pageContext.source)) {
-      sensitiveBlocked = true;
-      updateContextBar({ title: pageContext.title, url: pageContext.url, source: pageContext.source });
-      pageContext = null;
-    } else if (pageContext) {
-      updateContextBar(pageContext);
-    } else {
-      // Capture failed - the page may still be loading, or may not be a
-      // readable web page (new tab, PDF viewer, browser-internal pages).
-      // Keep the bar visible with a warning, and send a {captureFailed}
-      // sentinel instead of null so background.js instructs the model NOT
-      // to reuse page content from earlier turns - without it, quick
-      // actions translated/summarized the PREVIOUS article out of history.
-      updateContextBarUnavailable();
-      pageContext = { captureFailed: true };
+    let convo = currentConversation();
+    if (!convo) {
+      convo = { id: currentConversationId, title: "", messages: [], updatedAt: Date.now() };
+      conversations.unshift(convo);
     }
-  }
-
-  const pageContextValid = !!pageContext && !pageContext.captureFailed;
-  let automaticPageImages = [];
-  let pageScreenshot = null;
-  // Page images/screenshots are optional extra context. Text-only models (the
-  // GPT-OSS models) reject requests that contain image parts, which would make
-  // every quick action fail on them, so the visuals are skipped for those.
-  // Page screenshots/images are NOT covered by the text privacy filter, so
-  // they are sent only when the user has switched "Send page screenshot and
-  // images" on in Settings (off by default). Images the user attaches
-  // themselves are unaffected.
-  let pageVisualsAllowed = false;
-  if (includePageImages) {
+    convo.title = convo.title || makeTopicTitle(history);
+    renderHistorySelect();
     try {
-      pageVisualsAllowed = (await chrome.storage.local.get(PAGE_VISUALS_STORAGE_KEY))[PAGE_VISUALS_STORAGE_KEY] === true;
-    } catch {
-      pageVisualsAllowed = false;
+      await saveConversations();
+    } catch (err) {
+      // A storage failure must not leave the composer locked or block the answer.
+      console.error("[AI Assistant] Unable to save conversation:", err);
     }
-  }
-  const attachPageVisuals = includePageImages && pageVisualsAllowed && modelSupportsVision(selectedModel);
-  if (attachPageVisuals && pageContextValid) {
-    automaticPageImages = await fetchPageImages(pageContext.imageUrls, pageContext.url);
-    const currentTab = await getCurrentActiveTab();
-    if (currentTab?.id !== pageContext.tabId || String(currentTab?.url || "") !== pageContext.url) {
-      automaticPageImages = [];
+    if (isCancelled()) return;
+
+    let pageContext = null;
+    const shouldIncludePageContext = forcedIncludePageContext === null
+      ? includeContextToggle.checked === true
+      : forcedIncludePageContext === true;
+    // Webmail / banking: an ordinary question must not send the page unless the
+    // user allowed this site. Checked against the tab's URL before capture and
+    // again on the captured page below (the tab can change in between).
+    let sensitiveBlocked = false;
+    if (shouldIncludePageContext && forcedIncludePageContext === null) {
+      const tabNow = await getCurrentActiveTab();
+      if (isBlockedSensitivePage(tabNow?.url)) {
+        sensitiveBlocked = true;
+        updateContextBar({ title: String(tabNow?.title || ""), url: String(tabNow?.url || "") });
+      }
     }
-  }
-  if (attachPageVisuals) {
-    // Capture a visible-page image in addition to individually fetched <img>
-    // elements. This also covers pages whose text extraction failed but whose
-    // visible content is an image or canvas.
-    const screenshotTab = pageContextValid
-      ? { id: pageContext.tabId, url: pageContext.url }
-      : await getCurrentActiveTab();
-    pageScreenshot = await captureVisiblePageScreenshot(screenshotTab?.id, String(screenshotTab?.url || ""));
-  }
-  if (isCancelled()) return;
-  const pageVisualInputCount = automaticPageImages.length + (pageScreenshot ? 1 : 0);
-  // A visual input in the provider payload is not always enough to make a
-  // text-focused quick action discuss it. State explicitly that the attached
-  // current-page images are part of the requested analysis.
-  const questionForApi = pageVisualInputCount
-    ? `${baseQuestionForApi}\n\n[CURRENT PAGE VISUALS]\n${pageVisualInputCount} current-page visual input${pageVisualInputCount === 1 ? " is" : "s are"} attached. Analyze and incorporate the visible page images when they are relevant to the requested summary, translation, explanation, key points, or fact check. Do not describe images from earlier conversation turns.\n[/CURRENT PAGE VISUALS]`
-    : baseQuestionForApi;
+    if (shouldIncludePageContext && !sensitiveBlocked) {
+      // Capture the page at the moment the user submits the request. The API
+      // request must never reuse the page context shown or captured earlier.
+      pageContext = await getActivePageContext(0, translateMode === true && !translateSource ? "markdown" : null);
+      if (isCancelled()) return;
+      if (pageContext && forcedIncludePageContext === null && isBlockedSensitivePage(pageContext.url, pageContext.source)) {
+        sensitiveBlocked = true;
+        updateContextBar({ title: pageContext.title, url: pageContext.url, source: pageContext.source });
+        pageContext = null;
+      } else if (pageContext) {
+        updateContextBar(pageContext);
+      } else {
+        // Capture failed - the page may still be loading, or may not be a
+        // readable web page (new tab, PDF viewer, browser-internal pages).
+        // Keep the bar visible with a warning, and send a {captureFailed}
+        // sentinel instead of null so background.js instructs the model NOT
+        // to reuse page content from earlier turns - without it, quick
+        // actions translated/summarized the PREVIOUS article out of history.
+        updateContextBarUnavailable();
+        pageContext = { captureFailed: true };
+      }
+    }
 
-  // Tell the model explicitly when the page has changed since its last
-  // answer in this conversation. history[].pageContext (title/url only, set
-  // below and persisted via toStoredMessage) records which page, if any, was
-  // used for each earlier user message; find the most recent one before this
-  // request. A plain "ignore old page content" reminder is easy for a model
-  // to under-weight against a conversation history full of the previous
-  // page's actual content - naming the specific earlier page and contrasting
-  // it with the current one (in pageContextInstruction(), background.js) is
-  // a much harder signal to miss. Only attached when a change is actually
-  // detected (different URL), so a same-page follow-up ("tell me more")
-  // isn't cluttered with an irrelevant note.
-  const previousPageContext = history
-    .slice(0, -1)
-    .reverse()
-    .find((h) => h.role === "user" && h.pageContext)?.pageContext || null;
-  history[history.length - 1].pageContext = pageContextValid ? { title: pageContext.title, url: pageContext.url } : null;
-  if (pageContextValid && previousPageContext && previousPageContext.url !== pageContext.url) {
-    pageContext = { ...pageContext, previousPage: previousPageContext };
-  }
+    const pageContextValid = !!pageContext && !pageContext.captureFailed;
+    let automaticPageImages = [];
+    let pageScreenshot = null;
+    // Page images/screenshots are optional extra context. Text-only models (the
+    // GPT-OSS models) reject requests that contain image parts, which would make
+    // every quick action fail on them, so the visuals are skipped for those.
+    // Page screenshots/images are NOT covered by the text privacy filter, so
+    // they are sent only when the user has switched "Send page screenshot and
+    // images" on in Settings (off by default). Images the user attaches
+    // themselves are unaffected.
+    let pageVisualsAllowed = false;
+    if (includePageImages) {
+      try {
+        pageVisualsAllowed = (await chrome.storage.local.get(PAGE_VISUALS_STORAGE_KEY))[PAGE_VISUALS_STORAGE_KEY] === true;
+      } catch {
+        pageVisualsAllowed = false;
+      }
+    }
+    const attachPageVisuals = includePageImages && pageVisualsAllowed && modelSupportsVision(selectedModel);
+    if (attachPageVisuals && pageContextValid) {
+      automaticPageImages = await fetchPageImages(pageContext.imageUrls, pageContext.url);
+      const currentTab = await getCurrentActiveTab();
+      if (currentTab?.id !== pageContext.tabId || String(currentTab?.url || "") !== pageContext.url) {
+        automaticPageImages = [];
+      }
+    }
+    if (attachPageVisuals) {
+      // Capture a visible-page image in addition to individually fetched <img>
+      // elements. This also covers pages whose text extraction failed but whose
+      // visible content is an image or canvas.
+      const screenshotTab = pageContextValid
+        ? { id: pageContext.tabId, url: pageContext.url }
+        : await getCurrentActiveTab();
+      pageScreenshot = await captureVisiblePageScreenshot(screenshotTab?.id, String(screenshotTab?.url || ""));
+    }
+    if (isCancelled()) return;
+    const pageVisualInputCount = automaticPageImages.length + (pageScreenshot ? 1 : 0);
+    // A visual input in the provider payload is not always enough to make a
+    // text-focused quick action discuss it. State explicitly that the attached
+    // current-page images are part of the requested analysis.
+    const questionForApi = pageVisualInputCount
+      ? `${baseQuestionForApi}\n\n[CURRENT PAGE VISUALS]\n${pageVisualInputCount} current-page visual input${pageVisualInputCount === 1 ? " is" : "s are"} attached. Analyze and incorporate the visible page images when they are relevant to the requested summary, translation, explanation, key points, or fact check. Do not describe images from earlier conversation turns.\n[/CURRENT PAGE VISUALS]`
+      : baseQuestionForApi;
 
-  // Markdown sources are shown rendered (headings, lists, tables, links);
-  // plain sources keep their exact whitespace.
-  pendingPlainReply = translateMode === true && !(translateSource ? translateSourceFormat === "markdown" : pageContextValid && pageContext.format === "markdown");
-  const askMessage = {
-    type: "ASK",
-    payload: {
-      requestId,
-      question: questionForApi,
-      // Defense in depth: the background worker also receives an explicit
-      // flag so an unchecked "Read current page" can never be interpreted as
-      // a request to use/send page content, even if pageContext were ever
-      // non-null here by mistake. This is independent of attached images
-      // (below), which are unrelated to this toggle and always sent when
-      // present.
-      includePageContext: shouldIncludePageContext && !sensitiveBlocked,
-      pageContext: shouldIncludePageContext && !sensitiveBlocked ? pageContext : null,
-      // When the user changes pages, do not send the previous page's
-      // conversation turns to the model. The UI history remains intact, but
-      // old assistant answers can themselves contain facts from Page B and
-      // therefore act as stale page context even when the new Page C text is
-      // supplied correctly. A page change starts a fresh model context; normal
-      // follow-up questions on the same page retain conversation history.
-      history: (pageContextValid && previousPageContext && pageContext.url !== previousPageContext.url)
-        ? []
-        : getApiHistory().slice(0, -1),
-      images: [
-        ...readyAttachments.filter((a) => a.kind === "image" && a.dataUrl).map((a) => ({ name: a.name, dataUrl: a.dataUrl })),
-        ...automaticPageImages,
-        ...(pageScreenshot ? [pageScreenshot] : []),
-      ],
-      // Send the exact model selected at submit time.
-      modelId: selectedModel.id,
-      factCheck: factCheck ? { enabled: true, selectedText: factCheckSelectedText } : null,
-      // Summarize, Translate, and Key Points remain page-only transforms.
-      // Explain explicitly opts into Tavily research, while Fact Check uses
-      // its dedicated claim-verification research path.
-      noWebResearch,
-      forceWebResearch,
-      // Translation requests must reproduce the source's exact formatting.
-      translateMode: translateMode === true,
-      // Exact selected text for the context-menu translation (page text is
-      // used for the quick action when this is null).
-      translateSource: translateMode === true && typeof translateSource === "string" ? translateSource : null,
-      // The selection was already cut by the extractor (see content.js).
-      translateSourceTruncated: translateMode === true && translateSourceTruncated === true,
-    },
-  };
-  try {
-    postToBackground(askMessage);
+    // Tell the model explicitly when the page has changed since its last
+    // answer in this conversation. history[].pageContext (title/url only, set
+    // below and persisted via toStoredMessage) records which page, if any, was
+    // used for each earlier user message; find the most recent one before this
+    // request. A plain "ignore old page content" reminder is easy for a model
+    // to under-weight against a conversation history full of the previous
+    // page's actual content - naming the specific earlier page and contrasting
+    // it with the current one (in pageContextInstruction(), background.js) is
+    // a much harder signal to miss. Only attached when a change is actually
+    // detected (different URL), so a same-page follow-up ("tell me more")
+    // isn't cluttered with an irrelevant note.
+    const previousPageContext = history
+      .slice(0, -1)
+      .reverse()
+      .find((h) => h.role === "user" && h.pageContext)?.pageContext || null;
+    history[history.length - 1].pageContext = pageContextValid ? { title: pageContext.title, url: pageContext.url } : null;
+    if (pageContextValid && previousPageContext && previousPageContext.url !== pageContext.url) {
+      pageContext = { ...pageContext, previousPage: previousPageContext };
+    }
+
+    // Markdown sources are shown rendered (headings, lists, tables, links);
+    // plain sources keep their exact whitespace.
+    pendingPlainReply = translateMode === true && !(translateSource ? translateSourceFormat === "markdown" : pageContextValid && pageContext.format === "markdown");
+    const askMessage = {
+      type: "ASK",
+      payload: {
+        requestId,
+        question: questionForApi,
+        // Defense in depth: the background worker also receives an explicit
+        // flag so an unchecked "Read current page" can never be interpreted as
+        // a request to use/send page content, even if pageContext were ever
+        // non-null here by mistake. This is independent of attached images
+        // (below), which are unrelated to this toggle and always sent when
+        // present.
+        includePageContext: shouldIncludePageContext && !sensitiveBlocked,
+        pageContext: shouldIncludePageContext && !sensitiveBlocked ? pageContext : null,
+        // When the user changes pages, do not send the previous page's
+        // conversation turns to the model. The UI history remains intact, but
+        // old assistant answers can themselves contain facts from Page B and
+        // therefore act as stale page context even when the new Page C text is
+        // supplied correctly. A page change starts a fresh model context; normal
+        // follow-up questions on the same page retain conversation history.
+        history: (pageContextValid && previousPageContext && pageContext.url !== previousPageContext.url)
+          ? []
+          : getApiHistory().slice(0, -1),
+        images: [
+          ...readyAttachments.filter((a) => a.kind === "image" && a.dataUrl).map((a) => ({ name: a.name, dataUrl: a.dataUrl })),
+          ...automaticPageImages,
+          ...(pageScreenshot ? [pageScreenshot] : []),
+        ],
+        // Send the exact model selected at submit time.
+        modelId: selectedModel.id,
+        factCheck: factCheck ? { enabled: true, selectedText: factCheckSelectedText } : null,
+        // Summarize, Translate, and Key Points remain page-only transforms.
+        // Explain explicitly opts into Tavily research, while Fact Check uses
+        // its dedicated claim-verification research path.
+        noWebResearch,
+        forceWebResearch,
+        // Translation requests must reproduce the source's exact formatting.
+        translateMode: translateMode === true,
+        // Exact selected text for the context-menu translation (page text is
+        // used for the quick action when this is null).
+        translateSource: translateMode === true && typeof translateSource === "string" ? translateSource : null,
+        // The selection was already cut by the extractor (see content.js).
+        translateSourceTruncated: translateMode === true && translateSourceTruncated === true,
+      },
+    };
+    try {
+      postToBackground(askMessage);
+      posted = true;
+    } catch (err) {
+      console.error("[AI Assistant] Unable to send request:", err);
+      if (!isCancelled()) {
+        currentRequestId = null;
+        autoScrollEnabled = false;
+        addBubble("error", t(currentLang, "error_withMessage_template", { message: err?.message || String(err) }));
+        setStreaming(false);
+      }
+      return;
+    }
+
+    // Attachments are one-shot. Everything this request needed was captured
+    // above (readyAttachments / attachmentText), the user bubble already lists
+    // the file names, and the assistant reply will be appended to the same
+    // conversation - so the chips are removed now. Previously they stayed,
+    // silently re-uploading every attached image with each follow-up message
+    // (and re-inlining the attachment text block) until the user removed every
+    // chip by hand.
+    attachments = [];
+    renderAttachments();
   } catch (err) {
-    console.error("[AI Assistant] Unable to send request:", err);
-    if (!isCancelled()) {
+    console.error("[AI Assistant] Request failed before it could be sent:", err);
+    if (!posted && !isCancelled()) {
       currentRequestId = null;
       autoScrollEnabled = false;
       addBubble("error", t(currentLang, "error_withMessage_template", { message: err?.message || String(err) }));
       setStreaming(false);
+      // Give the user their text back: it was cleared from the composer on submit.
+      if (forcedQuestion === null && !questionInput.value) questionInput.value = question;
     }
-    return;
   }
-
-  // Attachments are one-shot. Everything this request needed was captured
-  // above (readyAttachments / attachmentText), the user bubble already lists
-  // the file names, and the assistant reply will be appended to the same
-  // conversation - so the chips are removed now. Previously they stayed,
-  // silently re-uploading every attached image with each follow-up message
-  // (and re-inlining the attachment text block) until the user removed every
-  // chip by hand.
-  attachments = [];
-  renderAttachments();
 }
 
 

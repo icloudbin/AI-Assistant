@@ -118,5 +118,25 @@ with sync_playwright() as p:
         return len(btns)
     n,_=run(p,t5)
     print("INFO quick-action buttons found:", n)
+
+    # 6. an unexpected exception while preparing a request must not lock the composer
+    def t6(page):
+        page.evaluate("window.__tab = { id: 7, windowId: 1, active: true, title: 'x', get url() { throw new Error('boom-url'); } }")
+        page.evaluate("window.__sent.length=0")
+        page.fill("#questionInput", "will this lock the panel?"); page.press("#questionInput", "Enter"); page.wait_for_timeout(900)
+        locked = page.evaluate("document.getElementById('sendBtn').disabled || document.getElementById('questionInput').disabled")
+        log = page.inner_text("#chatLog")
+        draft = page.input_value("#questionInput")
+        sent_failed = page.evaluate("window.__sent.filter(m=>m.type==='ASK').length")
+        # the panel works again once the tab is readable
+        page.evaluate("window.__tab = { id: 7, windowId: 1, active: true, url: 'https://example.com/a', title: 'Example A' }")
+        a = ask(page, "second try")
+        return locked, log, draft, sent_failed, a
+    (locked, log, draft, sent_failed, a), errs = run(p, t6)
+    check("exception during prepare: composer is unlocked", locked is False)
+    check("exception during prepare: user sees an error", "boom-url" in log, repr(log[-120:]))
+    check("exception during prepare: draft text is restored", draft == "will this lock the panel?", repr(draft))
+    check("exception during prepare: nothing half-sent", sent_failed == 0)
+    check("panel still works afterwards", bool(a) and a[0]["question"].startswith("second try"), json.dumps(a)[:200])
 srv.shutdown()
 sys.exit(1 if fails else 0)

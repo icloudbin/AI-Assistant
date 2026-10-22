@@ -1,11 +1,19 @@
 // AI model catalog for AI Assistant.
-//
+
+// Hard ceiling, in characters, on the page text carried by one request
+// (120,000 characters is roughly 30,000 English tokens). This is the single
+// definition used by background.js and sidepanel.js; do not redeclare it.
+// content.js is injected as a classic script and cannot import this module, so
+// it keeps its own copy (PAGE_CONTEXT_CHAR_LIMIT); scripts/check-package.mjs
+// fails if the two values differ.
+export const MAX_PAGE_CONTEXT_CHARS = 120000;
+
 // maxPageChars: cap on the current-page text sent with a request (about 4
 // characters per token). Free tiers (Groq, OpenRouter free) reject or
 // rate-limit large requests, so they get a much smaller budget than DeepSeek.
-export const DEFAULT_MAX_PAGE_CHARS = 120000;
+export const DEFAULT_MAX_PAGE_CHARS = MAX_PAGE_CONTEXT_CHARS;
 export const MODELS = [
-  { id: "deepseek-flash", label: "DeepSeek V4.1 Flash", provider: "deepseek", apiModel: "deepseek-flash", thinking: "enabled", maxPageChars: 120000 },
+  { id: "deepseek-flash", label: "DeepSeek V4.1 Flash", provider: "deepseek", apiModel: "deepseek-flash", thinking: "enabled", maxPageChars: MAX_PAGE_CONTEXT_CHARS },
   { id: "groq-gpt-oss-120b", label: "Groq: GPT-OSS 120B", provider: "groq", apiModel: "openai/gpt-oss-120b", vision: false, maxPageChars: 24000 },
   { id: "groq-qwen3.8-27b", label: "Groq: Qwen 3.8 27B", provider: "groq", apiModel: "qwen/qwen3.8-27b", maxPageChars: 24000 },
   { id: "groq-gpt-oss-20b", label: "Groq: GPT-OSS 20B", provider: "groq", apiModel: "openai/gpt-oss-20b", vision: false, maxPageChars: 24000 },

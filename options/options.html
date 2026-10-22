@@ -172,7 +172,8 @@
         <label for="tavilyApiKey" data-i18n="tavilyApiKey_label">Tavily Search API Key</label>
         <input id="tavilyApiKey" type="password" placeholder="tvly-..." autocomplete="off" />
       </div>
-      <div class="hint backup-hint" data-i18n="webResearch_hint">When the current webpage cannot answer a question, the extension automatically sends the question to Tavily to retrieve current web sources, then sends the evidence to the selected AI model. The Tavily key is stored locally.</div>
+      <label class="toggle"><input type="checkbox" id="autoWebResearchToggle" /> <span data-i18n="autoWebResearch_toggle">Automatically search the web when the page cannot answer a question</span></label>
+      <div class="hint backup-hint" data-i18n="webResearch_hint">Off by default. When on and a Tavily key is set, a question that the extension guesses the current webpage cannot answer is sent to Tavily to retrieve current web sources, then the evidence is sent to the selected AI model. With it off, a question is sent to Tavily only when you ask for it ("search the web"), use Explain, or run Fact Check. The Tavily key is stored locally.</div>
     </div>
 
     <div class="history-management">

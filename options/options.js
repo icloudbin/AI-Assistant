@@ -7,7 +7,7 @@ import {
   SUPPORTED_LANGUAGES,
   LANGUAGE_STORAGE_KEY,
 } from "../i18n.js";
-import { HISTORY_STORAGE_KEY, MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
+import { AUTO_WEB_RESEARCH_KEY, HISTORY_STORAGE_KEY, MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
 import { saveSettingsBackup, restoreSettingsFromBackup } from "../settings-storage.js";
 import { encryptSecrets, decryptSecrets, MIN_PASSPHRASE_LENGTH } from "../settings-crypto.js";
 
@@ -29,6 +29,21 @@ const pageVisualsToggle = document.getElementById("pageVisualsToggle");
 chrome.storage.local.get("pageVisualsEnabled").then((s) => { pageVisualsToggle.checked = s.pageVisualsEnabled === true; }).catch(() => {});
 pageVisualsToggle.addEventListener("change", () => {
   chrome.storage.local.set({ pageVisualsEnabled: pageVisualsToggle.checked }).catch(() => {});
+});
+const autoWebResearchToggle = document.getElementById("autoWebResearchToggle");
+// Automatic web search (the question is sent to Tavily when the extension
+// guesses the page cannot answer it): OFF by default, saved immediately when toggled.
+chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY).then((s) => { autoWebResearchToggle.checked = s[AUTO_WEB_RESEARCH_KEY] === true; }).catch(() => {});
+autoWebResearchToggle.addEventListener("change", () => {
+  chrome.storage.local.set({ [AUTO_WEB_RESEARCH_KEY]: autoWebResearchToggle.checked }).catch(() => {});
+});
+// Keep the switch truthful when the value changes behind the page's back (a
+// settings import writes it straight to storage): it must never show "off"
+// while automatic search is actually on.
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === "local" && changes[AUTO_WEB_RESEARCH_KEY]) {
+    autoWebResearchToggle.checked = changes[AUTO_WEB_RESEARCH_KEY].newValue === true;
+  }
 });
 const backupHistoryBtn = document.getElementById("backupHistory");
 const restoreHistoryBtn = document.getElementById("restoreHistory");
@@ -847,6 +862,7 @@ const SETTINGS_BACKUP_PLAIN_KEYS = [
   "factCheckWebResearch",
   "piiFilterEnabled",
   "pageVisualsEnabled",
+  AUTO_WEB_RESEARCH_KEY,
   "customPrompt",
   THEME_STORAGE_KEY,
   LANGUAGE_STORAGE_KEY,
@@ -969,7 +985,7 @@ async function importSettings() {
     // against models.js), so a bad value can at worst restore a default,
     // not break anything.
     const NUMERIC_SETTINGS_KEYS = new Set(["composerHeight"]);
-    const BOOLEAN_SETTINGS_KEYS = new Set(["factCheckWebResearch", "piiFilterEnabled", "pageVisualsEnabled"]);
+    const BOOLEAN_SETTINGS_KEYS = new Set(["factCheckWebResearch", "piiFilterEnabled", "pageVisualsEnabled", AUTO_WEB_RESEARCH_KEY]);
     const restored = {};
     for (const key of SETTINGS_BACKUP_KEYS) {
       const value = backup.settings[key];
