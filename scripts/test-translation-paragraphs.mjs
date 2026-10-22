@@ -25,6 +25,29 @@ assert.equal(
   "line translator must retain all blank-line paragraph separators"
 );
 
+// content.js represents each author-visible <br> in long-form page text as a
+// blank-line paragraph separator before it enters the numbered protocol. The
+// output must keep those separators so the side-panel Markdown renderer creates
+// separate paragraphs instead of folding the whole post into one paragraph.
+const sourceWithHtmlBreakParagraphs = [
+  "First paragraph from a single HTML p element.",
+  "",
+  "Second paragraph after an author-visible br element.",
+  "",
+  "Third paragraph after another br element.",
+].join("\n");
+const htmlBreakPrepared = prepareLineTranslation(sourceWithHtmlBreakParagraphs);
+assert.ok(htmlBreakPrepared, "HTML-break paragraphs should prepare for translation");
+let htmlBreakTranslated = "";
+const htmlBreakTranslator = new LineTranslator(htmlBreakPrepared, (delta) => { htmlBreakTranslated += delta; });
+htmlBreakTranslator.push("[1] 第一段来自单个 HTML p 元素。\n[3] 第二段位于作者可见的 br 元素之后。\n[5] 第三段位于另一个 br 元素之后。");
+htmlBreakTranslator.finish();
+assert.equal(
+  htmlBreakTranslated,
+  ["第一段来自单个 HTML p 元素。", "", "第二段位于作者可见的 br 元素之后。", "", "第三段位于另一个 br 元素之后。"].join("\n"),
+  "translations must retain paragraph breaks derived from HTML br elements"
+);
+
 const sourceWithTrailingWhitespace = [
   "```js",
   "const value = 1;  ",

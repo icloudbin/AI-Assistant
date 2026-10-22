@@ -920,7 +920,13 @@ function mdInlineList(nodes, pre) {
     }
     if (c.nodeType !== 1 || mdSkip(c)) continue;
     const tag = c.localName;
-    if (tag === 'br') { out += '\n'; continue; }
+    // A <br> in article text is an author-visible break. Treat it as a
+    // paragraph boundary in the Markdown translation source rather than a
+    // single soft line break: the side-panel renderer otherwise places both
+    // sides in one <p>, and translated long-form posts lose the paragraph
+    // separation that the original page shows. LineTranslator retains this
+    // blank line deterministically while translating the surrounding text.
+    if (tag === 'br') { out += '\n\n'; continue; }
     if (tag === 'img') {
       const src = mdAbsUrl(c.getAttribute('src') || '');
       if (src) out += `![${(c.getAttribute('alt') || '').replace(/[\[\]\n]/g, ' ').trim()}](${src})`;
