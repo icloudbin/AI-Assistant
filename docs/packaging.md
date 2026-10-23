@@ -2,7 +2,7 @@
 Every file below is imported or loaded at runtime and must be present in any package and tracked by git:
 
 - Root: `manifest.json`, `background.js`, `content.js`, `models.js`, `storage-keys.js`, `i18n.js`, `settings-storage.js`, `settings-crypto.js`, `pii-filter.js`, `translate-lines.js`, `url-safety.js`, `sensitive-sites.js` (imported by the side panel)
-- `options/`: `options.html`, `options.js`, `options.css`
+- `options/`: `options.html`, `options.js` (the page's styles are inline; there is no options.css)
 - `sidepanel/`: `sidepanel.html`, `sidepanel.css`, `sidepanel.js`, `mic-permission.html`, `mic-permission.css`, `mic-permission.js`
 - `icons/`: `icon16.png`, `icon48.png`, `icon128.png`
 

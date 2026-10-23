@@ -18,6 +18,7 @@ AI-Assistant/
 ├── background.js
 ├── content.js
 ├── storage-keys.js
+├── conversation-store.js
 ├── settings-storage.js
 ├── settings-crypto.js
 ├── pii-filter.js
@@ -36,15 +37,14 @@ AI-Assistant/
 ├── icons/
 │   └── icon16.png / icon48.png / icon128.png (declared in manifest.json's "icons" and "action.default_icon" fields)
 ├── options/
-│   ├── options.html
-│   ├── options.css
-│   └── options.js
+│   └── options.html / options.js
 ├── scripts/
 │   ├── check-package.mjs
 │   ├── test-pii-filter.mjs
 │   ├── test-outbound-pii.mjs
 │   ├── test-url-safety.mjs
 │   ├── test-translation-paragraphs.mjs
+│   ├── test-conversation-store.mjs
 │   └── test-sidepanel-context.py
 └── sidepanel/
     ├── sidepanel.html
