@@ -387,9 +387,14 @@ function escapeHtml(text) {
 // URL part of a Markdown link or image. Matches text that may contain one level
 // of balanced parentheses, so Wikipedia-style "Foo_(bar)" survives. If the
 // parentheses are unbalanced it falls back to everything up to the first ")".
+// The optional CommonMark title (`[t](url "Title")`) is matched in BOTH raw and
+// escaped form: these regexes run on text that has already been through
+// escapeHtml (see inlineMarkdownToHtml), where every `"` is `&quot;` - a raw
+// `"...` title group could never match and titled links/images degraded to
+// literal text.
 const MD_LINK_URL = String.raw`((?:[^()\s]|\([^()\s]*\))+|[^)\s]+)`;
-const MD_IMAGE_RE = new RegExp(String.raw`!\[([^\]]*)\]\(` + MD_LINK_URL + String.raw`(?:\s+"[^"]*")?\)`, "g");
-const MD_LINK_RE = new RegExp(String.raw`\[([^\]]+)\]\(` + MD_LINK_URL + String.raw`(?:\s+"[^"]*")?\)`, "g");
+const MD_IMAGE_RE = new RegExp(String.raw`!\[([^\]]*)\]\(` + MD_LINK_URL + String.raw`(?:\s+(?:"[^"]*"|&quot;[^"]*&quot;))?\)`, "g");
+const MD_LINK_RE = new RegExp(String.raw`\[([^\]]+)\]\(` + MD_LINK_URL + String.raw`(?:\s+(?:"[^"]*"|&quot;[^"]*&quot;))?\)`, "g");
 
 function inlineMarkdownToHtml(text) {
   // Code spans and the generated tags below are swapped for placeholders while
@@ -1016,7 +1021,7 @@ function setBubbleContent(bubbleEl, text, role, plain = false) {
   }
 }
 
-function addBubble(role, text, modelLabel, plain = false) {
+function addBubble(role, text, modelLabel, plain = false, beforeEl = null) {
   emptyState.hidden = true;
   const wrap = document.createElement("div");
   wrap.className = `bubble ${role}`;
@@ -1060,7 +1065,8 @@ function addBubble(role, text, modelLabel, plain = false) {
   wrap.appendChild(textEl);
   setBubbleContent(wrap, text, role, plain);
 
-  chatLog.appendChild(wrap);
+  if (beforeEl && beforeEl.parentNode === chatLog) chatLog.insertBefore(wrap, beforeEl);
+  else chatLog.appendChild(wrap);
   scrollToBottom();
   return wrap;
 }
@@ -1590,7 +1596,10 @@ function handlePortMessage(msg) {
     }
     case "NOTICE": {
       // Non-fatal note from the worker (e.g. the page text was shortened).
-      if (msg.text) addBubble("notice", msg.text);
+      // While a reply is streaming in, insert BEFORE the streaming bubble so
+      // the reading order stays user message -> notice -> answer; appending
+      // put the notice after the (still growing) reply it belongs to.
+      if (msg.text) addBubble("notice", msg.text, null, false, currentAssistantBubble);
       break;
     }
     case "ERROR": {
@@ -1867,6 +1876,7 @@ function startNewTopic() {
   questionInput.value = "";
   historySelect.value = NEW_TOPIC_VALUE;
   chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: "" }).catch(() => {});
+  refreshContextBarAfterConversationSwitch();
 }
 
 async function loadConversations({ activate = true, syncModel = true } = {}) {
@@ -1930,6 +1940,20 @@ async function selectConversation(id) {
   applyModelSelection(findConversationModelId(history));
   await chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: currentConversationId });
   renderHistorySelect();
+  refreshContextBarAfterConversationSwitch();
+}
+
+// Switching or starting a conversation used to leave the context bar showing
+// state from the PREVIOUS conversation's request (the capture-failed warning,
+// or a sensitive-site bar with its session-allow button). Re-derive it from
+// the tab the user is on now, exactly like the include-context toggle's own
+// change handler does.
+function refreshContextBarAfterConversationSwitch() {
+  if (includeContextToggle.checked) {
+    refreshActivePageContext().catch(() => {});
+  } else {
+    updateContextBar(null);
+  }
 }
 
 function attachmentContextText() {
@@ -2384,6 +2408,10 @@ const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRec
 let recognition = null;
 let isListening = false;
 let userStoppedMic = false;
+// Set when onerror stopped the recognizer (not the user). onend must NOT
+// clear the mic status line in that case - it would erase the just-shown
+// error message (with its 6s auto-hide) within milliseconds.
+let micStoppedByError = false;
 let micLangIndex = 0;
 let micBaseText = "";
 let micFinalText = "";
@@ -2484,7 +2512,8 @@ function buildRecognition() {
     const err = event.error;
     console.debug("[AI Assistant] Voice input error:", err);
     if (err === "no-speech" || err === "aborted") return; // benign; onend decides what happens next
-    userStoppedMic = true;
+    userStoppedMic = true; // suppress the auto-restart in onend...
+    micStoppedByError = true; // ...but keep the error message it just showed visible
     const messageKeys = {
       "not-allowed": "mic_notAllowed",
       "service-not-allowed": "mic_notAllowed",
@@ -2507,7 +2536,10 @@ function buildRecognition() {
     micBtn.classList.remove("active");
     micBtn.setAttribute("aria-pressed", "false");
     if (userStoppedMic) {
-      setMicStatus("");
+      // Only a deliberate stop clears the status line. After an onerror stop
+      // (micStoppedByError) the error message shown there must survive this
+      // onend, which fires immediately after onerror.
+      if (!micStoppedByError) setMicStatus("");
       updateMicLangUI();
       return;
     }
@@ -2579,6 +2611,7 @@ async function startMic() {
   if (!SpeechRecognitionCtor || isStreaming || micStarting) return;
   micStarting = true;
   userStoppedMic = false;
+  micStoppedByError = false;
   try {
     const permState = await ensureMicPermission();
     if (permState !== "granted") {
@@ -2594,6 +2627,13 @@ async function startMic() {
         return;
       }
     }
+
+    // The permission round-trip above can keep this function suspended for
+    // minutes (the permission tab stays open until acted on). The user may
+    // have sent a request meanwhile - setStreaming() disabled the mic buttons,
+    // but that says nothing about this already-running call. Dictating into
+    // the disabled composer while a request streams must not start.
+    if (isStreaming) return;
 
     micBaseText = questionInput.value;
     micFinalText = "";
@@ -3087,6 +3127,10 @@ quickFactCheckBtn?.addEventListener("click", () => {
 });
 
 questionInput.addEventListener("keydown", (e) => {
+  // The Enter that commits an IME composition (Chinese/Japanese/Korean input)
+  // also arrives as keydown with isComposing=true / keyCode 229. Without this
+  // guard, confirming a pinyin conversion submitted the half-composed text.
+  if (e.isComposing || e.keyCode === 229) return;
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     chatForm.requestSubmit();

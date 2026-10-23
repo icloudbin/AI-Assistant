@@ -549,7 +549,7 @@ chrome.runtime.onConnect.addListener((port) => {
         }
       } catch (err) {
         console.warn("[AI Assistant] privacy filter failed", err);
-        throw new Error("Privacy filter failed; request was not sent.");
+        throw new Error(t(lang, "bg_error_piiFilter"));
       }
       // Never trust a stale/accidental pageContext value when the user has
       // disabled "Read current page". This is the final privacy boundary
@@ -594,7 +594,11 @@ chrome.runtime.onConnect.addListener((port) => {
       // is told with a NOTICE (see the translation branch below), because a
       // cut translation silently misses the rest of the text.
       const pageCap = model.maxPageChars || DEFAULT_MAX_PAGE_CHARS;
-      if (translateMode !== true && requestPageContext && !requestPageContext.captureFailed && (requestPageContext.text || "").length > pageCap) {
+      // `truncated` covers the cut content.js already made at its own 120k
+      // limit: without it the length check below never fires for models whose
+      // pageCap equals that limit (the extracted text is always <= 120k), and
+      // the user was never told the page was shortened.
+      if (translateMode !== true && requestPageContext && !requestPageContext.captureFailed && ((requestPageContext.text || "").length > pageCap || requestPageContext.truncated === true)) {
         let cut = requestPageContext.text.slice(0, pageCap);
         const nl = cut.lastIndexOf("\n");
         if (nl > pageCap * 0.8) cut = cut.slice(0, nl);
@@ -1359,18 +1363,27 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
     }
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) handleLine(line);
+  // A provider-reported error thrown by handleLine below (or a transport
+  // failure in read()) must release the response body: the reader keeps the
+  // connection to the provider open until the service worker is recycled
+  // otherwise. read() rejecting on abort makes cancel() a harmless no-op.
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) handleLine(line);
+    }
+    // Flush whatever is left: a final "data:" line that is not newline-terminated
+    // used to be dropped, silently truncating the end of the answer.
+    buffer += decoder.decode();
+    if (buffer.trim()) handleLine(buffer);
+  } catch (err) {
+    reader.cancel().catch(() => {});
+    throw err;
   }
-  // Flush whatever is left: a final "data:" line that is not newline-terminated
-  // used to be dropped, silently truncating the end of the answer.
-  buffer += decoder.decode();
-  if (buffer.trim()) handleLine(buffer);
 
   // A stream that ended without a single visible character (empty completion,
   // or reasoning that consumed the whole budget) is a failure, not an answer:

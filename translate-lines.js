@@ -14,7 +14,10 @@
 // The result always has exactly the same line layout as the source.
 
 const PREFIX_RE = /^(\s*(?:>\s?)*(?:(?:\d+[.)]|[-*+•·◦▪]|#{1,6})\s+)?)/;
-const FENCE_RE = /^\s*(```|~~~)/;
+// A fence may sit inside a blockquote; content.js emits every quoted line
+// with a "> " prefix, so "> ```" must toggle the fence state too - otherwise
+// quoted code is sent to the model as translatable text and gets garbled.
+const FENCE_RE = /^\s*(?:>\s?)*(```|~~~)/;
 const IMAGE_LINE_RE = /^\s*!\[[^\]]*\]\([^)]*\)\s*$/;
 // Things the model must never touch: inline code, link/image targets, bare URLs.
 const PROTECT_RE = /`[^`\n]+`|\]\(([^)\s]+)[^)]*\)|https?:\/\/[^\s)\]>]+/g;

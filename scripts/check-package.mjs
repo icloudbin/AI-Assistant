@@ -122,6 +122,13 @@ if (inGit) {
         if (![".js", ".mjs", ".html"].includes(path.extname(e.name)) || e.name === "i18n.js") continue;
         const text = fs.readFileSync(p, "utf8");
         for (const m of text.matchAll(/\bt\(\s*[\w.?]+\s*,\s*["']([A-Za-z0-9_]+)["']/g)) note(m[1], rel(p));
+        // tPlural(lang, count, oneKey, otherKey, vars) passes its two message
+        // keys as the 3rd/4th args; validate both (the plain t() regex above
+        // cannot match the call because `t` is followed by "Plural", not "(").
+        for (const m of text.matchAll(/\btPlural\(\s*[\w.?]+\s*,\s*[^,]+,\s*["']([A-Za-z0-9_]+)["']\s*,\s*["']([A-Za-z0-9_]+)["']/g)) {
+          note(m[1], rel(p));
+          note(m[2], rel(p));
+        }
         for (const m of text.matchAll(/data-i18n(?:-[a-z-]+)?=["']([A-Za-z0-9_]+)["']/g)) note(m[1], rel(p));
       }
     };

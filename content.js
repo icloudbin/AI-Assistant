@@ -968,6 +968,14 @@ function mdList(el, depth) {
     let first = true;
     for (const block of blocks) {
       if (block.startsWith(MD_LIST_MARK)) {
+        // A nested list as the li's FIRST block used to be emitted before any
+        // parent marker, and its 2-space indent alone reads as a sibling item
+        // in CommonMark - flattening the structure. Anchor it under an empty
+        // parent item so the nesting survives.
+        if (first) {
+          lines.push(`${pad}${marker.trimEnd()}`);
+          first = false;
+        }
         lines.push(block.slice(1));
       } else {
         const text = block.split('\n').map((l, i) => (first && i === 0 ? `${pad}${marker}${l}` : `${pad}   ${l}`)).join('\n');

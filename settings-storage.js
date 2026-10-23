@@ -70,21 +70,28 @@ async function readBackup() {
 }
 
 export async function saveSettingsBackup(values) {
-  const current = await readBackup().catch(() => ({}));
-  const next = { ...current };
-  // Drop any credentials an older build mirrored into this record.
-  for (const key of SECRET_SETTING_KEYS) delete next[key];
-  for (const key of PERSISTED_SETTING_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(values, key)) {
-      next[key] = values[key];
-    }
-  }
-
   const db = await openDatabase();
   try {
     await new Promise((resolve, reject) => {
+      // Read-modify-write inside ONE readwrite transaction. The old shape read
+      // in a readonly transaction and wrote in a second one, so two concurrent
+      // callers could interleave read/read/write/write and lose one caller's
+      // keys; readwrite transactions on the same store serialize, closing
+      // that window.
       const tx = db.transaction(STORE_NAME, "readwrite");
-      tx.objectStore(STORE_NAME).put(next, SETTINGS_RECORD_KEY);
+      const store = tx.objectStore(STORE_NAME);
+      const getReq = store.get(SETTINGS_RECORD_KEY);
+      getReq.onsuccess = () => {
+        const next = { ...(getReq.result || {}) };
+        // Drop any credentials an older build mirrored into this record.
+        for (const key of SECRET_SETTING_KEYS) delete next[key];
+        for (const key of PERSISTED_SETTING_KEYS) {
+          if (Object.prototype.hasOwnProperty.call(values, key)) {
+            next[key] = values[key];
+          }
+        }
+        store.put(next, SETTINGS_RECORD_KEY);
+      };
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error || new Error("Unable to save settings backup."));
       tx.onabort = () => reject(tx.error || new Error("Settings backup transaction aborted."));
@@ -97,23 +104,30 @@ export async function saveSettingsBackup(values) {
 // Removes credentials that older builds mirrored into the IndexedDB record.
 // Only writes when something is actually there, so it is a no-op afterwards.
 export async function scrubSecretsFromBackup() {
-  const current = await readBackup().catch(() => ({}));
-  if (!SECRET_SETTING_KEYS.some((key) => Object.prototype.hasOwnProperty.call(current, key))) return false;
-  const next = { ...current };
-  for (const key of SECRET_SETTING_KEYS) delete next[key];
   const db = await openDatabase();
   try {
-    await new Promise((resolve, reject) => {
+    return await new Promise((resolve, reject) => {
+      // Same single-transaction read-modify-write shape as saveSettingsBackup.
       const tx = db.transaction(STORE_NAME, "readwrite");
-      tx.objectStore(STORE_NAME).put(next, SETTINGS_RECORD_KEY);
-      tx.oncomplete = resolve;
+      const store = tx.objectStore(STORE_NAME);
+      const getReq = store.get(SETTINGS_RECORD_KEY);
+      getReq.onsuccess = () => {
+        const current = getReq.result || {};
+        if (!SECRET_SETTING_KEYS.some((key) => Object.prototype.hasOwnProperty.call(current, key))) {
+          resolve(false);
+          return;
+        }
+        const next = { ...current };
+        for (const key of SECRET_SETTING_KEYS) delete next[key];
+        store.put(next, SETTINGS_RECORD_KEY);
+      };
+      tx.oncomplete = () => resolve(true);
       tx.onerror = () => reject(tx.error || new Error("Unable to scrub settings backup."));
       tx.onabort = () => reject(tx.error || new Error("Settings backup scrub aborted."));
     });
   } finally {
     db.close();
   }
-  return true;
 }
 
 export async function getSettingsBackup() {

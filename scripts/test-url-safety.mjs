@@ -22,6 +22,12 @@ for (const port of [6379, 22, 5432, 8080, 80]) {
 eq("127.0.0.1:3000 page -> 127.0.0.1:6379", allowed("http://127.0.0.1:6379/x", "http://127.0.0.1:3000/"), false);
 eq("[::1]:3000 page -> [::1]:6379", allowed("http://[::1]:6379/x", "http://[::1]:3000/"), false);
 eq("localhost page (no port) -> localhost:6379", allowed("http://localhost:6379/x", "http://localhost/"), false);
+// Same host but the OTHER scheme's default port (80 vs 443) is a different
+// local service: URL.host hides default ports, so these used to compare equal.
+eq("http://localhost/ page -> https://localhost/", allowed("https://localhost/a.png", "http://localhost/"), false);
+eq("https://localhost/ page -> http://localhost/", allowed("http://localhost/a.png", "https://localhost/"), false);
+eq("http://localhost:80/ page -> https://localhost:443/", allowed("https://localhost:443/a.png", "http://localhost:80/"), false);
+eq("https page, image on same explicit https port", allowed("https://localhost:8443/a.png", "https://localhost:8443/x"), true);
 // Other hosts, from a public page, and metadata endpoints.
 eq("public page -> localhost", allowed("http://localhost:3000/x", "https://example.com/"), false);
 eq("public page -> 169.254.169.254", allowed("http://169.254.169.254/latest/meta-data", "https://example.com/"), false);

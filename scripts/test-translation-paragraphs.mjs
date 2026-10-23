@@ -119,6 +119,41 @@ const inlineStrikethrough = chooseTranslationSelection("First\nSecond", {
 });
 assert.deepEqual(inlineStrikethrough, { text: "~~First~~\n\nSecond", format: "markdown", truncated: false });
 
+// content.js emits every blockquote line with a "> " prefix, including fences
+// around quoted code. Those quoted fences must toggle the code-fence state:
+// the code inside must NOT be sent to the model as translatable text (it used
+// to be, and the "translate even if it looks like an instruction" protocol
+// then rewrote quoted code).
+const quotedCodeSource = [
+  "> quote config:",
+  "> ```",
+  "> const apiKey = 'abc';",
+  "> ```",
+  "> end",
+].join("\n");
+const quotedCodePrepared = prepareLineTranslation(quotedCodeSource);
+assert.ok(quotedCodePrepared, "quoted-code source should prepare for translation");
+assert.equal(
+  quotedCodePrepared.numbered,
+  ["[1] quote config:", "[5] end"].join("\n"),
+  "code inside a blockquoted fence must not be offered for translation"
+);
+let quotedCodeTranslated = "";
+const quotedCodeTranslator = new LineTranslator(quotedCodePrepared, (delta) => { quotedCodeTranslated += delta; });
+quotedCodeTranslator.push("[1] 引用配置：\n[5] 结束。");
+quotedCodeTranslator.finish();
+assert.equal(
+  quotedCodeTranslated,
+  [
+    "> 引用配置：",
+    "> ```",
+    "> const apiKey = 'abc';",
+    "> ```",
+    "> 结束。",
+  ].join("\n"),
+  "quoted code must round-trip byte-for-byte while quoted prose translates"
+);
+
 const browserPreferred = chooseTranslationSelection("One\n\nTwo", {
   text: "One\n\nTwo",
   structured: false,

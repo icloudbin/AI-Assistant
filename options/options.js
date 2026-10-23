@@ -37,12 +37,24 @@ chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY).then((s) => { autoWebResearchTog
 autoWebResearchToggle.addEventListener("change", () => {
   chrome.storage.local.set({ [AUTO_WEB_RESEARCH_KEY]: autoWebResearchToggle.checked }).catch(() => {});
 });
-// Keep the switch truthful when the value changes behind the page's back (a
-// settings import writes it straight to storage): it must never show "off"
-// while automatic search is actually on.
+// Keep the switches truthful when a value changes behind the page's back (a
+// settings import writes it straight to storage): a toggle must never show
+// "off" while the feature is actually on, or the reverse. The two privacy
+// toggles matter most: an import that disables the PII filter while the
+// checkbox still shows checked would leave the user believing redaction is
+// active when it is not. Defaults mirror the load-time reads above: the
+// privacy filter is ON unless explicitly false, page visuals are OFF unless
+// explicitly true.
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName === "local" && changes[AUTO_WEB_RESEARCH_KEY]) {
+  if (areaName !== "local") return;
+  if (changes[AUTO_WEB_RESEARCH_KEY]) {
     autoWebResearchToggle.checked = changes[AUTO_WEB_RESEARCH_KEY].newValue === true;
+  }
+  if (changes.piiFilterEnabled) {
+    piiFilterToggle.checked = changes.piiFilterEnabled.newValue !== false;
+  }
+  if (changes.pageVisualsEnabled) {
+    pageVisualsToggle.checked = changes.pageVisualsEnabled.newValue === true;
   }
 });
 const backupHistoryBtn = document.getElementById("backupHistory");
@@ -213,7 +225,7 @@ document.getElementById("save").addEventListener("click", async (event) => {
   } catch (err) {
     console.error("[AI Assistant] Settings save failed:", err);
     msgEl.style.color = "#f55b5b";
-    msgEl.textContent = err?.message || "Failed to save settings.";
+    msgEl.textContent = err?.message || t(currentLang, "unknownError");
   }
 });
 
@@ -864,10 +876,13 @@ const SETTINGS_BACKUP_SECRET_KEYS = [
   "tavilyApiKey",
 ];
 const SETTINGS_BACKUP_PLAIN_KEYS = [
-  "factCheckWebResearch",
   "piiFilterEnabled",
   "pageVisualsEnabled",
   AUTO_WEB_RESEARCH_KEY,
+  // sidepanel.js's INCLUDE_CONTEXT_STORAGE_KEY: the "Read current page"
+  // privacy choice must survive export/import - defaulting back to ON after
+  // a restore would silently re-enable page sending.
+  "includeCurrentPageContext",
   "customPrompt",
   THEME_STORAGE_KEY,
   LANGUAGE_STORAGE_KEY,
@@ -919,7 +934,10 @@ async function exportSettings() {
       if (passphrase !== passphraseConfirmInput.value) throw new Error(t(currentLang, "settingsBackup_error_passphraseMismatch"));
     }
 
-    const stored = await chrome.storage.local.get(SETTINGS_BACKUP_KEYS);
+    // Read the legacy Groq key name too: the intermediate build stored it as
+    // "groqKey", and a user who never re-saved it has a working Groq provider
+    // that would otherwise silently miss its key in the export.
+    const stored = await chrome.storage.local.get([...SETTINGS_BACKUP_KEYS, "groqKey"]);
     const settings = {};
     for (const key of SETTINGS_BACKUP_PLAIN_KEYS) {
       if (stored[key] !== undefined) settings[key] = stored[key];
@@ -935,10 +953,17 @@ async function exportSettings() {
       for (const key of SETTINGS_BACKUP_SECRET_KEYS) {
         if (typeof stored[key] === "string" && stored[key]) secrets[key] = stored[key];
       }
+      if (!secrets.groqApiKey && typeof stored.groqKey === "string" && stored.groqKey) {
+        secrets.groqApiKey = stored.groqKey;
+      }
       if (Object.keys(secrets).length) backup.encryptedSecrets = await encryptSecrets(secrets, passphrase);
     }
 
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+    // Import refuses files above SETTINGS_BACKUP_MAX_BYTES; enforce the same
+    // budget here so this build can never write a backup it would then reject
+    // (an oversized customPrompt used to produce exactly that).
+    if (blob.size > SETTINGS_BACKUP_MAX_BYTES) throw new Error(t(currentLang, "settingsBackup_error_tooLarge"));
     const url = URL.createObjectURL(blob);
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const a = document.createElement("a");
@@ -982,7 +1007,7 @@ async function importSettings() {
 
     // Only accept known keys with sane types; everything else in the file is
     // ignored. Numbers are legitimate only for composerHeight and booleans
-    // only for legacy factCheckWebResearch backups (the type exportSettings writes) -
+    // only for the toggles above (the types exportSettings writes) -
     // accepting them anywhere else would let a hand-edited file write, say,
     // a number over an API key. Downstream readers already tolerate
     // unexpected string values (the language/theme selects normalize unknown
@@ -990,7 +1015,7 @@ async function importSettings() {
     // against models.js), so a bad value can at worst restore a default,
     // not break anything.
     const NUMERIC_SETTINGS_KEYS = new Set(["composerHeight"]);
-    const BOOLEAN_SETTINGS_KEYS = new Set(["factCheckWebResearch", "piiFilterEnabled", "pageVisualsEnabled", AUTO_WEB_RESEARCH_KEY]);
+    const BOOLEAN_SETTINGS_KEYS = new Set(["piiFilterEnabled", "pageVisualsEnabled", AUTO_WEB_RESEARCH_KEY, "includeCurrentPageContext"]);
     const restored = {};
     for (const key of SETTINGS_BACKUP_KEYS) {
       const value = backup.settings[key];

@@ -131,11 +131,14 @@ export function isNonPublicHost(hostname) {
 // Decides whether the service worker may fetch `rawUrl` as an image.
 //  - only http(s), no embedded credentials;
 //  - public hosts are allowed;
-//  - a non-public host is allowed ONLY when it is the same host AND PORT as the
-//    page the user is currently looking at (`pageUrl`), so images on an
-//    intranet or localhost page still work while that page is open, but a
-//    page on localhost:3000 (or a model reply) can never point the extension
+//  - a non-public host is allowed ONLY when it is the same scheme AND host AND
+//    PORT as the page the user is currently looking at (`pageUrl`), so images
+//    on an intranet or localhost page still work while that page is open, but
+//    a page on localhost:3000 (or a model reply) can never point the extension
 //    at another service on the same machine such as localhost:6379 or :22.
+//    Same scheme matters because URL.host hides DEFAULT ports (80 for http,
+//    443 for https): without it, an http://localhost/ page (port 80) would
+//    also unlock https://localhost/ (port 443) - a different local service.
 // Returns the parsed URL when allowed, otherwise null.
 export function checkImageUrl(rawUrl, pageUrl = '') {
   let url;
@@ -149,7 +152,7 @@ export function checkImageUrl(rawUrl, pageUrl = '') {
   if (!isNonPublicHost(url.hostname)) return url;
   try {
     const page = new URL(String(pageUrl));
-    if ((page.protocol === 'http:' || page.protocol === 'https:') && page.host === url.host) return url; // host = hostname + non-default port
+    if (page.protocol === url.protocol && page.host === url.host) return url; // host = hostname + non-default port
   } catch {
     // no usable page URL: fall through to blocked
   }
