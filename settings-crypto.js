@@ -104,7 +104,17 @@ export async function decryptSecrets(envelope, passphrase) {
   } catch {
     throw new Error("DECRYPT_FAILED");
   }
-  const parsed = JSON.parse(new TextDecoder().decode(plaintext));
+  // The passphrase was right and the ciphertext is authentic (GCM verified
+  // every byte), but the decrypted plaintext is not valid JSON: the file was
+  // damaged in a way authentication cannot see. A distinct error code so the
+  // Settings page can say "the file is corrupt" instead of blaming the
+  // passphrase or calling the whole file "not a settings backup".
+  let parsed;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(plaintext));
+  } catch {
+    throw new Error("PLAINTEXT_CORRUPT");
+  }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Unsupported encrypted settings format.");
   return parsed;
 }

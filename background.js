@@ -2,15 +2,17 @@
 import { findKnownModel, DEFAULT_MAX_PAGE_CHARS, MAX_PAGE_CONTEXT_CHARS } from "./models.js";
 import { AUTO_WEB_RESEARCH_KEY, CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY } from "./storage-keys.js";
 import { getStoredLanguage, t } from "./i18n.js";
-import { restoreSettingsFromBackup } from "./settings-storage.js";
+import { restoreSettingsFromBackupOnce } from "./settings-storage.js";
 import { checkImageUrl } from "./url-safety.js";
 import { redactOutbound, createRedactionSession, PlaceholderRestorer, PII_FILTER_STORAGE_KEY } from "./pii-filter.js";
 import { prepareLineTranslation, numberedBatches, LineTranslator } from "./translate-lines.js";
 import { chooseTranslationSelection } from "./translation-selection.js";
 
 // Restore settings as soon as the service worker starts, before any request
-// arrives. Individual requests also retry this recovery as a safety net.
-void restoreSettingsFromBackup();
+// arrives. restoreSettingsFromBackupOnce() memoizes the run for this service
+// worker instance, so the per-request safety-net call below is free after
+// the first (each fresh worker instance checks recovery exactly once).
+void restoreSettingsFromBackupOnce();
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.warn);
 
@@ -29,15 +31,17 @@ function removeAllContextMenus() {
 }
 
 function createTranslateContextMenu() {
-  // The title follows the display language chosen on the Settings page
-  // ("AI assistant-" prefix + localized action), resolved at creation time -
-  // rebuildContextMenus() is re-run at install/startup AND whenever that
-  // stored language changes (storage.onChanged listener below), so the menu
-  // re-translates live without a browser restart.
+  // The title follows the display language chosen on the Settings page -
+  // including the "AI assistant" prefix itself, which used to be a
+  // hard-coded English string in front of an otherwise localized action.
+  // Resolved at creation time - rebuildContextMenus() is re-run at
+  // install/startup AND whenever that stored language changes
+  // (storage.onChanged listener below), so the menu re-translates live
+  // without a browser restart.
   return getStoredLanguage().then((lang) =>
     new Promise((resolve, reject) => {
       chrome.contextMenus.create(
-        { id: CONTEXT_MENU_TRANSLATE_ID, title: `AI assistant-${t(lang, "contextMenu_translateSelected")}`, contexts: ["selection"] },
+        { id: CONTEXT_MENU_TRANSLATE_ID, title: t(lang, "contextMenu_title_template", { action: t(lang, "contextMenu_translateSelected") }), contexts: ["selection"] },
         () => {
           const error = chrome.runtime.lastError;
           if (error) reject(new Error(error.message));
@@ -166,6 +170,13 @@ const PAGE_IMAGE_MAX_COUNT = 4;
 const PAGE_IMAGE_MAX_BYTES = 3 * 1024 * 1024;
 const PAGE_IMAGE_MAX_TOTAL_BYTES = 8 * 1024 * 1024;
 const IMAGE_FETCH_TIMEOUT_MS = 10000;
+// Page images are optional quick-action context: they are fetched in
+// parallel with a short per-image timeout and one overall budget, so a
+// handful of slow or hanging image hosts can never lock the composer for
+// the old serial worst case (8 URLs x 10 s = 80 s). A user-clicked
+// FETCH_IMAGE keeps the full IMAGE_FETCH_TIMEOUT_MS.
+const PAGE_IMAGE_FETCH_TIMEOUT_MS = 6000;
+const PAGE_IMAGE_TOTAL_BUDGET_MS = 15000;
 
 function sniffImageType(b) {
   if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return "png";
@@ -210,12 +221,19 @@ async function readBodyCapped(resp, maxBytes) {
   return out;
 }
 
-async function fetchImageDataUrl(rawUrl, maxBytes, allowedTypes, pageUrl = "") {
+async function fetchImageDataUrl(rawUrl, maxBytes, allowedTypes, pageUrl = "", { timeoutMs = IMAGE_FETCH_TIMEOUT_MS, signal } = {}) {
   const url = checkImageUrl(rawUrl, pageUrl);
   if (!url) throw new Error("blocked");
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // An external signal (the page-image total budget) aborts this fetch the
+  // same way the per-image timeout does.
+  const onExternalAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", onExternalAbort, { once: true });
+  }
   try {
     const resp = await fetch(url.href, {
       method: "GET",
@@ -254,6 +272,7 @@ async function fetchImageDataUrl(rawUrl, maxBytes, allowedTypes, pageUrl = "") {
     return `data:image/${kind};base64,${btoa(binary)}`;
   } finally {
     clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", onExternalAbort);
   }
 }
 
@@ -279,21 +298,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const pageUrl = typeof msg.pageUrl === "string" ? msg.pageUrl : "";
     (async () => {
       const urls = [...new Set(msg.urls.filter((url) => typeof url === "string"))].slice(0, PAGE_IMAGE_MAX_COUNT * 2);
+      // All at once, under one overall budget (see the PAGE_IMAGE_* constants
+      // above): a slow host can no longer serialize its timeout behind the
+      // previous one. Promise.allSettled resolves in input order, so the
+      // byte accounting below still sees the page's document order; a
+      // rejected fetch (blocked, unsupported, too large, budget hit) is
+      // simply skipped - page images are optional context and must not
+      // prevent the requested text operation.
+      const budget = new AbortController();
+      const budgetTimer = setTimeout(() => budget.abort(), PAGE_IMAGE_TOTAL_BUDGET_MS);
+      const settled = await Promise.allSettled(
+        urls.map((url) =>
+          fetchImageDataUrl(url, PAGE_IMAGE_MAX_BYTES, /^image\/(png|jpeg|gif|webp)$/, pageUrl, {
+            timeoutMs: PAGE_IMAGE_FETCH_TIMEOUT_MS,
+            signal: budget.signal,
+          })
+        )
+      );
+      clearTimeout(budgetTimer);
       const images = [];
       let totalBytes = 0;
-      for (const url of urls) {
+      for (const result of settled) {
         if (images.length >= PAGE_IMAGE_MAX_COUNT) break;
-        try {
-          const dataUrl = await fetchImageDataUrl(url, PAGE_IMAGE_MAX_BYTES, /^image\/(png|jpeg|gif|webp)$/, pageUrl);
-          const encoded = dataUrl.split(",", 2)[1] || "";
-          const imageBytes = Math.floor((encoded.length * 3) / 4);
-          if (totalBytes + imageBytes > PAGE_IMAGE_MAX_TOTAL_BYTES) continue;
-          totalBytes += imageBytes;
-          images.push({ name: `Web image ${images.length + 1}`, dataUrl });
-        } catch {
-          // Page images are optional context. A blocked, unsupported, or too
-          // large image must not prevent the requested text operation.
-        }
+        if (result.status !== "fulfilled") continue;
+        const dataUrl = result.value;
+        const encoded = dataUrl.split(",", 2)[1] || "";
+        const imageBytes = Math.floor((encoded.length * 3) / 4);
+        if (totalBytes + imageBytes > PAGE_IMAGE_MAX_TOTAL_BYTES) continue;
+        totalBytes += imageBytes;
+        images.push({ name: `Web image ${images.length + 1}`, dataUrl });
       }
       sendResponse({ ok: true, images });
     })();
@@ -492,8 +525,11 @@ chrome.runtime.onConnect.addListener((port) => {
     try {
       // Recover user settings before reading provider keys or language. This
       // makes the background service worker resilient if extension local
-      // storage was unexpectedly reset between browser sessions.
-      await restoreSettingsFromBackup();
+      // storage was unexpectedly reset between browser sessions. Memoized:
+      // the first request in this worker instance does the work (usually the
+      // startup call above already has), later requests await the same
+      // settled promise.
+      await restoreSettingsFromBackupOnce();
       let { question, pageContext, includePageContext, history, images = [], modelId, factCheck, noWebResearch = false, forceWebResearch = false, translateMode = false, translateSource = null, translateSourceTruncated = false } = msg.payload;
       const lang = await getStoredLanguage();
       // Privacy filter (on by default): strip names, phones, emails, cards,

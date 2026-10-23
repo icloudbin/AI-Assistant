@@ -12,7 +12,7 @@
 // what "select a language in Settings and have the UI update immediately"
 // requires.
 import { LANGUAGE_STORAGE_KEY } from "./storage-keys.js";
-import { restoreSettingsFromBackup } from "./settings-storage.js";
+import { restoreSettingsFromBackupOnce } from "./settings-storage.js";
 
 export { LANGUAGE_STORAGE_KEY };
 
@@ -39,10 +39,13 @@ export function normalizeLanguage(lang) {
 // Reads the stored language preference (chrome.storage.local). Safe to call
 // from the background service worker (no DOM dependency). Defaults to "en"
 // when nothing is stored yet or storage is unavailable, matching the
-// extension's unmodified/original language.
+// extension's unmodified/original language. The settings recovery is the
+// memoized once-per-context run (see settings-storage.js): this function is
+// called on every language change and from the ASK path, so it must not
+// re-open IndexedDB each time.
 export async function getStoredLanguage() {
   try {
-    await restoreSettingsFromBackup();
+    await restoreSettingsFromBackupOnce();
     const stored = await chrome.storage.local.get(LANGUAGE_STORAGE_KEY);
     return normalizeLanguage(stored[LANGUAGE_STORAGE_KEY]);
   } catch {
@@ -57,6 +60,7 @@ const translations = {
 
     preferredTranslationLanguage_label: `Preferred Translation Language`,
     contextMenu_translateSelected: `Translate selected text`,
+    contextMenu_title_template: `AI assistant - {action}`,
     contextAction_summarize_prefix: `Summarize the following highlighted text. Be concise and preserve the key facts and meaning.`,
     contextAction_translate_prefix: `Translate the following highlighted text into {language}:`,
     contextAction_explain_prefix: `Explain the following highlighted text clearly. If it is source code, explain what the code does, its important logic, and any notable behavior.`,
@@ -125,6 +129,7 @@ const translations = {
     settingsBackup_preparing: `Preparing settings export…`,
     settingsBackup_export_success: `Settings exported ✓`,
     settingsBackup_import_success: `Settings imported ✓`,
+    settingsBackup_warn_plainKeys_template: `Warning: {keys} were stored unencrypted in this older settings file and are now in extension storage. Export again (with a passphrase) to create an encrypted backup, then delete this file.`,
     settingsBackup_failed_template: `Settings backup failed: {message}`,
     settingsBackup_error_noFileSelected: `No settings file selected`,
     settingsBackup_error_notSettingsBackup: `Not an AI Assistant settings backup file`,
@@ -137,6 +142,7 @@ const translations = {
     settingsBackup_error_passphraseMismatch: `Passphrases do not match`,
     settingsBackup_error_passphraseRequired: `This file contains encrypted API keys. Enter its passphrase, then choose the file again`,
     settingsBackup_error_decryptFailed: `Could not decrypt the API keys: wrong passphrase or damaged file`,
+    settingsBackup_error_plaintextCorrupt: `The passphrase was correct, but the decrypted settings are damaged (not valid JSON). Use another backup file.`,
     zip_error_noBackupSelected: `No backup file selected`,
     zip_error_tooLarge: `Backup file is too large`,
     zip_error_eocdNotFound: `Invalid ZIP file: end of central directory not found`,
@@ -283,6 +289,7 @@ const translations = {
 
     preferredTranslationLanguage_label: `首选翻译语言`,
     contextMenu_translateSelected: `翻译选中的文字`,
+    contextMenu_title_template: `AI 助手 - {action}`,
     contextAction_summarize_prefix: `总结以下选中的文本。请简洁回答，并保留关键事实和原意。`,
     contextAction_translate_prefix: `将以下选中的文本翻译成{language}:`,
     contextAction_explain_prefix: `清楚地解释以下选中的文本。如果是源代码，请说明代码的作用、重要逻辑以及值得注意的行为。`,
@@ -350,6 +357,7 @@ const translations = {
     settingsBackup_preparing: `正在导出设置…`,
     settingsBackup_export_success: `设置已导出 ✓`,
     settingsBackup_import_success: `设置已导入 ✓`,
+    settingsBackup_warn_plainKeys_template: `警告：{keys} 在这个旧版设置文件中未加密，现已导入扩展存储。请重新使用带口令的导出生成加密备份，并删除该文件。`,
     settingsBackup_failed_template: `设置备份失败：{message}`,
     settingsBackup_error_noFileSelected: `未选择设置文件`,
     settingsBackup_error_notSettingsBackup: `不是 AI Assistant 的设置备份文件`,
@@ -362,6 +370,7 @@ const translations = {
     settingsBackup_error_passphraseMismatch: `两次输入的口令不一致`,
     settingsBackup_error_passphraseRequired: `该文件包含已加密的 API 密钥。请先输入其口令，然后重新选择文件`,
     settingsBackup_error_decryptFailed: `无法解密 API 密钥：口令错误或文件已损坏`,
+    settingsBackup_error_plaintextCorrupt: `口令正确，但解密出的设置内容已损坏（不是有效的 JSON）。请使用其他备份文件。`,
     zip_error_noBackupSelected: `未选择备份文件`,
     zip_error_tooLarge: `备份文件过大`,
     zip_error_eocdNotFound: `无效的 ZIP 文件：找不到中央目录结尾记录`,
@@ -505,6 +514,7 @@ const translations = {
 
     preferredTranslationLanguage_label: `首選翻譯語言`,
     contextMenu_translateSelected: `翻譯選取的文字`,
+    contextMenu_title_template: `AI 助理 - {action}`,
     contextAction_summarize_prefix: `總結以下選取的文字。請簡潔回答，並保留關鍵事實與原意。`,
     contextAction_translate_prefix: `將以下選取的文字翻譯成{language}:`,
     contextAction_explain_prefix: `清楚地解釋以下選取的文字。如果是原始碼，請說明程式碼的作用、重要邏輯以及值得注意的行為。`,
@@ -569,6 +579,7 @@ const translations = {
     settingsBackup_preparing: `正在匯出設定…`,
     settingsBackup_export_success: `設定已匯出 ✓`,
     settingsBackup_import_success: `設定已匯入 ✓`,
+    settingsBackup_warn_plainKeys_template: `警告：{keys} 在此舊版設定檔中未加密，現已匯入擴充功能儲存空間。請重新使用帶通關密語的匯出產生加密備份，並刪除該檔案。`,
     settingsBackup_failed_template: `設定備份失敗：{message}`,
     settingsBackup_error_noFileSelected: `未選擇設定檔案`,
     settingsBackup_error_notSettingsBackup: `不是 AI Assistant 的設定備份檔案`,
@@ -581,6 +592,7 @@ const translations = {
     settingsBackup_error_passphraseMismatch: `兩次輸入的通關密語不一致`,
     settingsBackup_error_passphraseRequired: `此檔案包含已加密的 API 金鑰。請先輸入其通關密語，然後重新選擇檔案`,
     settingsBackup_error_decryptFailed: `無法解密 API 金鑰：通關密語錯誤或檔案已損毀`,
+    settingsBackup_error_plaintextCorrupt: `通關密語正確，但解密出的設定內容已損壞（不是有效的 JSON）。請使用其他備份檔案。`,
     zip_error_noBackupSelected: `未選擇備份檔案`,
     zip_error_tooLarge: `備份檔案過大`,
     zip_error_eocdNotFound: `無效的 ZIP 檔案：找不到中央目錄結尾記錄`,
@@ -727,6 +739,7 @@ const translations = {
 
     preferredTranslationLanguage_label: `Langue de traduction préférée`,
     contextMenu_translateSelected: `Traduire le texte sélectionné`,
+    contextMenu_title_template: `Assistant IA - {action}`,
     contextAction_summarize_prefix: `Résumez le texte sélectionné ci-dessous. Soyez concis et préservez les faits essentiels et le sens.`,
     contextAction_translate_prefix: `Traduisez le texte sélectionné ci-dessous en {language} :`,
     contextAction_explain_prefix: `Expliquez clairement le texte sélectionné ci-dessous. S’il s’agit de code source, expliquez ce que fait le code, sa logique importante et tout comportement notable.`,
@@ -791,6 +804,7 @@ const translations = {
     settingsBackup_preparing: `Préparation de l'exportation…`,
     settingsBackup_export_success: `Paramètres exportés ✓`,
     settingsBackup_import_success: `Paramètres importés ✓`,
+    settingsBackup_warn_plainKeys_template: `Attention : {keys} étaient stockées en clair dans cet ancien fichier de paramètres et sont maintenant dans le stockage de l'extension. Exportez à nouveau (avec une phrase secrète) pour créer une sauvegarde chiffrée, puis supprimez ce fichier.`,
     settingsBackup_failed_template: `Échec de la sauvegarde des paramètres : {message}`,
     settingsBackup_error_noFileSelected: `Aucun fichier de paramètres sélectionné`,
     settingsBackup_error_notSettingsBackup: `Ce n'est pas un fichier de sauvegarde des paramètres d'AI Assistant`,
@@ -803,6 +817,7 @@ const translations = {
     settingsBackup_error_passphraseMismatch: `Les phrases secrètes ne correspondent pas`,
     settingsBackup_error_passphraseRequired: `Ce fichier contient des clés API chiffrées. Saisissez sa phrase secrète, puis choisissez à nouveau le fichier`,
     settingsBackup_error_decryptFailed: `Impossible de déchiffrer les clés API : phrase secrète incorrecte ou fichier endommagé`,
+    settingsBackup_error_plaintextCorrupt: `La phrase secrète est correcte, mais les paramètres déchiffrés sont endommagés (JSON non valide). Utilisez un autre fichier de sauvegarde.`,
     zip_error_noBackupSelected: `Aucun fichier de sauvegarde sélectionné`,
     zip_error_tooLarge: `Le fichier de sauvegarde est trop volumineux`,
     zip_error_eocdNotFound: `Fichier ZIP invalide : fin du répertoire central introuvable`,
@@ -949,6 +964,7 @@ const translations = {
 
     preferredTranslationLanguage_label: `優先翻訳言語`,
     contextMenu_translateSelected: `選択したテキストを翻訳`,
+    contextMenu_title_template: `AIアシスタント - {action}`,
     contextAction_summarize_prefix: `以下の選択したテキストを要約してください。簡潔にし、重要な事実と意味を維持してください。`,
     contextAction_translate_prefix: `以下の選択したテキストを{language}に翻訳してください:`,
     contextAction_explain_prefix: `以下の選択したテキストをわかりやすく説明してください。ソースコードの場合は、コードの役割、重要なロジック、注目すべき動作を説明してください。`,
@@ -1013,6 +1029,7 @@ const translations = {
     settingsBackup_preparing: `設定をエクスポートしています…`,
     settingsBackup_export_success: `設定をエクスポートしました ✓`,
     settingsBackup_import_success: `設定をインポートしました ✓`,
+    settingsBackup_warn_plainKeys_template: `警告：{keys} はこの旧設定ファイルに平文で保存されており、現在は拡張機能のストレージに読み込まれています。パスフレーズ付きのエクスポートで暗号化バックアップを作り直し、このファイルは削除してください。`,
     settingsBackup_failed_template: `設定のバックアップに失敗しました: {message}`,
     settingsBackup_error_noFileSelected: `設定ファイルが選択されていません`,
     settingsBackup_error_notSettingsBackup: `AI Assistant の設定バックアップファイルではありません`,
@@ -1025,6 +1042,7 @@ const translations = {
     settingsBackup_error_passphraseMismatch: `パスフレーズが一致しません`,
     settingsBackup_error_passphraseRequired: `このファイルには暗号化されたAPIキーが含まれています。パスフレーズを入力してから、もう一度ファイルを選択してください`,
     settingsBackup_error_decryptFailed: `APIキーを復号できません：パスフレーズが違うか、ファイルが破損しています`,
+    settingsBackup_error_plaintextCorrupt: `パスフレーズは正しいですが、復号された設定内容が破損しています（有効な JSON ではありません）。別のバックアップファイルを使用してください。`,
     zip_error_noBackupSelected: `バックアップファイルが選択されていません`,
     zip_error_tooLarge: `バックアップファイルが大きすぎます`,
     zip_error_eocdNotFound: `無効なZIPファイルです: セントラルディレクトリの終端が見つかりません`,
@@ -1171,6 +1189,7 @@ const translations = {
 
     preferredTranslationLanguage_label: `Idioma de traducción preferido`,
     contextMenu_translateSelected: `Traducir el texto seleccionado`,
+    contextMenu_title_template: `Asistente de IA - {action}`,
     contextAction_summarize_prefix: `Resume el texto seleccionado a continuación. Sé conciso y conserva los hechos y el significado clave.`,
     contextAction_translate_prefix: `Traduce el texto seleccionado a continuación al {language}:`,
     contextAction_explain_prefix: `Explica claramente el texto seleccionado a continuación. Si es código fuente, explica qué hace el código, su lógica importante y cualquier comportamiento destacable.`,
@@ -1235,6 +1254,7 @@ const translations = {
     settingsBackup_preparing: `Preparando la exportación de ajustes…`,
     settingsBackup_export_success: `Ajustes exportados ✓`,
     settingsBackup_import_success: `Ajustes importados ✓`,
+    settingsBackup_warn_plainKeys_template: `Advertencia: {keys} se guardaron sin cifrar en este archivo de ajustes antiguo y ahora están en el almacenamiento de la extensión. Exporta de nuevo (con una frase de contraseña) para crear una copia cifrada y elimina este archivo.`,
     settingsBackup_failed_template: `Error en la copia de seguridad de ajustes: {message}`,
     settingsBackup_error_noFileSelected: `No se ha seleccionado ningún archivo de ajustes`,
     settingsBackup_error_notSettingsBackup: `No es un archivo de copia de seguridad de ajustes de AI Assistant`,
@@ -1247,6 +1267,7 @@ const translations = {
     settingsBackup_error_passphraseMismatch: `Las frases de contraseña no coinciden`,
     settingsBackup_error_passphraseRequired: `Este archivo contiene claves API cifradas. Escribe su frase de contraseña y vuelve a elegir el archivo`,
     settingsBackup_error_decryptFailed: `No se pudieron descifrar las claves API: frase de contraseña incorrecta o archivo dañado`,
+    settingsBackup_error_plaintextCorrupt: `La frase de contraseña es correcta, pero los ajustes descifrados están dañados (JSON no válido). Usa otro archivo de copia de seguridad.`,
     zip_error_noBackupSelected: `No se seleccionó ningún archivo de copia de seguridad`,
     zip_error_tooLarge: `El archivo de copia de seguridad es demasiado grande`,
     zip_error_eocdNotFound: `Archivo ZIP no válido: no se encontró el final del directorio central`,

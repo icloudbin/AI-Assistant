@@ -3,6 +3,9 @@ import { MODELS, MAX_PAGE_CONTEXT_CHARS, findModelById, findKnownModel, resolveM
 import { HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY, PENDING_CONTEXT_ACTION_KEY, PREFERRED_TRANSLATION_LANGUAGE_KEY, MAX_SAVED_CONVERSATIONS } from "../storage-keys.js";
 import { sensitiveHostOf, hostOf } from "../sensitive-sites.js";
 import { getStoredLanguage, applyStaticTranslations, t, LANGUAGE_STORAGE_KEY } from "../i18n.js";
+// Pure save/merge helpers for the saved-conversation list (DOM-free, tested
+// in scripts/test-conversation-store.mjs).
+import { mergeConversationLists, sortedByNewest } from "../conversation-store.js";
 
 // ---------- Theme ----------
 const THEME_STORAGE_KEY = "themePreference";
@@ -303,6 +306,9 @@ function connectPort() {
     // reconnects via ensurePort() against a fresh service worker instance.
     if (!isStreaming || currentRequestId === null) return;
     currentRequestId = null;
+    // Show the whole received tail before the bubble is finalized: a
+    // coalesced render may still be pending (see scheduleStreamingRender).
+    flushStreamingRender();
     if (currentAssistantBubble) {
       if (currentAssistantText.trim()) currentAssistantBubble.classList.remove("pending");
       else currentAssistantBubble.remove();
@@ -455,11 +461,14 @@ function inlineMarkdownToHtml(text) {
 
       // Some models ignore the requested Markdown-image syntax and return
       // [image](https://host/path/file.webp) instead. Treat links whose URL
-      // clearly points to an image as images, so the conversation UI still
-      // renders the requested image rather than showing a clickable "image"
-      // link.
+      // clearly points at an image the worker can actually fetch as images,
+      // so the conversation UI still renders the requested image rather than
+      // showing a clickable "image" link. SVG is deliberately excluded: the
+      // worker refuses SVG by content sniffing (see background.js), so an
+      // .svg link converted here could only ever render a permanently
+      // failing placeholder - it stays an ordinary link instead.
       const imagePath = u.pathname.toLowerCase();
-      const isImageUrl = /\.(?:png|jpe?g|gif|webp|bmp|svg)$/i.test(imagePath);
+      const isImageUrl = /\.(?:png|jpe?g|gif|webp|bmp)$/i.test(imagePath);
       if (isImageUrl && (u.protocol === "http:" || u.protocol === "https:")) {
         const safeSrc = escapeHtml(u.href);
         const safeAlt = escapeHtml(label);
@@ -771,7 +780,9 @@ function sanitizeRenderedHtml(html) {
         // Also handle model/provider output that arrives as an HTML anchor
         // after an earlier Markdown conversion step. If the href has an
         // image filename extension, render it as an IMG instead of a link.
-        const isImageUrl = /\.(?:png|jpe?g|gif|webp|bmp|svg)$/i.test(u.pathname);
+        // SVG is excluded for the same reason as in inlineMarkdownToHtml():
+        // the worker never fetches SVG, so such a link must stay a link.
+        const isImageUrl = /\.(?:png|jpe?g|gif|webp|bmp)$/i.test(u.pathname);
         if (isImageUrl && (u.protocol === "http:" || u.protocol === "https:")) {
           el.replaceWith(remoteImageNode(doc, u.href, el.textContent || t(currentLang, "imageAltFallback")));
           continue;
@@ -800,11 +811,40 @@ function sanitizeRenderedHtml(html) {
 // through the background worker (public hosts only, size/type checked), and
 // shown as a data URL. Loaded images are remembered so streaming re-renders
 // do not turn them back into placeholders.
-const loadedRemoteImages = new Map(); // url -> data URL
+const loadedRemoteImages = new Map(); // url -> data URL, LRU order: oldest first
+// The panel document lives for a whole browsing session and every fetched
+// image is a data URL of up to 10 MB (FETCH_IMAGE's cap in background.js),
+// so an unbounded map grew without limit. Oldest entries are evicted past
+// these caps; an evicted image simply re-fetches through the worker the next
+// time the user clicks its placeholder.
+const REMOTE_IMAGE_CACHE_MAX_COUNT = 20;
+const REMOTE_IMAGE_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+let remoteImageCacheBytes = 0;
+
+function rememberRemoteImage(url, dataUrl) {
+  const previous = loadedRemoteImages.get(url);
+  if (previous !== undefined) {
+    loadedRemoteImages.delete(url);
+    remoteImageCacheBytes -= dataUrlByteLength(previous);
+  }
+  loadedRemoteImages.set(url, dataUrl);
+  remoteImageCacheBytes += dataUrlByteLength(dataUrl);
+  while (
+    loadedRemoteImages.size > REMOTE_IMAGE_CACHE_MAX_COUNT ||
+    (remoteImageCacheBytes > REMOTE_IMAGE_CACHE_MAX_BYTES && loadedRemoteImages.size > 1)
+  ) {
+    const oldest = loadedRemoteImages.keys().next().value;
+    remoteImageCacheBytes -= dataUrlByteLength(loadedRemoteImages.get(oldest));
+    loadedRemoteImages.delete(oldest);
+  }
+}
 
 function remoteImageNode(doc, url, alt) {
   const cached = loadedRemoteImages.get(url);
   if (cached) {
+    // Refresh the LRU position: a re-rendered reply counts as recent use.
+    loadedRemoteImages.delete(url);
+    loadedRemoteImages.set(url, cached);
     const img = doc.createElement("img");
     img.setAttribute("src", cached);
     img.setAttribute("alt", alt);
@@ -835,7 +875,7 @@ async function loadRemoteImage(box) {
     const activeTab = await getCurrentActiveTab().catch(() => null);
     const result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src.replace(/^http:/i, "https:"), pageUrl: String(activeTab?.url || "") });
     if (result?.ok && result.dataUrl) {
-      loadedRemoteImages.set(src, result.dataUrl);
+      rememberRemoteImage(src, result.dataUrl);
       const img = document.createElement("img");
       img.src = result.dataUrl;
       img.alt = box.getAttribute("data-alt") || "";
@@ -1053,7 +1093,7 @@ async function restoreSelectedModel() {
 }
 
 modelSelect.addEventListener("change", () => {
-  chrome.storage.local.set({ selectedModelId: modelSelect.value });
+  chrome.storage.local.set({ selectedModelId: modelSelect.value }).catch(() => {});
 });
 
 function getSelectedModel() {
@@ -1087,7 +1127,7 @@ function findConversationModelId(messages) {
 function applyModelSelection(modelId) {
   if (!modelId || !MODELS.some((m) => m.id === modelId) || modelSelect.value === modelId) return;
   modelSelect.value = modelId;
-  chrome.storage.local.set({ selectedModelId: modelId });
+  chrome.storage.local.set({ selectedModelId: modelId }).catch(() => {});
 }
 
 // ---------- Open settings page ----------
@@ -1295,7 +1335,14 @@ async function getActivePageContext(retryCount = 0, format = null) {
   };
 
   const askExtractor = () => new Promise((resolve) => {
-    chrome.tabs.sendMessage(initialTabId, { type: "EXTRACT_PAGE_CONTENT", format }, (value) => {
+    // frameId: 0 - the TOP frame only. chrome.tabs.sendMessage without a
+    // frame option delivers to every frame that has a listener, and the first
+    // sendResponse wins. After a context-menu translation inside an iframe
+    // (readSelectionMarkdown in background.js injects content.js into that
+    // frame), two frames were listening: the iframe's (usually empty)
+    // extraction could answer first, making every later page read of that
+    // tab fail its hasExtractedPageContent check and end as "capture failed".
+    chrome.tabs.sendMessage(initialTabId, { type: "EXTRACT_PAGE_CONTENT", format }, { frameId: 0 }, (value) => {
       if (chrome.runtime.lastError) { resolve(null); return; }
       resolve(value || null);
     });
@@ -1457,6 +1504,65 @@ function updateContextBarUnavailable() {
   pageContextTitle.textContent = `⚠️ ${t(currentLang, "contextBar_captureFailed")}`;
 }
 
+// ---------- Streaming render coalescing ----------
+// A long reply arrives as hundreds of CHUNK messages, and each one used to
+// re-run the full Markdown render + sanitize over the ENTIRE accumulated
+// text (O(n^2) work overall; see setBubbleContent). Renders are now
+// coalesced: while streaming, at most one repaint every
+// STREAM_RENDER_MIN_INTERVAL_MS, requested from requestAnimationFrame so it
+// lands just before a paint. Every terminal path (DONE, ERROR, worker
+// recycle, STOP) flushes synchronously via flushStreamingRender(), so the
+// tail of a reply is never left unrendered.
+const STREAM_RENDER_MIN_INTERVAL_MS = 100;
+let streamRenderQueued = false;
+let streamRenderTimer = null;
+let streamRenderLastAt = 0;
+
+// Repaint the streaming bubble from currentAssistantText right now, dropping
+// any pending coalesced render. Also a clean no-op once the bubble is gone
+// (STOP, or a superseded request): the queued flags are cleared first, so a
+// late rAF/timer callback can never resurrect a render or touch a newer
+// request's bubble with stale content.
+function renderStreamingBubble() {
+  if (streamRenderTimer) {
+    clearTimeout(streamRenderTimer);
+    streamRenderTimer = null;
+  }
+  streamRenderQueued = false;
+  streamRenderLastAt = performance.now();
+  if (!currentAssistantBubble) return;
+  setBubbleContent(currentAssistantBubble, currentAssistantText, "assistant", pendingPlainReply);
+  scrollToBottom();
+}
+
+function scheduleStreamingRender() {
+  if (!currentAssistantBubble || streamRenderQueued) return;
+  streamRenderQueued = true;
+  const run = () => {
+    const wait = STREAM_RENDER_MIN_INTERVAL_MS - (performance.now() - streamRenderLastAt);
+    if (wait <= 0) {
+      renderStreamingBubble();
+      return;
+    }
+    // Still inside the interval since the last repaint: hold the render until
+    // it expires. setTimeout (not another rAF) so a hidden document, where
+    // rAF is suspended, cannot delay the backstop forever.
+    streamRenderTimer = setTimeout(() => {
+      streamRenderTimer = null;
+      renderStreamingBubble();
+    }, wait);
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+  else run();
+}
+
+// Terminal repaint used by DONE / ERROR / the worker-recycle recovery in
+// connectPort(): synchronous, so the coalescer can never swallow the end of
+// a reply.
+function flushStreamingRender() {
+  renderStreamingBubble();
+}
+
 function handlePortMessage(msg) {
   // Ignore anything that isn't for the request this side is currently
   // tracking - either a stray message for a request already stopped via
@@ -1473,13 +1579,11 @@ function handlePortMessage(msg) {
     }
     case "CHUNK": {
       currentAssistantText += msg.delta;
-      if (currentAssistantBubble) {
-        setBubbleContent(currentAssistantBubble, currentAssistantText, "assistant", pendingPlainReply);
-        scrollToBottom();
-      }
+      scheduleStreamingRender();
       break;
     }
     case "DONE": {
+      flushStreamingRender();
       if (!currentAssistantText.trim()) {
         // Defensive: background.js reports an empty reply as an ERROR, but never
         // store an empty assistant turn - providers reject empty assistant
@@ -1507,10 +1611,31 @@ function handlePortMessage(msg) {
       break;
     }
     case "ERROR": {
+      flushStreamingRender();
+      // A mid-stream failure (e.g. OpenRouter's in-stream {"error":...}) can
+      // arrive after visible text has already streamed in. Keep that partial
+      // reply as a finished assistant turn - exactly what the worker-recycle
+      // recovery in connectPort()'s onDisconnect does - instead of deleting
+      // text the user was watching arrive. (The user turn is already in
+      // history; background.js folds an unanswered user turn into the next
+      // request, so this shape is expected there.)
       if (currentAssistantBubble) {
-        currentAssistantBubble.remove();
+        if (currentAssistantText.trim()) currentAssistantBubble.classList.remove("pending");
+        else currentAssistantBubble.remove();
         currentAssistantBubble = null;
       }
+      if (currentAssistantText.trim()) {
+        history.push({
+          role: "assistant",
+          content: currentAssistantText,
+          displayContent: currentAssistantText,
+          modelLabel: pendingModelLabel,
+          modelId: pendingModelId,
+          plain: pendingPlainReply,
+        });
+        saveConversations().catch((err) => console.error("[AI Assistant] Unable to save conversation:", err));
+      }
+      currentAssistantText = "";
       autoScrollEnabled = false;
       addBubble("error", t(currentLang, "error_withMessage_template", { message: msg.error }));
       setStreaming(false);
@@ -1610,29 +1735,6 @@ function syncCurrentConversationFromHistory() {
 // storage and merges by conversation id, and (3) only then trims and writes.
 let saveQueue = Promise.resolve();
 
-function sortedByNewest(list) {
-  return list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-}
-
-// Merge the stored list with this panel's list by id. The conversation this
-// panel is showing is authoritative; any other id keeps the copy with the
-// newest updatedAt (ties keep the local one). Conversations that exist only in
-// storage (saved by another panel) are preserved.
-function mergeConversationLists(stored, local, currentId) {
-  const byId = new Map();
-  for (const c of Array.isArray(stored) ? stored : []) {
-    if (c && c.id && c.messages?.length) byId.set(c.id, c);
-  }
-  for (const c of local) {
-    if (!c || !c.id) continue;
-    const other = byId.get(c.id);
-    if (!other || c.id === currentId || (c.updatedAt || 0) >= (other.updatedAt || 0)) {
-      byId.set(c.id, c);
-    }
-  }
-  return [...byId.values()].filter((c) => c.messages?.length);
-}
-
 function saveConversations() {
   const run = saveConversationsNow();
   // Keep the queue alive after a failed save; the caller still sees the error.
@@ -1724,7 +1826,11 @@ function renderConversation(messages) {
     if (message.role !== "user" && message.role !== "assistant") continue;
     addBubble(message.role, message.displayContent || message.content, message.role === "assistant" ? message.modelLabel : undefined, message.role === "assistant" && message.plain === true);
   }
-  scrollToBottom();
+  // Force-scroll: opening a past conversation must show its LATEST messages.
+  // autoScrollEnabled is false outside an active stream (it is only set on
+  // submit), so the plain scrollToBottom() call here was a no-op and every
+  // restored conversation opened scrolled to the very top.
+  scrollToBottom(true);
 }
 
 function startNewTopic() {
@@ -1735,7 +1841,7 @@ function startNewTopic() {
   renderConversation([]);
   questionInput.value = "";
   historySelect.value = NEW_TOPIC_VALUE;
-  chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: "" });
+  chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: "" }).catch(() => {});
 }
 
 async function loadConversations({ activate = true, syncModel = true } = {}) {

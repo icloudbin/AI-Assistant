@@ -358,16 +358,6 @@ function readerModeIsNoise(el) {
   return noise;
 }
 
-// Removes noise descendants from root in place. root itself is assumed to
-// have already passed (or deliberately skipped, like <body>) the same
-// check, and is never removed by this step.
-function readerModeStripNoise(root) {
-  for (const el of Array.from(root.querySelectorAll('*'))) {
-    if (readerModeIsNoise(el)) el.remove();
-  }
-  return root;
-}
-
 // Page DOMs are never modified or duplicated while extracting. Everything
 // below only READS the live tree. The previous implementation cloned
 // document.body (or the article container) and attached the clone to the live
@@ -381,7 +371,7 @@ const EXTRACT_MAX_DEPTH = 600;
 
 // textContent of `root` with noise subtrees left out - the same text the old
 // "clone, strip noise, read textContent" sequence produced, without the clone.
-// Like readerModeStripNoise(), the root itself is never treated as noise.
+// The root itself is never treated as noise.
 function textContentWithoutNoise(root) {
   let text = '';
   const walk = (node, depth) => {
@@ -406,8 +396,7 @@ const VISIBLE_TEXT_SKIP_TAGS = new Set([
 // visibility:hidden are left out, block-level elements start and end a line
 // (<p> a blank line), <br> is a newline, table cells are tab-separated, and
 // whitespace is collapsed unless the element is preformatted. Noise elements
-// (see readerModeIsNoise) are skipped exactly as readerModeStripNoise() removed
-// them. Nothing is cloned, inserted, or modified.
+// (see readerModeIsNoise) are skipped. Nothing is cloned, inserted, or modified.
 function readVisibleText(root, { filterNoise = true } = {}) {
   const items = []; // text tokens ({ text, pre }) and required-line-break counts (numbers)
   const pushBreak = (n) => {
@@ -558,7 +547,8 @@ function readerModeScore(root) {
 // reader-mode heuristics so a comment is never mistaken for the article.
 function extractRedditArticle() {
   const host = String(location.hostname || '').toLowerCase();
-  if (!/(^|\.)reddit\.com$/.test(host) && !/(^|\.)old\.reddit\.com$/.test(host)) {
+  // One pattern covers old.reddit.com too: that host also ends in reddit.com.
+  if (!/(^|\.)reddit\.com$/.test(host)) {
     return null;
   }
 
@@ -1052,7 +1042,9 @@ function mdCut(text) {
 }
 
 function extractPageMarkdownContent() {
-  const roots = [findReaderModeBestEl(), document.body].filter(Boolean);
+  // findReaderModeBestEl() falls back to <body> itself when no candidate
+  // scored; the Set keeps that case from extracting the whole page twice.
+  const roots = [...new Set([findReaderModeBestEl(), document.body].filter(Boolean))];
   for (let i = 0; i < roots.length; i++) {
     pageTextTruncated = false; // only the root that is actually returned counts
     const text = mdCut(mdBlocksOf(roots[i]).join('\n\n'));

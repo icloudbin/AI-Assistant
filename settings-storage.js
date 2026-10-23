@@ -155,3 +155,21 @@ export async function restoreSettingsFromBackup() {
     return {};
   }
 }
+
+// Runs the recovery at most ONCE per document / service-worker instance and
+// shares the in-flight promise between concurrent callers. Every ASK used to
+// run it twice (once directly in background.js, once through
+// getStoredLanguage() in i18n.js), and every language read in a page re-ran
+// it too: each run opened IndexedDB, read the record and issued a
+// chrome.storage.local.remove - pure overhead on the request's cold path.
+// Once per context is enough for the recovery purpose (the settings can only
+// have gone missing while this context was not running): an MV3 service
+// worker is recycled within seconds of going idle and every page load gets a
+// fresh module instance, so every meaningful boundary re-checks. The raw
+// restoreSettingsFromBackup() never rejects (its body is one try/catch), and
+// the catch below keeps that contract even if that ever changes.
+let restoreRun = null;
+export function restoreSettingsFromBackupOnce() {
+  restoreRun ??= restoreSettingsFromBackup().catch(() => {});
+  return restoreRun;
+}

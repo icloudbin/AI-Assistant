@@ -8,7 +8,7 @@ import {
   LANGUAGE_STORAGE_KEY,
 } from "../i18n.js";
 import { AUTO_WEB_RESEARCH_KEY, HISTORY_STORAGE_KEY, MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
-import { saveSettingsBackup, restoreSettingsFromBackup } from "../settings-storage.js";
+import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-storage.js";
 import { encryptSecrets, decryptSecrets, MIN_PASSPHRASE_LENGTH } from "../settings-crypto.js";
 
 const apiKeyInput = document.getElementById("apiKey");
@@ -133,8 +133,9 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 async function initializeSettingsPage() {
   // Recover settings before populating the controls. This protects against
   // an unexpected browser/extension storage reset while keeping
-  // chrome.storage.local as the normal primary store.
-  await restoreSettingsFromBackup();
+  // chrome.storage.local as the normal primary store. Memoized per page
+  // load; the second call below (loadSavedApiSettings) is free.
+  await restoreSettingsFromBackupOnce();
   await loadLanguage();
   await loadTheme();
 }
@@ -142,7 +143,7 @@ async function initializeSettingsPage() {
 void initializeSettingsPage();
 
 async function loadSavedApiSettings() {
-  await restoreSettingsFromBackup();
+  await restoreSettingsFromBackupOnce();
   const {
     apiKey,
     openrouterApiKey,
@@ -994,7 +995,12 @@ async function importSettings() {
       else if (BOOLEAN_SETTINGS_KEYS.has(key) && typeof value === "boolean") restored[key] = value;
     }
 
-    // API keys exported with a passphrase live in an encrypted envelope.
+    // API keys exported with a passphrase live in an encrypted envelope - but
+    // v1-format files carried them as PLAINTEXT inside `settings`, and this
+    // importer still accepts that for compatibility. Remember which keys came
+    // in the clear so the user can be told below (the file should be deleted
+    // and replaced with an encrypted export).
+    const plainSecretKeys = SETTINGS_BACKUP_SECRET_KEYS.filter((key) => typeof backup.settings[key] === "string" && backup.settings[key]);
     if (backup.encryptedSecrets !== undefined) {
       const passphrase = passphraseInput.value;
       if (!passphrase) throw new Error(t(currentLang, "settingsBackup_error_passphraseRequired"));
@@ -1002,9 +1008,12 @@ async function importSettings() {
       try {
         secrets = await decryptSecrets(backup.encryptedSecrets, passphrase);
       } catch (err) {
-        throw new Error(t(currentLang, err?.message === "DECRYPT_FAILED"
+        const code = err?.message === "DECRYPT_FAILED"
           ? "settingsBackup_error_decryptFailed"
-          : "settingsBackup_error_notSettingsBackup"));
+          : err?.message === "PLAINTEXT_CORRUPT"
+          ? "settingsBackup_error_plaintextCorrupt"
+          : "settingsBackup_error_notSettingsBackup";
+        throw new Error(t(currentLang, code));
       }
       for (const key of SETTINGS_BACKUP_SECRET_KEYS) {
         const value = secrets[key];
@@ -1028,6 +1037,15 @@ async function importSettings() {
     // with the stale (often empty) input value.
     await loadSavedApiSettings();
 
+    if (plainSecretKeys.length) {
+      // Imported, but the file carried API keys in the clear: warn instead of
+      // showing a plain success message, so the user re-exports encrypted and
+      // deletes the plaintext file.
+      msgEl.style.color = "#f5c451";
+      msgEl.textContent = `${t(currentLang, "settingsBackup_import_success")} ${t(currentLang, "settingsBackup_warn_plainKeys_template", { keys: plainSecretKeys.join(", ") })}`;
+      setTimeout(() => (msgEl.textContent = ""), 8000);
+      return;
+    }
     msgEl.style.color = "#4ade80";
     msgEl.textContent = t(currentLang, "settingsBackup_import_success");
     setTimeout(() => (msgEl.textContent = ""), 3000);
