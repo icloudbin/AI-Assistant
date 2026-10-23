@@ -1,0 +1,21 @@
+# Build / packaging artifacts - never commit these
+*.zip
+*.crx
+*.pem
+dist/
+build/
+out/
+
+# Dependencies and tooling
+node_modules/
+
+# Local secrets and environment files
+.env
+.env.*
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
