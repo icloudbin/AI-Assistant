@@ -19,7 +19,13 @@ export function mergeConversationLists(stored, local, currentId) {
     if (c && c.id && c.messages?.length) byId.set(c.id, c);
   }
   for (const c of local) {
-    if (!c || !c.id) continue;
+    // A message-less local entry must not be allowed to win: replacing the
+    // stored copy of the same id (it is "newer", or it is the current
+    // conversation) would drop that conversation from the merged result
+    // entirely, because the output filter below discards message-less
+    // entries. No current caller produces such an entry - this guard keeps
+    // a future caller from silently deleting saved history.
+    if (!c || !c.id || !c.messages?.length) continue;
     const other = byId.get(c.id);
     if (!other || c.id === currentId || (c.updatedAt || 0) >= (other.updatedAt || 0)) {
       byId.set(c.id, c);

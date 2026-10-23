@@ -1171,11 +1171,34 @@ globalThis.__aiAssistantMessageListener = (msg, sender, sendResponse) => {
   }
   // Always answer: an exception inside the extractor used to leave the sender
   // with "message port closed before a response was received" and no data.
-  try {
-    sendResponse({ ok: true, data: globalThis.__aiAssistantPageExtractor().extractPageContent({ markdown: msg.format === 'markdown' }) });
-  } catch (err) {
-    sendResponse({ ok: false, error: String(err?.message || err) });
+  // The extraction is a synchronous whole-DOM walk (hundreds of milliseconds
+  // on very large pages), so the listener answers ASYNC (returning true keeps
+  // the channel open) and runs the walk in an idle slot of the page rather
+  // than in the middle of its input/scroll handling.
+  let extractionStarted = false;
+  const runExtraction = () => {
+    // sendResponse may be called exactly once; whichever scheduler fires
+    // first wins and the other becomes a no-op.
+    if (extractionStarted) return;
+    extractionStarted = true;
+    try {
+      sendResponse({ ok: true, data: globalThis.__aiAssistantPageExtractor().extractPageContent({ markdown: msg.format === 'markdown' }) });
+    } catch (err) {
+      sendResponse({ ok: false, error: String(err?.message || err) });
+    }
+  };
+  if (typeof requestIdleCallback === "function") {
+    // requestIdleCallback is NOT dispatched while the document is hidden (no
+    // frames are produced; the timeout option only preempts busy frames, it
+    // does not force a hidden page to run). The side panel can submit just as
+    // this tab is being hidden, so a plain timer races the idle callback: in
+    // a background tab it is throttled, but unlike rIC it does fire, which
+    // bounds the wait instead of hanging until the user returns to this tab.
+    requestIdleCallback(() => runExtraction(), { timeout: 200 });
+    setTimeout(runExtraction, 250);
+  } else {
+    setTimeout(runExtraction, 0);
   }
-  return false;
+  return true;
 };
 chrome.runtime.onMessage.addListener(globalThis.__aiAssistantMessageListener);

@@ -1262,45 +1262,14 @@ async function getCurrentActiveTab() {
       return null;
     }
   }
-  return getFocusedWindowActiveTab();
-}
-
-// Legacy behaviour, used ONLY when the panel's own window could not be
-// determined. Query all active tabs and select the active tab belonging to the
-// currently focused NORMAL browser window. This is more reliable in Brave than
-// lastFocusedWindow alone, which can occasionally retain the tab that was
-// active when the panel was opened.
-async function getFocusedWindowActiveTab() {
-  try {
-    const [windows, activeTabs] = await Promise.all([
-      chrome.windows.getAll({ populate: false }),
-      chrome.tabs.query({ active: true }),
-    ]);
-    const focusedNormal = windows.find(
-      (w) => w.focused && w.type === "normal"
-    );
-    if (focusedNormal) {
-      const tab = activeTabs.find((t) => t.windowId === focusedNormal.id);
-      if (tab?.id) return tab;
-    }
-    // If the focused-window lookup is temporarily unavailable, prefer a tab
-    // from any focused window before falling back to the legacy query.
-    const focusedWindow = windows.find((w) => w.focused);
-    if (focusedWindow) {
-      const tab = activeTabs.find((t) => t.windowId === focusedWindow.id);
-      if (tab?.id) return tab;
-    }
-  } catch (err) {
-    console.debug("[AI Assistant] Unable to resolve active browser tab:", err);
-  }
-
-  try {
-    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    return tabs?.[0] || null;
-  } catch (err) {
-    console.debug("[AI Assistant] Unable to query active tab:", err);
-    return null;
-  }
+  // The panel's own window could not be determined. Deliberately NO
+  // cross-window fallback: guessing "the focused window" could read, display
+  // and send a DIFFERENT window's page - with panels open in two windows and
+  // this one unfocused, that was the wrong page every time. Reading nothing
+  // is safe; the lookup is retried on the next call (failures are not
+  // cached), and the next submission then sees the right window again.
+  console.debug("[AI Assistant] This panel's window is unknown; not reading any page.");
+  return null;
 }
 
 async function getActivePageContext(retryCount = 0, format = null) {
@@ -1334,7 +1303,20 @@ async function getActivePageContext(retryCount = 0, format = null) {
     };
   };
 
+  // The content script answers from an idle slot; a HIDDEN tab defers that
+  // (the content script's timer fallback bounds it, but a frozen renderer
+  // suspends timers entirely). Never wait forever: on timeout the capture
+  // simply failed, the caller's captureFailed sentinel tells the model the
+  // page could not be read, and the composer is never left stuck.
+  const EXTRACTOR_TIMEOUT_MS = 10000;
   const askExtractor = () => new Promise((resolve) => {
+    let settled = false;
+    const settle = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const timer = setTimeout(() => settle(null), EXTRACTOR_TIMEOUT_MS);
     // frameId: 0 - the TOP frame only. chrome.tabs.sendMessage without a
     // frame option delivers to every frame that has a listener, and the first
     // sendResponse wins. After a context-menu translation inside an iframe
@@ -1343,8 +1325,9 @@ async function getActivePageContext(retryCount = 0, format = null) {
     // extraction could answer first, making every later page read of that
     // tab fail its hasExtractedPageContent check and end as "capture failed".
     chrome.tabs.sendMessage(initialTabId, { type: "EXTRACT_PAGE_CONTENT", format }, { frameId: 0 }, (value) => {
-      if (chrome.runtime.lastError) { resolve(null); return; }
-      resolve(value || null);
+      clearTimeout(timer);
+      if (chrome.runtime.lastError) { settle(null); return; }
+      settle(value || null);
     });
   });
 
@@ -1693,10 +1676,16 @@ function condenseStoredContent(text) {
 }
 
 function toStoredMessage(message) {
+  const content = message.role === "user" ? condenseStoredContent(message.content) : message.content;
+  // displayContent is a display-only copy; store it ONLY when it differs
+  // from content - every reader falls back to `content`. Identical copies
+  // (every assistant turn, plain user turns) used to double the stored size
+  // of the conversation list.
+  const displayContent = message.displayContent || message.content;
   return {
     role: message.role,
-    content: message.role === "user" ? condenseStoredContent(message.content) : message.content,
-    displayContent: message.displayContent || message.content,
+    content,
+    ...(displayContent !== content ? { displayContent } : {}),
     modelLabel: message.modelLabel || "",
     modelId: message.modelId || "",
     // Which page (title/url only - never the page text itself) was used for
@@ -1742,17 +1731,44 @@ function saveConversations() {
   return run;
 }
 
+// Storage-quota pressure valve, applied to the merged list BEFORE any
+// conversation is dropped: shrink attachment previews further and drop the
+// display-only copy of every message (readers fall back to `content`).
+// Lossy for display, but every conversation and every turn is kept.
+const QUOTA_ATTACHMENT_PREVIEW_CHARS = 800;
+function compressForQuota(list) {
+  return list.map((c) => ({
+    ...c,
+    messages: (c.messages || []).map((m) => {
+      if (!m || typeof m !== "object") return m;
+      const compressed = { ...m };
+      delete compressed.displayContent;
+      if (typeof compressed.content === "string") {
+        compressed.content = compressed.content.replace(/\[ATTACHMENTS\][\s\S]*?\[\/ATTACHMENTS\]/gi, (block) =>
+          block.length <= QUOTA_ATTACHMENT_PREVIEW_CHARS
+            ? block
+            : `${block.slice(0, QUOTA_ATTACHMENT_PREVIEW_CHARS).trimEnd()}\n...[/ATTACHMENTS]`
+        );
+      }
+      return compressed;
+    }),
+  }));
+}
+
 async function saveConversationsNow() {
   await saveQueue;
   const stored = await chrome.storage.local.get(HISTORY_STORAGE_KEY);
-  // Snapshot the live history only after the read, so the freshest copy of the
-  // current conversation is what gets merged and written.
+  // Snapshot the live history only after the read, so the freshest copy of
+  // the current conversation is what gets merged and written.
   syncCurrentConversationFromHistory();
   let merged = sortedByNewest(
     mergeConversationLists(stored[HISTORY_STORAGE_KEY], conversations, currentConversationId)
   ).slice(0, MAX_SAVED_CONVERSATIONS);
-  // If the storage quota is exceeded, drop the oldest saved conversations and
-  // retry (on the merged list) instead of silently losing every later save.
+  // Storage-quota escalation, most gentle first: (1) write as-is, (2) shrink
+  // attachment previews and drop display-only copies (every conversation
+  // kept), (3) only then drop the OLDEST conversations - half per attempt -
+  // and tell the user how many were lost instead of dropping them silently.
+  let quotaDropped = 0;
   for (let attempt = 0; ; attempt++) {
     try {
       await chrome.storage.local.set({
@@ -1761,13 +1777,22 @@ async function saveConversationsNow() {
       });
       break;
     } catch (err) {
+      if (attempt === 0) {
+        merged = compressForQuota(merged);
+        continue;
+      }
       if (attempt >= 4 || merged.length <= 1) throw err;
-      merged = merged.slice(0, Math.max(1, Math.floor(merged.length / 2)));
+      const kept = Math.max(1, Math.floor(merged.length / 2));
+      quotaDropped += merged.length - kept;
+      merged = merged.slice(0, kept);
     }
   }
   conversations = merged;
   renderHistorySelect();
   scheduleHistoryRender();
+  if (quotaDropped > 0) {
+    addBubble("notice", t(currentLang, "history_quotaDropped_template", { count: String(quotaDropped) }));
+  }
 }
 
 let historyRenderQueued = false;
@@ -1965,7 +1990,29 @@ function decodeTextBytes(bytes) {
     return utf8;
   } catch { /* not valid UTF-8 */ }
   try {
-    return new TextDecoder("gb18030", { fatal: true }).decode(bytes);
+    const gb = new TextDecoder("gb18030", { fatal: true }).decode(bytes);
+    // GB18030 accepts almost any byte sequence, so a green decode alone does
+    // not mean the file is Chinese text: random binary also "decodes", into
+    // mojibake. Require the result to plausibly be CJK text - a solid share
+    // of ordinary (BMP) CJK characters among the non-ASCII ones, at least a
+    // few of them (a single short line like 中文测试第一行 has 7), and almost
+    // no control characters. Otherwise keep the lenient UTF-8 reading, which
+    // shows the damage as U+FFFD instead of handing the model pages of
+    // mojibake.
+    let cjk = 0;
+    let nonAscii = 0;
+    let control = 0;
+    for (const ch of gb) {
+      const code = ch.codePointAt(0);
+      if (code < 0x20 && ch !== "\n" && ch !== "\r" && ch !== "\t") control++;
+      else if (code >= 0x80) {
+        nonAscii++;
+        if (code >= 0x3400 && code <= 0x9fff) cjk++;
+      }
+    }
+    const total = Math.max(gb.length, 1);
+    const plausible = cjk >= 4 && cjk / Math.max(nonAscii, 1) >= 0.5 && control / total <= 0.01;
+    return plausible ? gb : utf8;
   } catch { /* not valid GB18030 either (or the decoder is unavailable) */ }
   return utf8;
 }

@@ -38,6 +38,10 @@ for (const h of ["printer.corp", "nas.home", "svc.test", "a.example", "x.invalid
 for (const h of ["example.com", "upload.wikimedia.org", "cdn.corporate.com", "homeland.org", "contest.net", "testing.io"]) {
   eq(`${h} is public`, isNonPublicHost(h), false);
 }
+// The wildcard-DNS services' BARE domains resolve to 127.0.0.1 themselves.
+for (const h of ["nip.io", "sslip.io", "xip.io", "traefik.me", "localtest.me", "lvh.me"]) {
+  eq(`${h} (bare) is non-public`, isNonPublicHost(h), true);
+}
 // Internal-suffix host is only reachable from a page on the same host:port.
 eq("public page -> printer.corp", allowed("http://printer.corp/a.png", "https://example.com/"), false);
 

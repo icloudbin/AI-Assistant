@@ -102,7 +102,10 @@ const LOCAL_NAME_SUFFIXES = [
   // Wildcard-DNS services that resolve a name embedding any IP (best effort).
   '.nip.io', '.sslip.io', '.xip.io', '.traefik.me', '.localtest.me', '.lvh.me',
 ];
-const LOCAL_NAMES = new Set(['localhost', 'localtest.me', 'lvh.me', 'nip.io', 'sslip.io', 'xip.io']);
+// The bare wildcard-DNS domains resolve to 127.0.0.1 themselves, exactly
+// like their subdomains (nip.io/sslip.io/xip.io/traefik.me); a bare domain
+// has no dot-separated suffix for LOCAL_NAME_SUFFIXES to catch.
+const LOCAL_NAMES = new Set(['localhost', 'localtest.me', 'lvh.me', 'nip.io', 'sslip.io', 'xip.io', 'traefik.me']);
 
 // True when `hostname` (as returned by URL.hostname, which already normalises
 // decimal/hex/octal IPv4 spellings and IPv6 forms) names this machine, a private

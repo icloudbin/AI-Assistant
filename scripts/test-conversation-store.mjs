@@ -69,6 +69,20 @@ eq(
   "b"
 );
 
+// A message-less local entry (never produced today, guarded anyway) must
+// not evict the stored copy of the same conversation - not even when it is
+// "newer" or claims to be the current one.
+eq(
+  "message-less local entry (newer, current) cannot evict the stored copy",
+  ids(mergeConversationLists([convo("a", 100)], [{ id: "a", updatedAt: 999, messages: [] }], "a")),
+  "a"
+);
+eq(
+  "message-less local entry is dropped on its own",
+  ids(mergeConversationLists([], [{ id: "b", updatedAt: 1, messages: [] }, convo("c", 1)], null)),
+  "c"
+);
+
 // The saved list is trimmed (in saveConversationsNow) by sorting newest-first
 // and slicing to MAX_SAVED_CONVERSATIONS; the trim keeps the NEWEST ones.
 {

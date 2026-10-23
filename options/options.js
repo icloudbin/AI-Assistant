@@ -554,7 +554,11 @@ function normalizeRestoredConversation(conversation, index) {
         .map((m) => ({
           role: m.role,
           content: String(m.content || ""),
-          displayContent: String(m.displayContent || m.content || ""),
+          // Same display-only-copy dedupe as toStoredMessage() in
+          // sidepanel.js: keep displayContent only when it differs.
+          ...(m.displayContent !== undefined && m.displayContent !== m.content
+            ? { displayContent: String(m.displayContent) }
+            : {}),
           modelLabel: String(m.modelLabel || ""),
           modelId: String(m.modelId || ""),
           // Same shape the side panel writes (see toStoredMessage()): the
