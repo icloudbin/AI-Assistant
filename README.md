@@ -21,7 +21,11 @@ AI-Assistant/
 ├── conversation-store.js
 ├── settings-storage.js
 ├── settings-crypto.js
-├── pii-filter.js
+├── providers/
+│   ├── messages.js
+│   └── openai-compatible.js
+├── privacy/
+│   └── pii-filter.js
 ├── translate-lines.js
 ├── translation-selection.js
 ├── url-safety.js
@@ -45,6 +49,10 @@ AI-Assistant/
 │   ├── test-url-safety.mjs
 │   ├── test-translation-paragraphs.mjs
 │   ├── test-conversation-store.mjs
+│   ├── test-providers-messages.mjs
+│   ├── test-openai-compatible.mjs
+│   ├── test-markdown-render.mjs
+│   ├── test-history-manager.mjs
 │   └── test-sidepanel-context.py
 └── sidepanel/
     ├── sidepanel.html
@@ -52,7 +60,10 @@ AI-Assistant/
     ├── sidepanel.js
     ├── mic-permission.html  ← opened as its own tab for the mic permission grant, see "Voice input" in docs/features.md
     ├── mic-permission.css
-    └── mic-permission.js
+    ├── mic-permission.js
+    ├── rendering/
+    │   └── markdown.js
+    └── history-manager.js
 ```
 
 ## Deployment

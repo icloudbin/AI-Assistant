@@ -280,6 +280,7 @@ const translations = {
     bg_error_unknownModel_template: `Unknown model selection: {model}`,
     bg_error_unsupportedProvider_template: `Unsupported model provider: {provider}`,
     bg_error_emptyResponse: `The AI service returned an empty response. Please try again or choose a different model.`,
+    bg_error_streamCut: `The connection to the model ended before the reply was finished. The partial reply is shown and may be incomplete.`,
     bg_error_piiFilter: `The privacy filter failed; the request was not sent.`,
   },
 
@@ -504,6 +505,7 @@ const translations = {
     bg_error_unknownModel_template: `未知的模型选择：{model}`,
     bg_error_unsupportedProvider_template: `不支持的模型提供方：{provider}`,
     bg_error_emptyResponse: `AI 服务返回了空响应。请重试，或选择其他模型。`,
+    bg_error_streamCut: `与模型的连接在回复完成前中断。已保留部分回复，内容可能不完整。`,
     bg_error_piiFilter: `隐私过滤失败，请求未发送。`,
   },
 
@@ -728,6 +730,7 @@ const translations = {
     bg_error_unknownModel_template: `未知的模型選擇：{model}`,
     bg_error_unsupportedProvider_template: `不支援的模型提供方：{provider}`,
     bg_error_emptyResponse: `AI 服務傳回了空白回應。請重試，或選擇其他模型。`,
+    bg_error_streamCut: `與模型的連線在回覆完成前中斷。已保留部分回覆，內容可能不完整。`,
     bg_error_piiFilter: `隱私過濾失敗，請求未送出。`,
   },
 
@@ -952,6 +955,7 @@ const translations = {
     bg_error_unknownModel_template: `Sélection de modèle inconnue : {model}`,
     bg_error_unsupportedProvider_template: `Fournisseur de modèle non pris en charge : {provider}`,
     bg_error_emptyResponse: `Le service d’IA a renvoyé une réponse vide. Réessayez ou choisissez un autre modèle.`,
+    bg_error_streamCut: `La connexion au modèle s’est interrompue avant la fin de la réponse. La réponse partielle est affichée et peut être incomplète.`,
     bg_error_piiFilter: `Le filtre de confidentialité a échoué ; la requête n’a pas été envoyée.`,
   },
 
@@ -1176,6 +1180,7 @@ const translations = {
     bg_error_unknownModel_template: `不明なモデルが選択されました: {model}`,
     bg_error_unsupportedProvider_template: `サポートされていないモデルプロバイダーです: {provider}`,
     bg_error_emptyResponse: `AI サービスから空の応答が返されました。もう一度お試しいただくか、別のモデルを選択してください。`,
+    bg_error_streamCut: `モデルとの接続が応答の完了前に切断されました。部分的な応答のみ表示されており、内容が不完全な可能性があります。`,
     bg_error_piiFilter: `プライバシーフィルターが失敗したため、リクエストは送信されませんでした。`,
   },
 
@@ -1400,6 +1405,7 @@ const translations = {
     bg_error_unknownModel_template: `Selección de modelo desconocida: {model}`,
     bg_error_unsupportedProvider_template: `Proveedor de modelo no admitido: {provider}`,
     bg_error_emptyResponse: `El servicio de IA devolvió una respuesta vacía. Inténtalo de nuevo o elige otro modelo.`,
+    bg_error_streamCut: `La conexión con el modelo se cortó antes de terminar la respuesta. Se muestra la respuesta parcial y puede estar incompleta.`,
     bg_error_piiFilter: `El filtro de privacidad falló; la solicitud no se envió.`,
   },
 };

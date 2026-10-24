@@ -2,7 +2,7 @@
 // Unit tests for pii-filter.js: what must be redacted, what must be left alone,
 // numbered placeholders and restoring the real values in a reply.
 // Run:  node scripts/test-pii-filter.mjs
-import { redactSensitive as R, createRedactionSession, restorePlaceholders, PlaceholderRestorer } from "../pii-filter.js";
+import { redactSensitive as R, createRedactionSession, restorePlaceholders, PlaceholderRestorer } from "../privacy/pii-filter.js";
 
 let failed = 0;
 const check = (name, ok, extra = "") => {

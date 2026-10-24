@@ -10,7 +10,7 @@
 // (e.g. "Name:", "My name is", "Dear", "姓名", "我叫", email display names).
 // It is a safety net, not a guarantee.
 
-import { parseIPv6 } from "./url-safety.js";
+import { parseIPv6 } from "../url-safety.js";
 
 export const PII_FILTER_STORAGE_KEY = "piiFilterEnabled";
 
