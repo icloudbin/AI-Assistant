@@ -133,7 +133,6 @@
     margin-top: 0 !important;
     padding-top: 12px !important;
   }
-  .terms-textarea { min-height: 84px; }
   .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none; align-items: center; justify-content: center; z-index: 1000; }
   .modal-backdrop.show { display: flex; }
   .confirm-modal { width: 340px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: 0 18px 60px rgba(0,0,0,.45); }
@@ -195,13 +194,6 @@
       <div class="field custom-prompt-field">
         <textarea id="customPrompt" placeholder="Example: You are a concise technical assistant. Always answer in English, use bullet points when helpful, and clearly distinguish facts from assumptions." data-i18n-placeholder="customPrompt_placeholder"></textarea>
         <div class="hint backup-hint" data-i18n="customPrompt_hint">This prompt is sent to the selected model (DeepSeek, OpenRouter, or Groq) as a system instruction and can customize how the assistant interprets requests and formats its responses.</div>
-      </div>
-    </div>
-    <div class="history-management translation-terms-section">
-      <div class="history-management-title" data-i18n="translationTerms_label">Translation terms to keep in the original</div>
-      <div class="field translation-terms-field">
-        <textarea id="translationTerms" class="terms-textarea" placeholder="One term per line, for example:&#10;Staples&#10;IBM&#10;Azure DevOps" data-i18n-placeholder="translationTerms_placeholder"></textarea>
-        <div class="hint backup-hint" data-i18n="translationTerms_hint">Used only by Translate. Brand names, acronyms and technical terms are already kept in the original automatically; list a term here only when you want to pin it yourself. Each listed term is sent with every translation request and must then appear in the translation exactly as written.</div>
       </div>
     </div>
     <div class="actions">

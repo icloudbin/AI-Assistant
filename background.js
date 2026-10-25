@@ -1,6 +1,6 @@
 // background.js (root directory)
 import { findKnownModel, DEFAULT_MAX_PAGE_CHARS, MAX_PAGE_CONTEXT_CHARS } from "./models.js";
-import { AUTO_WEB_RESEARCH_KEY, CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY, TRANSLATION_TERMS_KEY } from "./storage-keys.js";
+import { AUTO_WEB_RESEARCH_KEY, CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY } from "./storage-keys.js";
 import { getStoredLanguage, t } from "./i18n.js";
 import { restoreSettingsFromBackupOnce } from "./settings-storage.js";
 import { checkImageUrl } from "./url-safety.js";
@@ -580,15 +580,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
       port.postMessage({ type: "START", requestId });
 
-      // The user's do-not-translate term list (Settings) rides along on
-      // Translate requests only; providers pass it to buildMessages(), which
-      // appends it to the translation protocol prompt.
-      let translationTerms = "";
-      if (translateMode === true) {
-        const storedTerms = await chrome.storage.local.get(TRANSLATION_TERMS_KEY);
-        translationTerms = String(storedTerms[TRANSLATION_TERMS_KEY] || "");
-      }
-      const ctx = { port, requestId, signal: abortController.signal, lang, translateMode: translateMode === true ? "free" : false, translationTerms, lineTranslator: null };
+      const ctx = { port, requestId, signal: abortController.signal, lang, translateMode: translateMode === true ? "free" : false, lineTranslator: null };
       // Everything shown to the user goes through here so the real values replace
       // the placeholders (also when one is split across two streamed chunks).
       const chunkRestorer = new PlaceholderRestorer(piiSession, (delta) => port.postMessage({ type: "CHUNK", delta, requestId }));

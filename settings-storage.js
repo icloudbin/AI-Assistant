@@ -11,7 +11,7 @@
 // service-worker start. Keys live only in chrome.storage.local; the Settings
 // export can carry them, but only encrypted with a passphrase (settings-crypto.js).
 
-import { LANGUAGE_STORAGE_KEY, TRANSLATION_TERMS_KEY } from "./storage-keys.js";
+import { LANGUAGE_STORAGE_KEY } from "./storage-keys.js";
 
 const DB_NAME = "ai-assistant-settings";
 const DB_VERSION = 1;
@@ -35,11 +35,6 @@ export const PERSISTED_SETTING_KEYS = [
   LANGUAGE_STORAGE_KEY,
   "preferredTranslationLanguage",
   "themePreference",
-  // v1.10.112 saved the term list into this mirror but forgot it here, so the
-  // write was silently dropped by saveSettingsBackup's key loop and a storage
-  // reset lost the list while customPrompt survived. Guarded by
-  // scripts/test-settings-storage-keys.mjs.
-  TRANSLATION_TERMS_KEY,
 ];
 
 function openDatabase() {
@@ -148,8 +143,11 @@ export async function getSettingsBackup() {
 // This means an intentional empty-string setting is never overwritten.
 export async function restoreSettingsFromBackup() {
   try {
-    // Remove the Gemini API key left by older builds; Gemini is no longer a supported provider.
-    await chrome.storage.local.remove(["geminiApiKey"]);
+    // One-time cleanups of keys left behind by older builds: the Gemini API
+    // key (Gemini is no longer a supported provider) and the v1.10.112-113
+    // translation term list (feature removed in v1.10.114 - brand/technical
+    // terms are kept in the original by the translation instructions alone).
+    await chrome.storage.local.remove(["geminiApiKey", "translationTerms"]);
     const [local, backup] = await Promise.all([
       chrome.storage.local.get(PERSISTED_SETTING_KEYS),
       getSettingsBackup(),

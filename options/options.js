@@ -7,7 +7,7 @@ import {
   SUPPORTED_LANGUAGES,
   LANGUAGE_STORAGE_KEY,
 } from "../i18n.js";
-import { AUTO_WEB_RESEARCH_KEY, HISTORY_STORAGE_KEY, MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LANGUAGE_KEY, TRANSLATION_TERMS_KEY } from "../storage-keys.js";
+import { AUTO_WEB_RESEARCH_KEY, HISTORY_STORAGE_KEY, MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
 import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-storage.js";
 import { encryptSecrets, decryptSecrets, MIN_PASSPHRASE_LENGTH } from "../settings-crypto.js";
 
@@ -16,7 +16,6 @@ const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
 const groqApiKeyInput = document.getElementById("groqApiKey");
 const tavilyApiKeyInput = document.getElementById("tavilyApiKey");
 const customPromptInput = document.getElementById("customPrompt");
-const translationTermsInput = document.getElementById("translationTerms");
 const msgEl = document.getElementById("msg");
 const piiFilterToggle = document.getElementById("piiFilterToggle");
 // Privacy filter: on by default, saved immediately when toggled.
@@ -164,7 +163,6 @@ async function loadSavedApiSettings() {
     groqKey,
     tavilyApiKey,
     customPrompt,
-    [TRANSLATION_TERMS_KEY]: translationTerms,
   } = await chrome.storage.local.get([
     "apiKey",
     "openrouterApiKey",
@@ -172,7 +170,6 @@ async function loadSavedApiSettings() {
     "groqKey",
     "tavilyApiKey",
     "customPrompt",
-    TRANSLATION_TERMS_KEY,
   ]);
 
   apiKeyInput.value = apiKey || "";
@@ -180,7 +177,6 @@ async function loadSavedApiSettings() {
   groqApiKeyInput.value = groqApiKey || groqKey || "";
   tavilyApiKeyInput.value = tavilyApiKey || "";
   customPromptInput.value = customPrompt || "";
-  translationTermsInput.value = translationTerms || "";
 }
 
 void loadSavedApiSettings();
@@ -193,7 +189,6 @@ document.getElementById("save").addEventListener("click", async (event) => {
   const groqKey = groqApiKeyInput.value.trim();
   const tavilyKey = tavilyApiKeyInput.value.trim();
   const customPrompt = customPromptInput.value.trim();
-  const translationTerms = translationTermsInput.value.trim();
 
   try {
     const settingsToSave = {
@@ -204,11 +199,10 @@ document.getElementById("save").addEventListener("click", async (event) => {
       groqKey,
       tavilyApiKey: tavilyKey,
       customPrompt,
-      [TRANSLATION_TERMS_KEY]: translationTerms,
     };
     await chrome.storage.local.set(settingsToSave);
     // API keys live only in chrome.storage.local (never mirrored to IndexedDB).
-    await saveSettingsBackup({ customPrompt, [TRANSLATION_TERMS_KEY]: translationTerms });
+    await saveSettingsBackup({ customPrompt });
 
     // Verify the write immediately. This makes a broken Save operation visible
     // instead of showing "Saved" when the value was not actually persisted.
@@ -218,7 +212,6 @@ document.getElementById("save").addEventListener("click", async (event) => {
       "groqKey",
       "tavilyApiKey",
       "customPrompt",
-      TRANSLATION_TERMS_KEY,
     ]);
     for (const [name, value] of Object.entries(settingsToSave)) {
       if (saved[name] !== value) {
@@ -891,7 +884,6 @@ const SETTINGS_BACKUP_PLAIN_KEYS = [
   // a restore would silently re-enable page sending.
   "includeCurrentPageContext",
   "customPrompt",
-  TRANSLATION_TERMS_KEY,
   THEME_STORAGE_KEY,
   LANGUAGE_STORAGE_KEY,
   PREFERRED_TRANSLATION_LANGUAGE_KEY,

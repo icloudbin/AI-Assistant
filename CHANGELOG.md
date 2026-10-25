@@ -4,6 +4,14 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Removed: user-maintained translation term list (v1.10.114)
+
+- **Why.** After v1.10.111-113 the user concluded the automatic rule is sufficient: models already keep brand names, company names, acronyms and technical terms (Staples, IBM, HP, Dyson, ...) in the original on their own, so the Settings textarea was unneeded UI and maintenance. Translation behavior is left entirely to the AI models under the standing instruction.
+- **Removed.** The Settings page section and its 6-language i18n keys (221 → 218), the `translationTerms` storage key (`storage-keys.js`) together with its Settings export/import entry, the IndexedDB mirror entry, and the whole request-side path: the background read, the `ctx.translationTerms` field, the provider parameter, and the `USER'S DO-NOT-TRANSLATE LIST` instruction in providers/messages.js. The v1.10.111 rule inside both translation instructions is unchanged and is now the only mechanism.
+- **Cleanup.** `restoreSettingsFromBackup()` removes the orphaned `translationTerms` key left in chrome.storage.local by 1.10.112/113 installs (same one-time-cleanup pattern as the old `geminiApiKey`).
+- **Checked.** All 10 suites + `check-package.mjs` green (6 languages × 218 keys). E2E on the packaged zip: the Settings page shows no term field, a leftover stored key is cleaned on page load, and a live DeepSeek translation of the brands fixture still keeps Staples/IBM/HP verbatim with no 史泰博 transliteration.
+- Build bumped to 1.10.114.
+
 ## Fix: translation term list now really reaches the IndexedDB settings mirror (v1.10.113)
 
 - **Problem.** v1.10.112 claimed the term list was "mirrored to the settings backup store" - it was not. options.js did pass `translationTerms` to `saveSettingsBackup()`, but that mirror writes and restores only the keys in `PERSISTED_SETTING_KEYS` (settings-storage.js), which did not include it. Result: the Settings JSON export/import carried the list correctly, yet after an unexpected `chrome.storage.local` reset the automatic recovery layer restored `customPrompt` but silently lost the term list - an inconsistency found on review of the backup paths.

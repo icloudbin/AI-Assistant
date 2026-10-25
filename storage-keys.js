@@ -15,11 +15,6 @@ export const PREFERRED_TRANSLATION_LANGUAGE_KEY = "preferredTranslationLanguage"
 // it is exactly true. Read by background.js, written by options.js.
 export const AUTO_WEB_RESEARCH_KEY = "autoWebResearchEnabled";
 
-// "Translation terms to keep in the original" (Settings): one term per line.
-// Read by background.js for every Translate request (injected into the
-// translation protocol prompt), written by options.js.
-export const TRANSLATION_TERMS_KEY = "translationTerms";
-
 // Upper bound on saved conversations kept in chrome.storage.local. Shared by
 // sidepanel.js (which trims to this on every save) and options.js (which
 // merges restored backups up to this many) so a restore can never add more

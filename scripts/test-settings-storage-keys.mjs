@@ -7,7 +7,7 @@
 // Run:  node scripts/test-settings-storage-keys.mjs
 import assert from "node:assert/strict";
 import { PERSISTED_SETTING_KEYS, SECRET_SETTING_KEYS } from "../settings-storage.js";
-import { LANGUAGE_STORAGE_KEY, TRANSLATION_TERMS_KEY } from "../storage-keys.js";
+import { LANGUAGE_STORAGE_KEY } from "../storage-keys.js";
 
 // The user-authored settings the options page / storage layer pass to
 // saveSettingsBackup(). When you add a new one, extend BOTH this list and
@@ -18,7 +18,6 @@ const MIRRORED_SETTINGS = [
   LANGUAGE_STORAGE_KEY,
   "preferredTranslationLanguage",
   "themePreference",
-  TRANSLATION_TERMS_KEY,
 ];
 for (const key of MIRRORED_SETTINGS) {
   assert.ok(
