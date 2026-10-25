@@ -4,6 +4,22 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Feature: user-maintained do-not-translate term list (v1.10.112)
+
+- **Why.** The v1.10.111 brand-preservation rule is generic, with only built-in examples. Pinning a specific term (a company the user works with, an internal product name) still required editing `providers/messages.js`.
+- **Settings.** New "Translation terms to keep in the original" textarea on the Settings page (one term per line), localized in all 6 languages. Saved with the main Save button under `translationTerms` (`storage-keys.js`), included in the Settings JSON export/import (`SETTINGS_BACKUP_PLAIN_KEYS`), and mirrored to the settings backup store.
+- **Request path.** `background.js` reads the list only for Translate requests and passes it via `ctx.translationTerms`; the three providers in `providers/openai-compatible.js` forward it to `buildMessages()`, which appends a `USER'S DO-NOT-TRANSLATE LIST (MANDATORY)` instruction after the translation protocol - rendered as a JSON array so terms containing commas or quotes stay unambiguous. Non-translate requests never carry the list.
+- **Bounds.** `parseTranslationTerms()` (exported for tests) trims lines, drops blanks and duplicates (first occurrence wins), caps each term at 80 chars and the list at 200 terms - the list rides inside every translation prompt, so it stays bounded regardless of what was pasted. Terms are the user's own setting, same trust level as the Custom Prompt.
+- **Checked.** `scripts/test-providers-messages.mjs` grew 6 assertions (parsing incl. caps; JSON-array rendering; blank list adds nothing; list never rides on non-translate requests). All 9 suites and `check-package.mjs` green (i18n now 6 languages × 221 keys).
+- Build bumped to 1.10.112.
+
+## Improvement: translation keeps brand names and technical terms in the original (v1.10.111)
+
+- **Why.** The Translate feature transliterated or localized words that are not regular vocabulary of the source language: Staples came back as 史泰博, and company names or acronyms (IBM, Microsoft, HP) were sometimes converted even though the user wants the original form displayed in the translated text.
+- **Change.** Both translation instructions in `providers/messages.js` — `TRANSLATION_FORMAT_INSTRUCTION` (fallback/free mode) and `TRANSLATION_LINES_INSTRUCTION` (numbered-lines mode used by whole-page and selection translation) — now mandate: brand names, company names, product names, acronyms and technical terms stay in their original written form, exactly as in the source; never translate, transliterate or adapt them (write "Staples", never "史泰博"). The rule is scoped to the Translate feature's prompts only; normal chat answers keep their existing language rules.
+- **Checked.** `scripts/test-providers-messages.mjs` grew 3 assertions (free mode maps to the format instruction; both instructions carry the brand-preservation rule); all suites re-run green.
+- Build bumped to 1.10.111.
+
 ## Fix: real-Chrome E2E round — network-cut streams, raw JSON error bodies (v1.10.110)
 
 Deep end-to-end testing against the user's real local Chrome (stable 156, Jason profile copy, real DeepSeek/Groq/OpenRouter/Tavily keys, 50+ live checks across streaming, page context, GBK pages, truncation notices, history, PII outbound capture, translation, backups, SW lifecycle) found two provider-layer defects; both fixed here.

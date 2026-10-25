@@ -11,6 +11,7 @@ import {
   outputLanguageName,
   outputLanguageInstruction,
   factCheckLanguageInstruction,
+  parseTranslationTerms,
 } from "../providers/messages.js";
 
 // ---------- pageContextInstruction: three states ----------
@@ -100,6 +101,23 @@ assert.equal(imgTurn.content[1].image_url.url, "data:image/png;base64,AAA");
 // translateMode selects the numbered-lines protocol
 const tr = buildMessages("[1] hello", null, [], null, [], "zh-CN", "lines");
 assert.match(tr[tr.length - 1].content, /TRANSLATION PROTOCOL/, "lines mode adds the numbered-protocol instruction");
+assert.match(tr[tr.length - 1].content, /Staples/, "lines protocol keeps brand names in the original form");
+const trFree = buildMessages("hello", null, [], null, [], "zh-CN", "free");
+assert.match(trFree[trFree.length - 1].content, /TRANSLATION FORMAT/, "non-lines translate mode adds the format instruction");
+assert.match(trFree[trFree.length - 1].content, /Staples/, "format instruction keeps brand names in the original form");
+
+// user's do-not-translate term list: parsed, injected on translate requests only
+assert.deepEqual(parseTranslationTerms("  Staples \n\nIBM\nIBM\n  \nAzure DevOps"), ["Staples", "IBM", "Azure DevOps"], "terms parse: trimmed, blanks and duplicates dropped");
+assert.deepEqual(parseTranslationTerms(null), [], "missing list parses to empty");
+assert.equal(parseTranslationTerms(Array.from({ length: 300 }, (_, i) => `t${i}`).join("\n")).length, 200, "term count is capped");
+const trTerms = buildMessages("[1] hello", null, [], null, [], "zh-CN", "lines", "Staples\nAcme, Inc.\n\"quoted\"");
+const trTermsText = trTerms[trTerms.length - 1].content;
+assert.match(trTermsText, /DO-NOT-TRANSLATE LIST/, "translate request carries the user term list");
+assert.ok(trTermsText.includes('["Staples","Acme, Inc.","\\"quoted\\""]'), "terms render as a JSON array (commas/quotes inside a term stay unambiguous)");
+const trNoTerms = buildMessages("[1] hello", null, [], null, [], "zh-CN", "lines", "  \n ");
+assert.doesNotMatch(trNoTerms[trNoTerms.length - 1].content, /DO-NOT-TRANSLATE LIST/, "blank-only list adds no instruction");
+const nonTranslateTerms = buildMessages("hello", null, [], null, [], "zh-CN", false, "Staples");
+assert.doesNotMatch(nonTranslateTerms[nonTranslateTerms.length - 1].content, /DO-NOT-TRANSLATE LIST/, "term list never rides on non-translate requests");
 
 // ---------- language helpers ----------
 assert.equal(outputLanguageName("zh-CN"), "Simplified Chinese (简体中文)");
