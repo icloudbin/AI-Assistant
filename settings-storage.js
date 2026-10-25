@@ -11,7 +11,7 @@
 // service-worker start. Keys live only in chrome.storage.local; the Settings
 // export can carry them, but only encrypted with a passphrase (settings-crypto.js).
 
-import { LANGUAGE_STORAGE_KEY } from "./storage-keys.js";
+import { LANGUAGE_STORAGE_KEY, TRANSLATION_TERMS_KEY } from "./storage-keys.js";
 
 const DB_NAME = "ai-assistant-settings";
 const DB_VERSION = 1;
@@ -35,6 +35,11 @@ export const PERSISTED_SETTING_KEYS = [
   LANGUAGE_STORAGE_KEY,
   "preferredTranslationLanguage",
   "themePreference",
+  // v1.10.112 saved the term list into this mirror but forgot it here, so the
+  // write was silently dropped by saveSettingsBackup's key loop and a storage
+  // reset lost the list while customPrompt survived. Guarded by
+  // scripts/test-settings-storage-keys.mjs.
+  TRANSLATION_TERMS_KEY,
 ];
 
 function openDatabase() {
