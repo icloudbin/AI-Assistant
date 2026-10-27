@@ -29,30 +29,49 @@ globalThis.chrome = {
   tabs: {}, windows: {},
 };
 const sse = (s) => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(s)); c.close(); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
-globalThis.fetch = async (url, opts = {}) => {
-  bodies.push({ url: String(url), body: String(opts.body ?? "") });
-  if (String(url).includes("tavily")) return new Response(JSON.stringify({ results: [{ url: "https://e.com/a", title: "T", content: "evidence", score: 1 }] }), { status: 200 });
-  return sse(providerReply(String(opts.body ?? "")));
-};
 // Overridable provider behaviour (default: a short, complete answer).
 let providerReply = () => 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
+// Overridable Tavily behaviour (default: one usable result).
+let tavilyReply = () => new Response(JSON.stringify({ results: [{ url: "https://e.com/a", title: "T", content: "evidence", score: 1 }] }), { status: 200 });
+globalThis.fetch = async (url, opts = {}) => {
+  bodies.push({ url: String(url), body: String(opts.body ?? "") });
+  if (String(url).includes("tavily")) return tavilyReply();
+  return sse(providerReply(String(opts.body ?? "")));
+};
+// An escape from the ASK handler that nothing catches (e.g. a postMessage on a
+// dead port thrown out of the catch block) surfaces here; Node would also
+// crash the process on it, so any count > 0 fails the run.
+let unhandledRejections = 0;
+process.on("unhandledRejection", () => { unhandledRejections++; });
 const chunk = (content, finish = null) => `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: finish }] })}\n\n`;
 
 await import(pathToFileURL(path.join(root, "background.js")).href);
 const onConnect = listeners.c[0];
 
 let lastOut = "";
-async function ask(payload) {
+// `deadStart` simulates a panel whose port died while the background handler
+// was sitting in its early awaits: postMessage throws for START, exactly as a
+// disconnected port does.
+async function ask(payload, { deadStart = false } = {}) {
   bodies.length = 0;
   lastOut = "";
   let port;
   const handlers = [];
   const notices = [];
-  const done = new Promise((resolve) => {
-    port = { name: "ai-chat", sender: { id: "x", url: "chrome-extension://x/sidepanel.html" },
-      onMessage: { addListener: (f) => handlers.push(f) }, onDisconnect: { addListener() {} },
-      postMessage: (m) => { if (m.type === "CHUNK") lastOut += m.delta; if (m.type === "NOTICE") notices.push(m.text); if (m.type === "DONE" || m.type === "ERROR") resolve(m); }, disconnect() {} };
-  });
+  let resolveDone = null;
+  const basePost = (m) => {
+    if (m.type === "CHUNK") lastOut += m.delta;
+    if (m.type === "NOTICE") notices.push(m.text);
+    if (m.type === "DONE" || m.type === "ERROR") resolveDone(m);
+  };
+  const done = new Promise((resolve) => { resolveDone = resolve; });
+  port = { name: "ai-chat", sender: { id: "x", url: "chrome-extension://x/sidepanel.html" },
+    onMessage: { addListener: (f) => handlers.push(f) }, onDisconnect: { addListener() {} },
+    postMessage: (m) => {
+      if (deadStart && m.type === "START") throw new Error("Attempting to use a disconnected port object");
+      basePost(m);
+    },
+    disconnect() {} };
   onConnect(port);
   await handlers[0]({ type: "ASK", payload: { requestId: 1, modelId: "deepseek-flash", includePageContext: true, history: [], images: [], ...payload } });
   const final = await done;
@@ -155,6 +174,43 @@ check("translation output has real email/phone, not placeholders", r.out.include
 check("translation request never contained the real values", r.sent.every((s) => !/jane\.doe@|bob@example|415 555 0132/.test(s.body)));
 providerReply = () => 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
 
+// --- Regression: selection translation with NO translatable line (all code) --
+// prepareLineTranslation() returns null for a pure code block. The request must
+// NOT go out as a bare instruction with no text anywhere, and since there is
+// nothing to translate no provider call is made at all: the original is echoed.
+const codeSelection = "```\nSELECT name FROM users;\nconst x = 1;\n```";
+providerReply = () => { throw new Error("provider must not be called"); };
+r = await ask({ question: "Translate the selected text into French", pageContext: null, includePageContext: false, translateMode: true, translateSource: codeSelection, noWebResearch: true });
+check("all-code selection echoes the original, no provider request", r.final.type === "DONE" && r.sent.length === 0 && r.out === codeSelection, `final=${r.final.type} sent=${r.sent.length} out=${JSON.stringify(r.out)}`);
+check("all-code selection explains nothing needed translating", r.notices.some((n) => /Nothing needed translating/i.test(n)), r.notices.join(" | "));
+providerReply = () => 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
+
+// --- Regression: explicit web research with zero Tavily results --------------
+// The question-research path must not show the Fact-Check-specific wording.
+tavilyReply = () => new Response(JSON.stringify({ results: [] }), { status: 200 });
+r = await ask({ question: "search the web for the population of Queluz Sintra", pageContext: null, includePageContext: false, forceWebResearch: true });
+check("research with no Tavily results reports a neutral error", r.final.type === "ERROR" && /no usable web sources for this request/i.test(r.final.error) && !/fact check/i.test(r.final.error), r.final.error || "");
+tavilyReply = () => new Response(JSON.stringify({ results: [{ url: "https://e.com/a", title: "T", content: "evidence", score: 1 }] }), { status: 200 });
+
+// --- Regression: a mid-stream error flushes the PII restorer's held-back tail
+// The stream dies right after a placeholder cut in half; the restorer holds
+// everything from the "[" onward awaiting the "]". The ERROR path must flush
+// the held fragment into the partial reply instead of losing it.
+providerReply = (body) => {
+  const ph = lastUser(body).match(/\[EMAIL#\d+\]/)?.[0] || "[EMAIL#1]";
+  return chunk(`I will write to ${ph.slice(0, -1)}`) + 'data: {"error":{"message":"mid-stream failure"}}\n\n';
+};
+r = await ask({ question: "Write a note to jane.doe@example.com", pageContext: null, includePageContext: false, noWebResearch: true });
+check("mid-stream error keeps the held-back placeholder tail", r.final.type === "ERROR" && r.out === "I will write to [EMAIL#1", `final=${r.final.type} out=${JSON.stringify(r.out)}`);
+providerReply = () => 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
+
+// --- Regression: a dead panel port must not escape as an unhandled rejection
+// The panel closed while the handler sat in its early awaits: START throws
+// ("disconnected port"), the catch's own ERROR post must not throw a second
+// time, and the request must settle without an unhandled rejection.
+r = await ask({ question: "x", pageContext: null, includePageContext: false, noWebResearch: true }, { deadStart: true });
+check("disconnected port at START: request settles, no unhandled rejection", r.final.type === "DONE" && unhandledRejections === 0, `final=${r.final.type} unhandled=${unhandledRejections}`);
+
 // Filter off: the same data must pass through unchanged (proves the test can detect leaks).
 store.piiFilterEnabled = false;
 const off = await ask({ question: "x", pageContext, noWebResearch: true });
@@ -162,4 +218,8 @@ const leaksOff = PII.some((p) => off.sent.some((s) => s.body.includes(p)));
 console.log(`${leaksOff ? "PASS" : "FAIL"}  sanity: filter disabled -> PII present (test can detect leaks)`);
 if (!leaksOff) failed++;
 
+if (unhandledRejections > 0) {
+  failed++;
+  console.log(`FAIL  ${unhandledRejections} unhandled promise rejection(s) escaped the ASK handler`);
+}
 process.exit(failed ? 1 : 0);

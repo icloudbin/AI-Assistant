@@ -444,6 +444,22 @@ chrome.runtime.onConnect.addListener((port) => {
   }
   connectedPanelPorts.add(port);
 
+  // Posts to this port, ignoring the throw of a port that is already
+  // disconnected. The panel can close (or its document can be torn down)
+  // while the ASK handler below sits in one of its early, non-abortable
+  // awaits (settings restore, language read, storage read); resuming after
+  // the onDisconnect abort, the next port.postMessage would throw - and the
+  // catch's own ERROR postMessage would throw a second time, escaping the
+  // async listener as an unhandled promise rejection. There is nobody left
+  // to receive anything, so every write just becomes a no-op.
+  const safePost = (message) => {
+    try {
+      port.postMessage(message);
+    } catch {
+      // Panel gone; nothing to report to.
+    }
+  };
+
   // Per-connection in-flight-request state (fresh for each side panel
   // session/reconnect, since these are declared inside this listener's
   // closure). At most one request is ever active at a time - the side
@@ -524,6 +540,10 @@ chrome.runtime.onConnect.addListener((port) => {
     const releaseKeepAlive = startRequestKeepAlive();
 
     let pageSentChars = 0;
+    // Hoisted so the catch below can flush text the PII placeholder restorer
+    // was still holding back when the request failed mid-stream (ctx is
+    // declared inside the try block and is invisible to the catch).
+    let chunkRestorer = null;
     try {
       // Recover user settings before reading provider keys or language. This
       // makes the background service worker resilient if extension local
@@ -578,12 +598,12 @@ chrome.runtime.onConnect.addListener((port) => {
         throw new Error(t(lang, "bg_error_unsupportedProvider_template", { provider: model.provider }));
       }
 
-      port.postMessage({ type: "START", requestId });
+      safePost({ type: "START", requestId });
 
       const ctx = { port, requestId, signal: abortController.signal, lang, translateMode: translateMode === true ? "free" : false, lineTranslator: null };
       // Everything shown to the user goes through here so the real values replace
       // the placeholders (also when one is split across two streamed chunks).
-      const chunkRestorer = new PlaceholderRestorer(piiSession, (delta) => port.postMessage({ type: "CHUNK", delta, requestId }));
+      chunkRestorer = new PlaceholderRestorer(piiSession, (delta) => safePost({ type: "CHUNK", delta, requestId }));
       ctx.sendChunk = (delta) => chunkRestorer.push(delta);
       ctx.flushChunks = () => chunkRestorer.flush();
       const normalizedImages = Array.isArray(images) ? images.filter((img) => img && typeof img.dataUrl === "string" && /^data:image\/(jpeg|png|gif|webp);base64,/i.test(img.dataUrl)) : [];
@@ -605,13 +625,17 @@ chrome.runtime.onConnect.addListener((port) => {
         const nl = cut.lastIndexOf("\n");
         if (nl > pageCap * 0.8) cut = cut.slice(0, nl);
         requestPageContext = { ...requestPageContext, text: cut };
-        port.postMessage({ type: "NOTICE", text: t(lang, "bg_notice_pageTruncated_template", { model: model.label, chars: String(cut.length) }), requestId });
+        safePost({ type: "NOTICE", text: t(lang, "bg_notice_pageTruncated_template", { model: model.label, chars: String(cut.length) }), requestId });
       }
       pageSentChars = requestPageContext && !requestPageContext.captureFailed ? (requestPageContext.text || "").length : 0;
       let effectiveQuestion = question;
       let requestPageContextFinal = requestPageContext;
       let translationBatches = [];
       let translateUsingSelection = false;
+      // Set when the source contains nothing translatable (see below): the
+      // original text is echoed back and no provider request is made at all.
+      let translationIdentity = false;
+      let identityText = "";
       // Format-preserving translation: the layout (lines, blank lines,
       // indentation, list markers) is kept in code; the model only translates
       // numbered lines. See translate-lines.js.
@@ -625,7 +649,7 @@ chrome.runtime.onConnect.addListener((port) => {
           ctx.translateMode = "lines";
           const cutUpstream = usingSelection ? translateSourceTruncated === true : requestPageContext?.truncated === true;
           if (prepared.truncated || cutUpstream) {
-            port.postMessage({ type: "NOTICE", text: t(lang, "bg_notice_translateTruncated", { chars: String(prepared.keptChars) }), requestId });
+            safePost({ type: "NOTICE", text: t(lang, "bg_notice_translateTruncated", { chars: String(prepared.keptChars) }), requestId });
           }
           translateUsingSelection = usingSelection;
           translationBatches = numberedBatches(prepared);
@@ -635,6 +659,23 @@ chrome.runtime.onConnect.addListener((port) => {
           } else {
             requestPageContextFinal = { ...requestPageContext, text: prepared.numbered };
           }
+        } else if (source) {
+          // Every line of the source is code (inside a fence), an image line
+          // or otherwise letter-less, so the model has NOTHING to translate -
+          // prepareLineTranslation() returned null. For a selection (page
+          // context is deliberately off there) the request previously went
+          // out as the bare instruction with no text anywhere, and the model
+          // answered "please provide the text". Echo the original back
+          // instead - exactly the reply LineTranslator's fallback produces
+          // for lines it could not translate - and skip the provider call.
+          // A selection that is one big code block is the real-world case.
+          translationIdentity = true;
+          identityText = source;
+          const cutUpstream = usingSelection ? translateSourceTruncated === true : requestPageContext?.truncated === true;
+          if (cutUpstream) {
+            safePost({ type: "NOTICE", text: t(lang, "bg_notice_translateTruncated", { chars: String(source.length) }), requestId });
+          }
+          safePost({ type: "NOTICE", text: t(lang, "bg_notice_translateNothingToTranslate"), requestId });
         }
       }
       if (factCheck?.enabled) {
@@ -679,7 +720,11 @@ chrome.runtime.onConnect.addListener((port) => {
         }
       };
       let translationStoppedAt = null;
-      if (ctx.lineTranslator && translationBatches.length > 1) {
+      if (translationIdentity) {
+        // Nothing translatable: the echoed original (already sent as one
+        // CHUNK through the placeholder restorer) is the whole reply.
+        ctx.sendChunk(identityText);
+      } else if (ctx.lineTranslator && translationBatches.length > 1) {
         // Long text: several moderate requests, so no single reply can run into
         // the model's output limit. Each batch carries its global line numbers.
         for (const batch of translationBatches) {
@@ -715,14 +760,14 @@ chrome.runtime.onConnect.addListener((port) => {
         if (translationStoppedAt) {
           // Replaces the generic "lines not translated" notice: it names the
           // line where the translation broke off and why.
-          port.postMessage({ type: "NOTICE", text: t(lang, "bg_notice_translateStoppedAtLine_template", { line: String(translationStoppedAt.line), status: translationStoppedAt.status, translated: String(ctx.lineTranslator.translated), total: String(ctx.lineTranslator.expected) }), requestId });
+          safePost({ type: "NOTICE", text: t(lang, "bg_notice_translateStoppedAtLine_template", { line: String(translationStoppedAt.line), status: translationStoppedAt.status, translated: String(ctx.lineTranslator.translated), total: String(ctx.lineTranslator.expected) }), requestId });
         } else if (ctx.lineTranslator.missing > 0) {
-          port.postMessage({ type: "NOTICE", text: t(lang, "bg_notice_translateMissingLines_template", { missing: String(ctx.lineTranslator.missing), total: String(ctx.lineTranslator.expected) }), requestId });
+          safePost({ type: "NOTICE", text: t(lang, "bg_notice_translateMissingLines_template", { missing: String(ctx.lineTranslator.missing), total: String(ctx.lineTranslator.expected) }), requestId });
         }
       } else if (ctx.truncatedByLength) {
-        port.postMessage({ type: "NOTICE", text: t(lang, "bg_notice_replyTruncatedLength"), requestId });
+        safePost({ type: "NOTICE", text: t(lang, "bg_notice_replyTruncatedLength"), requestId });
       }
-      port.postMessage({ type: "DONE", requestId });
+      safePost({ type: "DONE", requestId });
     } catch (err) {
       // A deliberate STOP surfaces here as an AbortError (either from the
       // fetch() call itself being aborted, or from the stream reader's
@@ -736,7 +781,13 @@ chrome.runtime.onConnect.addListener((port) => {
       if (pageSentChars > 0 && /^HTTP (413|429)\b|too large|rate.?limit|context.?length|maximum context|tokens? per (minute|day)|\bTPM\b|reduce the length/i.test(errorText)) {
         errorText += `\n\n${t(await getStoredLanguage().catch(() => "en"), "bg_hint_pageTooLarge")}`;
       }
-      port.postMessage({ type: "ERROR", error: errorText, requestId });
+      // Release whatever the PII placeholder restorer was still holding back
+      // (a possible placeholder split across two chunks, held until its "]"
+      // arrives): the ERROR path keeps the partial reply as a finished
+      // assistant turn, and without this flush its last characters were
+      // permanently lost.
+      try { chunkRestorer?.flush(); } catch {}
+      safePost({ type: "ERROR", error: errorText, requestId });
     } finally {
       if (activeRequestId === requestId) {
         activeRequestId = null;
@@ -1062,7 +1113,10 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
     }
 
     const sources = [...byUrl.values()].sort((a, b) => b.score - a.score);
-    if (!sources.length) throw new Error(t(ctx.lang, 'bg_error_factCheckNoResults'));
+    // Not the Fact-Check-specific key: this path also serves explicit
+    // "search the web" questions and the Explain action, where a message
+    // about a fact check would be wrong.
+    if (!sources.length) throw new Error(t(ctx.lang, 'bg_error_researchNoResults'));
 
     let evidenceText = '';
     for (const source of sources) {
@@ -1074,7 +1128,7 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
       if (evidenceText.length + block.length > ONLINE_RESEARCH_MAX_EVIDENCE_CHARS) break;
       evidenceText += block;
     }
-    if (!evidenceText) throw new Error(t(ctx.lang, 'bg_error_factCheckNoResults'));
+    if (!evidenceText) throw new Error(t(ctx.lang, 'bg_error_researchNoResults'));
 
     return {
       prompt: `${question}\n\nONLINE RESEARCH EVIDENCE:\n${evidenceText}\nAnswer the user's question using the supplied evidence for time-sensitive or missing-page facts. Do not infer a newer version from an older page. Prefer official sources when the evidence identifies them. If the sources do not establish the answer, say that it is unverified. Cite the supplied source URLs and do not invent sources, dates, specifications, or quotes.`,

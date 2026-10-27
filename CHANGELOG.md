@@ -4,6 +4,21 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Fix: round-5 deep review - selection translation losing all-code text, dead-port rejections, lost stream tail, wrong research error (v1.10.115)
+
+Round 5 of the full-code review (background/providers, panel, content scripts, settings/i18n) confirmed four defects; all fixed in one build.
+
+- **Problem 1.** Selecting a whole code block and running "Translate selected text" sent the instruction with NO text: `prepareLineTranslation()` returns null when every line is non-translatable (code fences, image lines, letter-less separators), and for a selection the page context is deliberately off, so the source rode in no request field at all. The model answered "please provide the text" - and a page translation whose text happened to be all code degraded to a wasteful free-mode re-render.
+- **Fix 1.** When the translation source has no translatable line, the original text is echoed back as the reply (exactly what the lines-mode fallback produces for untranslated lines) with a NOTICE explaining it (new 6-language key `bg_notice_translateNothingToTranslate`), and no provider request is made at all. Deterministic, free, and consistent with the established semantics.
+- **Problem 2.** The ERROR path never flushed the PII placeholder restorer: a placeholder split across two streamed chunks holds back everything from its `[` until the `]` arrives, so a mid-stream failure right after such a fragment permanently dropped those characters from the partial reply (which the ERROR path keeps as a finished assistant turn).
+- **Fix 2.** The catch block now flushes `chunkRestorer` (hoisted out of the try scope) before posting ERROR.
+- **Problem 3.** A panel can close while the ASK handler sits in its early non-abortable awaits; the resuming `port.postMessage` (START, and every later write) then throws, the catch's own ERROR post throws a second time, and the error escapes the async listener as an unhandled promise rejection on every panel-close-during-submit.
+- **Fix 3.** All port writes in the ASK handler go through a `safePost` wrapper that no-ops once the port is dead.
+- **Problem 4.** The question-research path (explicit "search the web", the Explain action) reused the Fact-Check-specific error key, so zero Tavily results on an ordinary web-research request reported "Tavily returned no usable web sources for the Fact Check."
+- **Fix 4.** New 6-language key `bg_error_researchNoResults` with neutral wording; the Fact-Check path keeps its original message.
+- **Checked.** `scripts/test-outbound-pii.mjs` grew 5 assertions (all-code selection echoes verbatim with no provider request and the new NOTICE; neutral research error without the Fact-Check wording; held-back placeholder tail survives a mid-stream error; dead port at START settles DONE with zero unhandled rejections). All 10 suites + `check-package.mjs` green (6 languages × 220 keys).
+- Build bumped to 1.10.115.
+
 ## Removed: user-maintained translation term list (v1.10.114)
 
 - **Why.** After v1.10.111-113 the user concluded the automatic rule is sufficient: models already keep brand names, company names, acronyms and technical terms (Staples, IBM, HP, Dyson, ...) in the original on their own, so the Settings textarea was unneeded UI and maintenance. Translation behavior is left entirely to the AI models under the standing instruction.
