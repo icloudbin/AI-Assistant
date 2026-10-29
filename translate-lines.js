@@ -13,14 +13,27 @@
 //      commentary from the model is dropped.
 // The result always has exactly the same line layout as the source.
 
-const PREFIX_RE = /^(\s*(?:>\s?)*(?:(?:\d+[.)]|[-*+•·◦▪]|#{1,6})\s+)?)/;
+// List markers / numbering that stay in code: latin "1."/"1)" (the space
+// after is mandatory so "3.14" never loses its "3."), CJK enumerators
+// "1、"/"一、" (written tight against the text, so no space required),
+// en/em-dash bullets, and markdown "#".
+const PREFIX_RE = /^(\s*(?:>\s?)*(?:(?:\d+[.)]\s+|[一二三四五六七八九十]{1,3}[、.]\s*|\d+[、．]\s*|[-*+•·◦▪–—]\s+|#{1,6}\s+))?)/;
 // A fence may sit inside a blockquote; content.js emits every quoted line
 // with a "> " prefix, so "> ```" must toggle the fence state too - otherwise
 // quoted code is sent to the model as translatable text and gets garbled.
 const FENCE_RE = /^\s*(?:>\s?)*(```|~~~)/;
+// A line that merely CONTAINS ``` (an inline span like "```code``` more")
+// is not a fence: the span opens and closes on the same line, so only an
+// ODD number of ```/~~~ runs toggles the fence state. Without this check a
+// transcript line starting with ``` turned every following line into "code"
+// and - via the identity fallback - silently skipped the whole translation.
+const FENCE_RUN_RE = /```|~~~/g;
 const IMAGE_LINE_RE = /^\s*!\[[^\]]*\]\([^)]*\)\s*$/;
-// Things the model must never touch: inline code, link/image targets, bare URLs.
-const PROTECT_RE = /`[^`\n]+`|\]\(([^)\s]+)[^)]*\)|https?:\/\/[^\s)\]>]+/g;
+// Things the model must never touch: inline code, link/image targets, bare
+// URLs. Link targets may contain one balanced parenthesis level
+// (Wikipedia-style ".../Foo_(bar)") - without it the target was cut at the
+// inner ")" and a stray ")" stayed in the translatable text.
+const PROTECT_RE = /`[^`\n]+`|\]\((?:[^()\s]|\([^()\s]*\))+\)|https?:\/\/[^\s)\]>]+/g;
 
 function protect(body) {
   const tokens = [];
@@ -41,7 +54,9 @@ function restore(text, tokens) {
   return tokens.length ? text.replace(/\{\{\s*U(\d+)\s*\}\}/g, (m, i) => (tokens[Number(i)] ?? m)) : text;
 }
 const HAS_LETTER_RE = /\p{L}/u;
-const TAG_RE = /^\s*\[(\d+)\]\s?(.*)$/;
+// "[3] text" from the model - optionally markdown-escaped as "\[3\] text",
+// exactly like PLACEHOLDER_RE tolerates escaped brackets in pii-filter.js.
+const TAG_RE = /^\s*\\?\[(\d+)\\?\]\s?(.*)$/;
 
 export function prepareLineTranslation(source, maxChars = 120000) {
   let text = String(source ?? "").replace(/\r\n?/g, "\n");
@@ -55,7 +70,7 @@ export function prepareLineTranslation(source, maxChars = 120000) {
   const rawLines = text.split("\n");
   let inFence = false;
   const lines = rawLines.map((raw) => {
-    const isFence = FENCE_RE.test(raw);
+    const isFence = FENCE_RE.test(raw) && (raw.match(FENCE_RUN_RE) || []).length % 2 === 1;
     if (isFence) inFence = !inFence;
     const prefix = raw.match(PREFIX_RE)[1];
     const bodyAndTrailingWhitespace = raw.slice(prefix.length);
@@ -162,7 +177,15 @@ export class LineTranslator {
       return;
     }
     // Untagged text: treat as a wrapped continuation of the current line.
-    if (this.heldId >= 0 && !this.skipping && line.trim()) this.heldText += ` ${line.trim()}`;
+    // CJK scripts write no spaces between words: a model wrapping a long
+    // Chinese/Japanese/Korean line must be re-joined WITHOUT the inserted
+    // space (你好世 + 界 -> 你好世界); spaced scripts keep it.
+    if (this.heldId >= 0 && !this.skipping && line.trim()) {
+      const t = line.trim();
+      const cjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+      const sep = cjk.test(this.heldText.slice(-1)) && cjk.test(t[0]) ? "" : " ";
+      this.heldText += sep + t;
+    }
   }
 
   push(delta) {
