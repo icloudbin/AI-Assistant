@@ -601,7 +601,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
       safePost({ type: "START", requestId });
 
-      const ctx = { port, requestId, signal: abortController.signal, lang, translateMode: translateMode === true ? "free" : false, lineTranslator: null };
+      const ctx = { port, requestId, signal: abortController.signal, lang, translateMode: translateMode === true ? "free" : false, lineTranslator: null, safePost };
       // Everything shown to the user goes through here so the real values replace
       // the placeholders (also when one is split across two streamed chunks).
       chunkRestorer = new PlaceholderRestorer(piiSession, (delta) => safePost({ type: "CHUNK", delta, requestId }));
@@ -783,7 +783,10 @@ chrome.runtime.onConnect.addListener((port) => {
       if (err?.name === "AbortError") return;
       let errorText = err?.message || String(err);
       // Clear hint when a page-sized request is refused or rate limited.
-      if (pageSentChars > 0 && /^HTTP (413|429)\b|too large|rate.?limit|context.?length|maximum context|tokens? per (minute|day)|\bTPM\b|reduce the length/i.test(errorText)) {
+      // Tavily errors are excluded: a Tavily 429/5xx ("rate limit exceeded" in
+      // its body) has nothing to do with the page size, and the hint would be
+      // misleading.
+      if (pageSentChars > 0 && !/^Tavily\b/i.test(errorText) && /^HTTP (413|429)\b|too large|rate.?limit|context.?length|maximum context|tokens? per (minute|day)|\bTPM\b|reduce the length/i.test(errorText)) {
         errorText += `\n\n${t(await getStoredLanguage().catch(() => "en"), "bg_hint_pageTooLarge")}`;
       }
       // Release whatever the PII placeholder restorer was still holding back
@@ -1076,7 +1079,10 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
     // NOTICE; an implicit lookup is skipped silently. Never throw here - that
     // used to stop the model from being called at all.
     if (trigger !== 'implicit') {
-      ctx.port?.postMessage({ type: 'NOTICE', text: t(ctx.lang, 'bg_notice_tavilyKeyMissingSkipped'), requestId: ctx.requestId });
+      // safePost, like every other port write: the panel can close during the
+      // storage read above, and a raw postMessage would then throw out of the
+      // research path and kill the model call with a TypeError.
+      ctx.safePost?.({ type: 'NOTICE', text: t(ctx.lang, 'bg_notice_tavilyKeyMissingSkipped'), requestId: ctx.requestId });
     }
     return null;
   }

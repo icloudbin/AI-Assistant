@@ -33,7 +33,12 @@ const IMAGE_LINE_RE = /^\s*!\[[^\]]*\]\([^)]*\)\s*$/;
 // URLs. Link targets may contain one balanced parenthesis level
 // (Wikipedia-style ".../Foo_(bar)") - without it the target was cut at the
 // inner ")" and a stray ")" stayed in the translatable text.
-const PROTECT_RE = /`[^`\n]+`|\]\((?:[^()\s]|\([^()\s]*\))+\)|https?:\/\/[^\s)\]>]+/g;
+// A literal {{U0}}-style token already present in the SOURCE (a page about
+// template syntax, or this protocol itself) must also be protected: left
+// alone, restore() rewrote it to the line's own protected token at that
+// index ("use the token {{U0}}" became "use the token https://..."). Being
+// protected, it round-trips to itself whatever index it receives.
+const PROTECT_RE = /`[^`\n]+`|\]\((?:[^()\s]|\([^()\s]*\))+\)|https?:\/\/[^\s)\]>]+|\{\{\s*U\d+\s*\}\}/g;
 
 function protect(body) {
   const tokens = [];

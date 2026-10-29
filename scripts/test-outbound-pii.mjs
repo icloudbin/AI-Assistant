@@ -36,7 +36,10 @@ let tavilyReply = () => new Response(JSON.stringify({ results: [{ url: "https://
 globalThis.fetch = async (url, opts = {}) => {
   bodies.push({ url: String(url), body: String(opts.body ?? "") });
   if (String(url).includes("tavily")) return tavilyReply();
-  return sse(providerReply(String(opts.body ?? "")));
+  const reply = providerReply(String(opts.body ?? ""));
+  // A Response returned by providerReply passes through directly (HTTP-status
+  // simulations); anything else is wrapped as an SSE body.
+  return reply instanceof Response ? reply : sse(reply);
 };
 // An escape from the ASK handler that nothing catches (e.g. a postMessage on a
 // dead port thrown out of the catch block) surfaces here; Node would also
@@ -51,8 +54,9 @@ const onConnect = listeners.c[0];
 let lastOut = "";
 // `deadStart` simulates a panel whose port died while the background handler
 // was sitting in its early awaits: postMessage throws for START, exactly as a
-// disconnected port does.
-async function ask(payload, { deadStart = false } = {}) {
+// disconnected port does. `deadNotice` does the same for NOTICE messages (the
+// panel closed during a later phase, e.g. the research preflight).
+async function ask(payload, { deadStart = false, deadNotice = false } = {}) {
   bodies.length = 0;
   lastOut = "";
   let port;
@@ -69,6 +73,7 @@ async function ask(payload, { deadStart = false } = {}) {
     onMessage: { addListener: (f) => handlers.push(f) }, onDisconnect: { addListener() {} },
     postMessage: (m) => {
       if (deadStart && m.type === "START") throw new Error("Attempting to use a disconnected port object");
+      if (deadNotice && m.type === "NOTICE") throw new Error("Attempting to use a disconnected port object");
       basePost(m);
     },
     disconnect() {} };
@@ -210,6 +215,33 @@ providerReply = () => 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [
 // time, and the request must settle without an unhandled rejection.
 r = await ask({ question: "x", pageContext: null, includePageContext: false, noWebResearch: true }, { deadStart: true });
 check("disconnected port at START: request settles, no unhandled rejection", r.final.type === "DONE" && unhandledRejections === 0, `final=${r.final.type} unhandled=${unhandledRejections}`);
+
+// --- Regression: the research-missing-key NOTICE goes through safePost -------
+// The panel dies while the handler is deciding on research with no Tavily key:
+// the NOTICE write must be swallowed (safePost), not thrown out of the
+// research path - a raw postMessage there used to kill the model call with a
+// TypeError. The provider request must still go out and the request must DONE.
+{
+  const hadTavilyKey = "tavilyApiKey" in store;
+  delete store.tavilyApiKey;
+  r = await ask({ question: "search the web for unreliable test facts", pageContext: null, includePageContext: false, forceWebResearch: true }, { deadNotice: true });
+  check("dead port at research NOTICE: model call still completes", r.final.type === "DONE" && unhandledRejections === 0 && !/disconnected port/i.test(r.final.error || ""), `final=${r.final.type} error=${r.final.error || "-"} unhandled=${unhandledRejections}`);
+  if (hadTavilyKey) store.tavilyApiKey = "tvly-test";
+}
+
+// --- Regression: a Tavily failure must not carry the page-too-large hint ----
+// The hint is matched fuzzily ("rate limit", "too large"), which also matched
+// Tavily's own 429 body and told the user to shrink their page for what is a
+// research-service failure.
+tavilyReply = () => new Response(JSON.stringify({ error: "rate limit exceeded" }), { status: 429 });
+r = await ask({ question: "search the web for unreliable test facts", pageContext: { tabId: 1, title: "P", url: "https://e.com/p", text: "Some page text worth more than nothing." }, forceWebResearch: true });
+check("Tavily 429 error carries no page-too-large hint", r.final.type === "ERROR" && /Tavily HTTP 429/.test(r.final.error) && !/Read current page/i.test(r.final.error), r.final.error || "");
+tavilyReply = () => new Response(JSON.stringify({ results: [{ url: "https://e.com/a", title: "T", content: "evidence", score: 1 }] }), { status: 200 });
+// The hint still fires for a PROVIDER 429 on a page-sized request.
+providerReply = () => new Response(JSON.stringify({ error: { message: "rate limit exceeded" } }), { status: 429 });
+r = await ask({ question: "summarize", pageContext: { tabId: 1, title: "P", url: "https://e.com/p", text: "Some page text worth more than nothing." }, noWebResearch: true });
+check("provider 429 still gets the page-too-large hint", r.final.type === "ERROR" && /Read current page/i.test(r.final.error), r.final.error || "");
+providerReply = () => 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
 
 // Filter off: the same data must pass through unchanged (proves the test can detect leaks).
 store.piiFilterEnabled = false;

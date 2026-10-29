@@ -4,6 +4,18 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Fix: round-8 deep review - translation token collision, dead-port research notice, misleading rate-limit hint (v1.10.119)
+
+Round 8 of the full-code review (~13,700 lines re-read end to end; findings verified by execution with throwaway harnesses before fixing) confirmed three defects: 0 P1, 1 P2, 2 P3.
+
+- **Problem 1 (P2).** A literal `{{U0}}`-style protocol token in the translation SOURCE was rewritten to a wrong value. A page about template syntax (or this protocol itself) that contained both a protected link and a literal `{{U0}}` on one line came back translated as "use the token https://x.com/a" - restore() mapped the model's faithfully-kept literal onto the line's own protected-token slot at that index.
+- **Fix 1.** `PROTECT_RE` in `translate-lines.js` also protects pre-existing `{{U<n>}}` occurrences: they are re-tokenized like any protected span and round-trip to themselves whatever index they receive. +2 regression assertions in `test-translation-paragraphs.mjs` (with-link collision, token-only line).
+- **Problem 2 (P3).** The research-missing-key NOTICE (`bg_notice_tavilyKeyMissingSkipped`) was the one remaining port write that bypassed the round-5 `safePost` policy: a panel closed during the research preflight made the raw `postMessage` throw, killing the model call with a TypeError.
+- **Fix 2.** `safePost` now travels on `ctx` and the NOTICE uses it; a dead panel can no longer abort the request there. Regression assertion in `test-outbound-pii.mjs` (NOTICE-throws port variant + missing Tavily key → request still completes with DONE).
+- **Problem 3 (P3).** The provider "page too large" hint (`bg_hint_pageTooLarge`) was matched fuzzily against the error text ("rate limit", "too large"), so a Tavily 429 with "rate limit exceeded" in its body told the user to shrink their page for what is a research-service failure.
+- **Fix 3.** The hint is skipped for Tavily-prefixed errors; it still fires for provider HTTP 413/429 responses. +2 assertions in `test-outbound-pii.mjs` (Tavily 429 without hint, provider 429 with hint; the test harness can now simulate raw provider HTTP statuses).
+- **Checked.** All 15 unit suites green + `check-package.mjs` OK + automated real-Chrome CDP E2E suite 11/11 PASS. Build bumped to 1.10.119.
+
 ## Fix: translation box no longer shows the model's thought process (v1.10.118)
 
 - **Problem.** After v1.10.117's thinking-stream feature (#5), OpenAI-compatible reasoning models streamed `reasoning_content`/`reasoning` into EVERY response panel - including translations. The translation box showed a `💭 Thought process:` block above the translated text instead of only the final translation (the v1.10.115 behavior).

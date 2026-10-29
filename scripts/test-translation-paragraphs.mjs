@@ -222,5 +222,28 @@ assert.deepEqual(browserPreferred, { text: "One\n\nTwo", format: "text", truncat
   latin.finish();
   assert.equal(latinOut, "A wrapped latin continuation here", "latin continuation keeps its space");
 }
+{
+  // A literal {{U0}}-style token already in the SOURCE must survive the
+  // protect/restore round-trip. Unprotected, restore() rewrote it to the
+  // line's own protected token at that index: "use the token {{U0}}" on a
+  // line that also carried a link came back as "use the token https://...".
+  const p = prepareLineTranslation("See https://x.com/a and then use the token {{U0}}.");
+  assert.ok(p.lines[0].tokens.includes("{{U0}}"), "the literal token is protected as itself");
+  let out = "";
+  const lt = new LineTranslator(p, (d) => { out += d; });
+  // A faithful model echoes the (renumbered) tokens it was sent.
+  lt.push("[1] 请参阅 {{U0}}，然后使用令牌 {{U1}}。");
+  lt.finish();
+  assert.equal(out, "请参阅 https://x.com/a，然后使用令牌 {{U0}}。", "the literal token survives; only the real link is restored");
+}
+{
+  // A literal token on a line with NO other protected spans still round-trips.
+  const p = prepareLineTranslation("Use the token {{U0}} in the config.");
+  let out = "";
+  const lt = new LineTranslator(p, (d) => { out += d; });
+  lt.push("[1] 在配置中使用令牌 {{U0}}。");
+  lt.finish();
+  assert.equal(out, "在配置中使用令牌 {{U0}}。", "literal token survives on a token-free line");
+}
 
 console.log("OK: translated paragraphs, trailing whitespace, and selection-source precedence are preserved.");
