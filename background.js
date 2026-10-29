@@ -544,6 +544,7 @@ chrome.runtime.onConnect.addListener((port) => {
     // was still holding back when the request failed mid-stream (ctx is
     // declared inside the try block and is invisible to the catch).
     let chunkRestorer = null;
+    let thinkingRestorer = null;
     try {
       // Recover user settings before reading provider keys or language. This
       // makes the background service worker resilient if extension local
@@ -606,6 +607,9 @@ chrome.runtime.onConnect.addListener((port) => {
       chunkRestorer = new PlaceholderRestorer(piiSession, (delta) => safePost({ type: "CHUNK", delta, requestId }));
       ctx.sendChunk = (delta) => chunkRestorer.push(delta);
       ctx.flushChunks = () => chunkRestorer.flush();
+      thinkingRestorer = new PlaceholderRestorer(piiSession, (delta) => safePost({ type: "THINKING", delta, requestId }));
+      ctx.sendThinking = (delta) => thinkingRestorer.push(delta);
+      ctx.flushThinking = () => thinkingRestorer.flush();
       const normalizedImages = Array.isArray(images) ? images.filter((img) => img && typeof img.dataUrl === "string" && /^data:image\/(jpeg|png|gif|webp);base64,/i.test(img.dataUrl)) : [];
       if (normalizedImages.length !== (Array.isArray(images) ? images.length : 0)) throw new Error(t(lang, "bg_error_imagesEncoding"));
 
@@ -754,6 +758,7 @@ chrome.runtime.onConnect.addListener((port) => {
       }
 
       ctx.lineTranslator?.finish();
+      ctx.flushThinking?.();
       ctx.flushChunks?.();
       // Never let a cut-off reply pass silently.
       if (ctx.lineTranslator) {
@@ -786,6 +791,7 @@ chrome.runtime.onConnect.addListener((port) => {
       // arrives): the ERROR path keeps the partial reply as a finished
       // assistant turn, and without this flush its last characters were
       // permanently lost.
+      try { thinkingRestorer?.flush(); } catch {}
       try { chunkRestorer?.flush(); } catch {}
       safePost({ type: "ERROR", error: errorText, requestId });
     } finally {

@@ -4,7 +4,7 @@
 // integration-tested in the browser; here the shared machinery is driven
 // with synthetic Response bodies. Run:  node scripts/test-openai-compatible.mjs
 import assert from "node:assert/strict";
-import { readSse, openAICompatibleStreamError, providerHttpError } from "../providers/openai-compatible.js";
+import { readSse, openAICompatibleStreamError, providerHttpError, extractOpenAIDelta } from "../providers/openai-compatible.js";
 
 const encoder = new TextEncoder();
 function sse(chunks) {
@@ -27,9 +27,12 @@ function makeCtx() {
     translateMode: false,
     lineTranslator: null,
     sendChunk: null,
+    sendThinking: null,
     chunks: [],
+    thinking: [],
   };
   out.sendChunk = (d) => out.chunks.push(d);
+  out.sendThinking = (d) => out.thinking.push(d);
   return out;
 }
 const delta = (json) => json.choices?.[0]?.delta?.content ?? "";
@@ -150,6 +153,39 @@ assert.equal(openAICompatibleStreamError({ error: { code: 500 } }), '{"code":500
 {
   const resp = { status: 500, text: async () => '{"broken":"json' };
   assert.match(await providerHttpError(resp), /^HTTP 500 .*broken/, "invalid JSON falls back to the raw excerpt");
+}
+
+// ---------- reasoning_content / reasoning stream support ----------
+{
+  assert.deepEqual(
+    extractOpenAIDelta({ choices: [{ delta: { reasoning_content: "thinking...", content: "answer" } }] }),
+    { content: "answer", reasoning: "thinking..." },
+    "extracts content and reasoning_content"
+  );
+  assert.deepEqual(
+    extractOpenAIDelta({ choices: [{ delta: { reasoning: "reasoning..." } }] }),
+    { content: "", reasoning: "reasoning..." },
+    "extracts fallback reasoning field"
+  );
+
+  const ctx = makeCtx();
+  const { resp } = sse([
+    'data: {"choices":[{"delta":{"reasoning_content":"Let me think."}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"Done!"}}]}\n\n',
+    'data: [DONE]\n\n',
+  ]);
+  await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
+  assert.equal(ctx.thinking.join(""), "Let me think.", "thinking chunks routed to ctx.sendThinking");
+  assert.equal(ctx.chunks.join(""), "Done!", "content chunks routed to ctx.sendChunk");
+
+  // Reasoning only (no content) does NOT throw empty response error
+  const ctxReasoningOnly = makeCtx();
+  const { resp: respReasoning } = sse([
+    'data: {"choices":[{"delta":{"reasoning_content":"only reasoning"}}]}\n\n',
+    'data: [DONE]\n\n',
+  ]);
+  await readSse(respReasoning, extractOpenAIDelta, ctxReasoningOnly, openAICompatibleStreamError);
+  assert.ok(ctxReasoningOnly.thinking.length > 0, "reasoning-only response does not throw empty error");
 }
 
 console.log("OK: openai-compatible — SSE reassembly, in-stream error release, empty-stream guard, stream-cut detection, error mapping.");

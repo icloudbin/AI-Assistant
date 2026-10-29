@@ -38,6 +38,9 @@ assert.equal(inlineMarkdownToHtml("*i*"), "<em>i</em>");
 assert.equal(inlineMarkdownToHtml("~~gone~~"), "<del>gone</del>");
 assert.equal(inlineMarkdownToHtml("`<b>`"), "<code>&lt;b&gt;</code>", "code span content stays escaped");
 assert.equal(inlineMarkdownToHtml("snake_case_name"), "snake_case_name", "intraword underscores are not emphasis");
+assert.equal(inlineMarkdownToHtml("3*4*5"), "3*4*5", "arithmetic asterisks are not emphasis");
+assert.equal(inlineMarkdownToHtml("foo*bar*baz"), "foo*bar*baz", "intraword asterisks are not emphasis");
+assert.equal(inlineMarkdownToHtml("hello *italic* world"), "hello <em>italic</em> world", "space-delimited asterisk is emphasis");
 
 // ---------- block: fences escape their content and keep the language class ----------
 const fenced = markdownToHtml("```js\nconst a = \"<b>\";\n```");
@@ -62,6 +65,10 @@ assert.ok(markdownToHtml("> quoted").includes("<blockquote>quoted</blockquote>")
 assert.ok(markdownToHtml("a\n\n---\n\nb").includes("<hr>"));
 const table = markdownToHtml("| A | B |\n| --- | --- |\n| 1 | 2 |");
 assert.ok(table.includes("<table>") && table.includes("<th>A</th>") && table.includes("<td>2</td>"), "GFM table");
+const tableWithCodePipe = markdownToHtml("| Code | Description |\n| --- | --- |\n| `a | b` | pipe in code |");
+assert.ok(tableWithCodePipe.includes("<code>a | b</code>") && tableWithCodePipe.includes("<td>pipe in code</td>"), "table cells respect pipes inside code spans");
+const tableWithEscapedPipe = markdownToHtml("| Symbol | Description |\n| --- | --- |\n| \\| | literal pipe |");
+assert.ok(tableWithEscapedPipe.includes("<td>|</td>") && tableWithEscapedPipe.includes("<td>literal pipe</td>"), "table cells respect escaped pipes");
 
 // ---------- block: a paragraph's inline content is still escaped ----------
 assert.ok(markdownToHtml("hello <script>alert(1)</script>").includes("&lt;script&gt;"), "raw HTML in prose is escaped");

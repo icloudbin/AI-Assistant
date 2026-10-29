@@ -64,7 +64,7 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
   });
   if (!resp.ok) throw new Error(await providerHttpError(resp));
 
-  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx, openAICompatibleStreamError);
+  await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
 }
 
 // Groq OpenAI-compatible Chat Completions API.
@@ -92,7 +92,7 @@ async function streamGroq(model, question, pageContext, history, images, ctx) {
   });
   if (!resp.ok) throw new Error(await providerHttpError(resp));
 
-  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx, openAICompatibleStreamError);
+  await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
 }
 
 // OpenRouter (https://openrouter.ai) is a third-party router, not a model's
@@ -124,7 +124,16 @@ async function streamOpenRouter(model, question, pageContext, history, images, c
   });
   if (!resp.ok) throw new Error(await providerHttpError(resp));
 
-  await readSse(resp, (json) => json.choices?.[0]?.delta?.content ?? "", ctx, openAICompatibleStreamError);
+  await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
+}
+
+// Extracts content and optional reasoning/thinking deltas from an OpenAI-compatible chunk.
+export function extractOpenAIDelta(json) {
+  const choice = json?.choices?.[0];
+  const delta = choice?.delta;
+  const content = delta?.content ?? "";
+  const reasoning = delta?.reasoning_content ?? delta?.reasoning ?? "";
+  return { content, reasoning };
 }
 
 // Shared SSE reader: DeepSeek, Groq and OpenRouter all send
@@ -178,10 +187,16 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
     // missing.
     if (json?.choices?.[0]?.finish_reason) sawTerminal = true;
     const delta = extractDelta(json);
-    if (delta) {
+    const content = typeof delta === "string" ? delta : (delta?.content ?? "");
+    const reasoning = typeof delta === "object" ? (delta?.reasoning ?? "") : "";
+    if (reasoning) {
       emitted = true;
-      if (ctx.lineTranslator) ctx.lineTranslator.push(delta);
-      else ctx.sendChunk(delta);
+      ctx.sendThinking?.(reasoning);
+    }
+    if (content) {
+      emitted = true;
+      if (ctx.lineTranslator) ctx.lineTranslator.push(content);
+      else ctx.sendChunk(content);
     }
   };
 

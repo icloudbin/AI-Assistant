@@ -1046,9 +1046,13 @@ async function importSettings() {
     const restored = {};
     for (const key of SETTINGS_BACKUP_KEYS) {
       const value = backup.settings[key];
-      if (typeof value === "string" && value) restored[key] = value;
-      else if (NUMERIC_SETTINGS_KEYS.has(key) && typeof value === "number" && Number.isFinite(value)) restored[key] = value;
-      else if (BOOLEAN_SETTINGS_KEYS.has(key) && typeof value === "boolean") restored[key] = value;
+      if (NUMERIC_SETTINGS_KEYS.has(key)) {
+        if (typeof value === "number" && Number.isFinite(value)) restored[key] = value;
+      } else if (BOOLEAN_SETTINGS_KEYS.has(key)) {
+        if (typeof value === "boolean") restored[key] = value;
+      } else if (typeof value === "string") {
+        restored[key] = value;
+      }
     }
 
     // API keys exported with a passphrase live in an encrypted envelope - but

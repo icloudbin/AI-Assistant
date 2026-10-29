@@ -408,7 +408,24 @@ function readVisibleText(root, { filterNoise = true } = {}) {
     }
   };
 
+  const isDefinitelyHidden = (el) => {
+    if (el.hasAttribute?.('hidden') || el.style?.display === 'none') return true;
+    if (typeof el.checkVisibility === 'function') {
+      try {
+        if (!el.checkVisibility({ checkOpacity: false, checkVisibilityCSS: false })) return true;
+      } catch {}
+    } else if (el !== document.body && el !== document.documentElement && el.offsetParent === null && el.offsetWidth === 0 && el.offsetHeight === 0 && el.style?.position !== 'fixed') {
+      try {
+        if (getComputedStyle(el).position !== 'fixed') return true;
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  };
+
   const walk = (el, depth) => {
+    if (isDefinitelyHidden(el)) return;
     const style = getComputedStyle(el);
     const display = style.display;
     if (display === 'none') return;
@@ -435,6 +452,7 @@ function readVisibleText(root, { filterNoise = true } = {}) {
       } else if (c.nodeType === 1) {
         const tag = c.localName;
         if (VISIBLE_TEXT_SKIP_TAGS.has(tag) || (filterNoise && readerModeIsNoise(c))) continue;
+        if (isDefinitelyHidden(c)) continue;
         // The body of a collapsed <details> is not rendered; only <summary> is.
         if (closedDetails && tag !== 'summary') continue;
         if (tag === 'br') {

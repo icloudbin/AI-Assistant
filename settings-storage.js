@@ -160,11 +160,14 @@ export async function restoreSettingsFromBackup() {
     // key (Gemini is no longer a supported provider) and the v1.10.112-113
     // translation term list (feature removed in v1.10.114 - brand/technical
     // terms are kept in the original by the translation instructions alone).
-    await chrome.storage.local.remove(["geminiApiKey", "translationTerms"]);
+    const LEGACY_KEYS = ["geminiApiKey", "translationTerms"];
     const [local, backup] = await Promise.all([
-      chrome.storage.local.get(PERSISTED_SETTING_KEYS),
+      chrome.storage.local.get([...PERSISTED_SETTING_KEYS, ...LEGACY_KEYS]),
       getSettingsBackup(),
     ]);
+    if (LEGACY_KEYS.some((key) => local[key] !== undefined)) {
+      await chrome.storage.local.remove(LEGACY_KEYS);
+    }
     // One-time cleanup of keys mirrored by earlier builds (the restore loop
     // below only ever touches PERSISTED_SETTING_KEYS, so they are never
     // resurrected even if this scrub fails).

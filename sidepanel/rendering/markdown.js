@@ -128,13 +128,12 @@ function inlineMarkdownToHtml(text) {
   });
 
   s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  // Underscore emphasis follows CommonMark's flanking rule: an intraword
-  // underscore pair is not emphasis, so snake_case identifiers such as
-  // foo_bar_baz survive rendering instead of becoming foo<em>bar</em>baz.
-  // Both underscores must sit at a word boundary; `*` has no such rule and
-  // is deliberately left unchanged below.
+  // Underscore and asterisk emphasis follow word/arithmetic boundary guards:
+  // intraword delimiters are not emphasis, so snake_case identifiers such as
+  // foo_bar_baz and arithmetic expressions like 3*4*5 survive rendering
+  // instead of becoming foo<em>bar</em>baz or 3<em>4</em>5.
   s = s.replace(/(?<![\p{L}\p{N}])__([^_\n]+)__(?![\p{L}\p{N}])/gu, "<strong>$1</strong>");
-  s = s.replace(/\*(?!\s)([^*\n]*[^*\s])\*/g, "<em>$1</em>");
+  s = s.replace(/(?<![\p{L}\p{N}*])\*(?!\s)([^*\n]*[^*\s])\*(?![\p{L}\p{N}*])/gu, "<em>$1</em>");
   s = s.replace(/(?<![\p{L}\p{N}_])_([^_\n]+)_(?![\p{L}\p{N}_])/gu, "<em>$1</em>");
   s = s.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
 
@@ -150,13 +149,64 @@ function inlineMarkdownToHtml(text) {
   return s;
 }
 
-function isTableSeparator(line) {
-  const cells = line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|");
-  return cells.length >= 2 && cells.every((cell) => /^\s*:?-+:?\s*$/.test(cell));
+function splitTableRow(line) {
+  let str = line.trim();
+  if (str.startsWith("|")) {
+    str = str.slice(1);
+  }
+  if (str.endsWith("|")) {
+    let backslashes = 0;
+    for (let k = str.length - 2; k >= 0 && str[k] === "\\"; k--) {
+      backslashes++;
+    }
+    if (backslashes % 2 === 0) {
+      str = str.slice(0, -1);
+    }
+  }
+
+  const cells = [];
+  let current = "";
+  let inCode = false;
+
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+
+    if (ch === "\\") {
+      if (!inCode && i + 1 < str.length && str[i + 1] === "|") {
+        current += "|";
+        i++;
+        continue;
+      }
+      current += ch;
+      if (!inCode && i + 1 < str.length && str[i + 1] === "`") {
+        current += str[i + 1];
+        i++;
+        continue;
+      }
+      continue;
+    }
+
+    if (ch === "`") {
+      inCode = !inCode;
+      current += ch;
+      continue;
+    }
+
+    if (ch === "|" && !inCode) {
+      cells.push(current.trim());
+      current = "";
+      continue;
+    }
+
+    current += ch;
+  }
+  cells.push(current.trim());
+  return cells;
 }
 
-function splitTableRow(line) {
-  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+function isTableSeparator(line) {
+  const cells = splitTableRow(line);
+  return cells.length >= 2 && cells.every((cell) => /^\s*:?-+:?\s*$/.test(cell));
 }
 
 function markdownToHtml(markdown) {

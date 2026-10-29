@@ -256,6 +256,7 @@ let currentAssistantBubble = null;
 // plain text (see setBubbleContent) and stored with plain: true.
 let pendingPlainReply = false;
 let currentAssistantText = "";
+let currentThinkingText = "";
 let isStreaming = false;
 let pendingModelLabel = "";
 let pendingModelId = "";
@@ -315,16 +316,24 @@ function connectPort() {
     // Show the whole received tail before the bubble is finalized: a
     // coalesced render may still be pending (see scheduleStreamingRender).
     flushStreamingRender();
+    const textToKeep = (currentAssistantText || currentThinkingText).trim();
     if (currentAssistantBubble) {
-      if (currentAssistantText.trim()) currentAssistantBubble.classList.remove("pending");
+      if (textToKeep) currentAssistantBubble.classList.remove("pending");
       else currentAssistantBubble.remove();
       currentAssistantBubble = null;
     }
-    if (currentAssistantText.trim()) {
+    if (textToKeep) {
+      let displayContent = currentAssistantText;
+      if (currentThinkingText.trim()) {
+        const thinkingLines = currentThinkingText.trim().split("\n").map((l) => `> ${l}`).join("\n");
+        displayContent = !currentAssistantText.trim()
+          ? `> 💭 *Thinking...*\n>\n${thinkingLines}`
+          : `> 💭 *Thought process:*\n>\n${thinkingLines}\n\n${currentAssistantText}`;
+      }
       history.push({
         role: "assistant",
-        content: currentAssistantText,
-        displayContent: currentAssistantText,
+        content: textToKeep,
+        displayContent: displayContent || textToKeep,
         modelLabel: pendingModelLabel,
         modelId: pendingModelId,
         plain: pendingPlainReply,
@@ -332,6 +341,7 @@ function connectPort() {
       saveConversations().catch((err) => console.error("[AI Assistant] Unable to save conversation:", err));
     }
     currentAssistantText = "";
+    currentThinkingText = "";
     autoScrollEnabled = false;
     setStreaming(false);
     addBubble("error", t(currentLang, "error_connectionLost"));
@@ -558,10 +568,13 @@ async function loadRemoteImage(box) {
   box.dataset.loading = "1";
   try {
     // The worker refuses localhost/private-network hosts unless they are the
-    // host of the page the user is on; tell it which page. Plain http: is
-    // retried over https: only (never fetched in the clear).
+    // host of the page the user is on; tell it which page.
     const activeTab = await getCurrentActiveTab().catch(() => null);
-    const result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src.replace(/^http:/i, "https:"), pageUrl: String(activeTab?.url || "") });
+    const pageUrl = String(activeTab?.url || "");
+    let result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src, pageUrl });
+    if ((!result?.ok || !result.dataUrl) && /^http:/i.test(src)) {
+      result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src.replace(/^http:/i, "https:"), pageUrl }).catch(() => null);
+    }
     if (result?.ok && result.dataUrl) {
       rememberRemoteImage(src, result.dataUrl);
       const img = document.createElement("img");
@@ -686,6 +699,18 @@ function refreshExistingCopyButtons() {
   });
 }
 
+function isUserSelectingInBubble(bubbleEl) {
+  if (!bubbleEl) return false;
+  const sel = window.getSelection?.();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
+  try {
+    const range = sel.getRangeAt(0);
+    return bubbleEl.contains(range.commonAncestorContainer);
+  } catch {
+    return false;
+  }
+}
+
 function setBubbleContent(bubbleEl, text, role, plain = false) {
   const textEl = getBubbleTextEl(bubbleEl);
   if (!textEl) return;
@@ -695,10 +720,13 @@ function setBubbleContent(bubbleEl, text, role, plain = false) {
     // consecutive lines, drop indentation and turn *, _, #, > and | in the
     // source into formatting - i.e. change the original layout.
     textEl.classList.add("plain-text");
-    textEl.textContent = text;
+    if (textEl.textContent !== text) textEl.textContent = text;
   } else if (role === "assistant") {
-    textEl.innerHTML = sanitizeRenderedHtml(markdownToHtml(text));
-    enhanceCodeBlocks(textEl);
+    const nextHtml = sanitizeRenderedHtml(markdownToHtml(text));
+    if (textEl.innerHTML !== nextHtml) {
+      textEl.innerHTML = nextHtml;
+      enhanceCodeBlocks(textEl);
+    }
   } else {
     textEl.textContent = text;
   }
@@ -881,6 +909,7 @@ function stopActiveRequest() {
     currentAssistantBubble = null;
   }
   currentAssistantText = "";
+  currentThinkingText = "";
   autoScrollEnabled = false;
   setStreaming(false);
 }
@@ -1196,7 +1225,7 @@ let streamRenderLastAt = 0;
 // (STOP, or a superseded request): the queued flags are cleared first, so a
 // late rAF/timer callback can never resurrect a render or touch a newer
 // request's bubble with stale content.
-function renderStreamingBubble() {
+function renderStreamingBubble(force = false) {
   if (streamRenderTimer) {
     clearTimeout(streamRenderTimer);
     streamRenderTimer = null;
@@ -1204,7 +1233,20 @@ function renderStreamingBubble() {
   streamRenderQueued = false;
   streamRenderLastAt = performance.now();
   if (!currentAssistantBubble) return;
-  setBubbleContent(currentAssistantBubble, currentAssistantText, "assistant", pendingPlainReply);
+  if (!force && isUserSelectingInBubble(currentAssistantBubble)) {
+    scheduleStreamingRender();
+    return;
+  }
+  let textToRender = currentAssistantText;
+  if (currentThinkingText.trim()) {
+    const thinkingLines = currentThinkingText.trim().split("\n").map((l) => `> ${l}`).join("\n");
+    if (!currentAssistantText.trim()) {
+      textToRender = `> 💭 *Thinking...*\n>\n${thinkingLines}`;
+    } else {
+      textToRender = `> 💭 *Thought process:*\n>\n${thinkingLines}\n\n${currentAssistantText}`;
+    }
+  }
+  setBubbleContent(currentAssistantBubble, textToRender, "assistant", pendingPlainReply);
   scrollToBottom();
 }
 
@@ -1233,7 +1275,7 @@ function scheduleStreamingRender() {
 // connectPort(): synchronous, so the coalescer can never swallow the end of
 // a reply.
 function flushStreamingRender() {
-  renderStreamingBubble();
+  renderStreamingBubble(true);
 }
 
 function handlePortMessage(msg) {
@@ -1246,8 +1288,14 @@ function handlePortMessage(msg) {
   switch (msg.type) {
     case "START": {
       currentAssistantText = "";
+      currentThinkingText = "";
       currentAssistantBubble = addBubble("assistant", "", pendingModelLabel, pendingPlainReply);
       currentAssistantBubble.classList.add("pending");
+      break;
+    }
+    case "THINKING": {
+      currentThinkingText += msg.delta;
+      scheduleStreamingRender();
       break;
     }
     case "CHUNK": {
@@ -1257,13 +1305,15 @@ function handlePortMessage(msg) {
     }
     case "DONE": {
       flushStreamingRender();
-      if (!currentAssistantText.trim()) {
+      const textToSave = (currentAssistantText || currentThinkingText).trim();
+      if (!textToSave) {
         // Defensive: background.js reports an empty reply as an ERROR, but never
         // store an empty assistant turn - providers reject empty assistant
         // messages, which would break every later request in this conversation.
         currentAssistantBubble?.remove();
         currentAssistantBubble = null;
         currentAssistantText = "";
+        currentThinkingText = "";
         autoScrollEnabled = false;
         setStreaming(false);
         break;
@@ -1271,8 +1321,26 @@ function handlePortMessage(msg) {
       if (currentAssistantBubble) {
         currentAssistantBubble.classList.remove("pending");
       }
-      history.push({ role: "assistant", content: currentAssistantText, displayContent: currentAssistantText, modelLabel: pendingModelLabel, modelId: pendingModelId, plain: pendingPlainReply });
+      let displayContent = currentAssistantText;
+      if (currentThinkingText.trim()) {
+        const thinkingLines = currentThinkingText.trim().split("\n").map((l) => `> ${l}`).join("\n");
+        if (!currentAssistantText.trim()) {
+          displayContent = `> 💭 *Thinking...*\n>\n${thinkingLines}`;
+        } else {
+          displayContent = `> 💭 *Thought process:*\n>\n${thinkingLines}\n\n${currentAssistantText}`;
+        }
+      }
+      history.push({
+        role: "assistant",
+        content: currentAssistantText || currentThinkingText,
+        displayContent: displayContent || textToSave,
+        modelLabel: pendingModelLabel,
+        modelId: pendingModelId,
+        plain: pendingPlainReply,
+      });
       currentAssistantBubble = null;
+      currentAssistantText = "";
+      currentThinkingText = "";
       autoScrollEnabled = false;
       setStreaming(false);
       saveConversations().catch((err) => console.error("[AI Assistant] Unable to save conversation:", err));
@@ -1295,16 +1363,24 @@ function handlePortMessage(msg) {
       // text the user was watching arrive. (The user turn is already in
       // history; background.js folds an unanswered user turn into the next
       // request, so this shape is expected there.)
+      const textToKeep = (currentAssistantText || currentThinkingText).trim();
       if (currentAssistantBubble) {
-        if (currentAssistantText.trim()) currentAssistantBubble.classList.remove("pending");
+        if (textToKeep) currentAssistantBubble.classList.remove("pending");
         else currentAssistantBubble.remove();
         currentAssistantBubble = null;
       }
-      if (currentAssistantText.trim()) {
+      if (textToKeep) {
+        let displayContent = currentAssistantText;
+        if (currentThinkingText.trim()) {
+          const thinkingLines = currentThinkingText.trim().split("\n").map((l) => `> ${l}`).join("\n");
+          displayContent = !currentAssistantText.trim()
+            ? `> 💭 *Thinking...*\n>\n${thinkingLines}`
+            : `> 💭 *Thought process:*\n>\n${thinkingLines}\n\n${currentAssistantText}`;
+        }
         history.push({
           role: "assistant",
-          content: currentAssistantText,
-          displayContent: currentAssistantText,
+          content: textToKeep,
+          displayContent: displayContent || textToKeep,
           modelLabel: pendingModelLabel,
           modelId: pendingModelId,
           plain: pendingPlainReply,
@@ -1312,6 +1388,7 @@ function handlePortMessage(msg) {
         saveConversations().catch((err) => console.error("[AI Assistant] Unable to save conversation:", err));
       }
       currentAssistantText = "";
+      currentThinkingText = "";
       autoScrollEnabled = false;
       addBubble("error", t(currentLang, "error_withMessage_template", { message: msg.error }));
       setStreaming(false);
@@ -1498,8 +1575,8 @@ function startNewTopic() {
   refreshContextBarAfterConversationSwitch();
 }
 
-async function loadConversations({ activate = true, syncModel = true } = {}) {
-  const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY]);
+async function loadConversations({ activate = false, syncModel = false } = {}) {
+  const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY]);
   conversations = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
   // Keep at most MAX_SAVED_CONVERSATIONS saved conversations. Conversations are
   // ordered newest-first whenever they are saved, so entries beyond the limit
@@ -1509,20 +1586,6 @@ async function loadConversations({ activate = true, syncModel = true } = {}) {
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
     .slice(0, MAX_SAVED_CONVERSATIONS);
 
-  if (activate) {
-    currentConversationId = stored[CURRENT_CONVERSATION_KEY] || null;
-    if (currentConversationId) {
-      const convo = conversations.find((c) => c.id === currentConversationId);
-      if (convo?.messages?.length) {
-        history = convo.messages.map((m) => ({ ...m }));
-        renderConversation(history);
-        if (syncModel) applyModelSelection(findConversationModelId(history));
-        renderHistorySelect();
-        historySelect.value = currentConversationId;
-        return;
-      }
-    }
-  }
   renderHistorySelect();
   scheduleHistoryRender();
 }
@@ -2374,6 +2437,22 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   // the request is in flight and the background worker owns the unlock (DONE /
   // ERROR / STOP), so an error after that must not unlock a live request.
   let posted = false;
+  let userBubble = null;
+  let userTurnPushed = false;
+  const rollbackSubmit = () => {
+    if (userTurnPushed) {
+      history.pop();
+      userTurnPushed = false;
+    }
+    if (userBubble) {
+      userBubble.remove();
+      userBubble = null;
+    }
+    if (!history.length) {
+      emptyState.hidden = false;
+    }
+    saveConversations().catch((err) => console.error("[AI Assistant] Unable to save conversation:", err));
+  };
   try {
 
     // Only clear the composer when the submission came from it. Quick actions
@@ -2388,9 +2467,10 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     const displayContent = attachmentText
       ? `${displayQuestion}\n\n📎 ${readyAttachments.map((a) => a.name).join(", ")}`
       : displayQuestion;
-    addBubble("user", displayContent);
+    userBubble = addBubble("user", displayContent);
     const baseQuestionForApi = `${question || "Please analyze the attached files."}${attachmentText}`;
     history.push({ role: "user", content: baseQuestionForApi, displayContent, modelLabel: "" });
+    userTurnPushed = true;
     if (!currentConversationId) {
       currentConversationId = createConversation().id;
     }
@@ -2566,6 +2646,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       if (!isCancelled()) {
         currentRequestId = null;
         autoScrollEnabled = false;
+        rollbackSubmit();
         addBubble("error", t(currentLang, "error_withMessage_template", { message: err?.message || String(err) }));
         setStreaming(false);
         // Give the user their text back, same as the outer catch below: the
@@ -2590,6 +2671,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     if (!posted && !isCancelled()) {
       currentRequestId = null;
       autoScrollEnabled = false;
+      rollbackSubmit();
       addBubble("error", t(currentLang, "error_withMessage_template", { message: err?.message || String(err) }));
       setStreaming(false);
       // Give the user their text back: it was cleared from the composer on submit.
