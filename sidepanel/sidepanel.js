@@ -2,7 +2,11 @@
 import { MODELS, MAX_PAGE_CONTEXT_CHARS, findModelById, findKnownModel, resolveModelId, findModelIdByLabel, modelSupportsVision } from "../models.js";
 import { HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY, PENDING_CONTEXT_ACTION_KEY, PREFERRED_TRANSLATION_LANGUAGE_KEY, MAX_SAVED_CONVERSATIONS } from "../storage-keys.js";
 import { sensitiveHostOf, hostOf } from "../sensitive-sites.js";
-import { getStoredLanguage, applyStaticTranslations, t, LANGUAGE_STORAGE_KEY } from "../i18n.js";
+import { getStoredLanguage, applyStaticTranslations, t, LANGUAGE_STORAGE_KEY, normalizeLanguage } from "../i18n.js";
+// The panel owns two settings whose live writes must reach the IndexedDB
+// recovery mirror: "Read current page" (a storage reset must never silently
+// flip this privacy choice back to its ON default) and the selected model.
+import { saveSettingsBackup } from "../settings-storage.js";
 // Pure save/merge helpers for the saved-conversation list (DOM-free, tested
 // in scripts/test-conversation-store.mjs).
 import { mergeConversationLists, sortedByNewest } from "../conversation-store.js";
@@ -81,7 +85,7 @@ async function loadLanguage() {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName === "local" && changes[LANGUAGE_STORAGE_KEY]) {
-    applyLanguage(changes[LANGUAGE_STORAGE_KEY].newValue || "en");
+    applyLanguage(normalizeLanguage(changes[LANGUAGE_STORAGE_KEY].newValue));
   }
 });
 
@@ -779,6 +783,7 @@ async function restoreSelectedModel() {
 
 modelSelect.addEventListener("change", () => {
   chrome.storage.local.set({ selectedModelId: modelSelect.value }).catch(() => {});
+  saveSettingsBackup({ selectedModelId: modelSelect.value }).catch(() => {});
 });
 
 function getSelectedModel() {
@@ -1365,6 +1370,12 @@ function saveConversations() {
 async function saveConversationsNow() {
   await saveQueue;
   const stored = await chrome.storage.local.get(HISTORY_STORAGE_KEY);
+  // Whether history existed when we read it: if "Delete All History" (any
+  // window) removes the key while this save is gathering its data, writing
+  // `merged` back would resurrect the deleted conversations - the delete
+  // branch of the storage.onChanged listener cannot retract a write that is
+  // already past its read, so the write re-checks below.
+  const historyExistedAtRead = stored[HISTORY_STORAGE_KEY] !== undefined;
   // Snapshot the live history only after the read, so the freshest copy of
   // the current conversation is what gets merged and written.
   syncCurrentConversationFromHistory();
@@ -1378,6 +1389,16 @@ async function saveConversationsNow() {
   let quotaDropped = 0;
   for (let attempt = 0; ; attempt++) {
     try {
+      if (historyExistedAtRead) {
+        const recheck = await chrome.storage.local.get(HISTORY_STORAGE_KEY);
+        if (recheck[HISTORY_STORAGE_KEY] === undefined) {
+          // History was deleted while this save was in flight. Discard it:
+          // the onChanged delete branch has already reset this panel's
+          // in-memory state, and both the list and the current-conversation
+          // pointer must stay deleted.
+          return;
+        }
+      }
       await chrome.storage.local.set({
         [HISTORY_STORAGE_KEY]: merged,
         [CURRENT_CONVERSATION_KEY]: currentConversationId || "",
@@ -1757,7 +1778,19 @@ async function extractZipText(file) {
     const commentLen = readU16(view, offset + 32);
     const localOffset = readU32(view, offset + 42);
     const nameBytes = bytes.slice(offset + 46, offset + 46 + nameLen);
-    const name = decodeUtf8(nameBytes);
+    let name = decodeUtf8(nameBytes);
+    // Archives created by tools that do not set the UTF-8 flag (bit 11) store
+    // entry names in a legacy codepage - for this extension's audience almost
+    // always GBK/GB18030 (Chinese-named files from older Windows zip tools).
+    // Entry names end up in the ZIP report, the chip tooltip and the note for
+    // the model, so decode them with the same GB18030 fallback used for file
+    // CONTENTS in decodeTextBytes().
+    if (!(flags & 0x800) && name.includes("\uFFFD")) {
+      try {
+        const gbName = new TextDecoder("gb18030", { fatal: false }).decode(nameBytes);
+        if (!gbName.includes("\uFFFD")) name = gbName;
+      } catch { /* decoder unavailable: keep the UTF-8 reading */ }
+    }
     offset += 46 + nameLen + extraLen + commentLen;
     entriesRead++;
 
@@ -2284,6 +2317,13 @@ if (!SpeechRecognitionCtor) {
     if (isListening) {
       userStoppedMic = true;
       stopMic();
+      // Drop the reference NOW, synchronously: startMic() below resets
+      // userStoppedMic before its permission await resolves, and the old
+      // recognizer's onend fires inside that window. With recognition still
+      // pointing at the old object, its onend passed the rec !== recognition
+      // guard, saw userStoppedMic === false, and auto-restarted the OLD
+      // language over the new one (duplicated text in the question box).
+      recognition = null;
     }
     micLangIndex = (micLangIndex + 1) % MIC_LANG_OPTIONS.length;
     updateMicLangUI();
@@ -2297,6 +2337,13 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   const question = forcedQuestion !== null ? String(forcedQuestion).trim() : questionInput.value.trim();
   const attachmentText = attachmentContextText();
   if ((!question && !attachmentText) || isStreaming) return;
+  // A still-reading attachment (a multi-MB ZIP can take a while) is NOT part
+  // of this request - only ready ones are - and the submit used to send
+  // without it AND delete its chip, hiding that the file never went out.
+  if (attachments.some((a) => a.status === "reading")) {
+    addBubble("notice", t(currentLang, "attachment_stillReading"));
+    return;
+  }
   // Not before init() has reset the topic and opened the port.
   if (!initCoreDone) return;
 
@@ -2521,6 +2568,9 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
         autoScrollEnabled = false;
         addBubble("error", t(currentLang, "error_withMessage_template", { message: err?.message || String(err) }));
         setStreaming(false);
+        // Give the user their text back, same as the outer catch below: the
+        // composer was cleared on submit and nothing was sent.
+        if (forcedQuestion === null && !questionInput.value) questionInput.value = question;
       }
       return;
     }
@@ -2531,8 +2581,9 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     // conversation - so the chips are removed now. Previously they stayed,
     // silently re-uploading every attached image with each follow-up message
     // (and re-inlining the attachment text block) until the user removed every
-    // chip by hand.
-    attachments = [];
+    // chip by hand. Chips that are STILL READING are kept: their files were
+    // not part of this request, and removing the chip would hide that.
+    attachments = attachments.filter((a) => a.status === "reading");
     renderAttachments();
   } catch (err) {
     console.error("[AI Assistant] Request failed before it could be sent:", err);
@@ -2765,6 +2816,10 @@ pageContextAllowBtn.addEventListener("click", async () => {
 
 includeContextToggle.addEventListener("change", async () => {
   try { await chrome.storage.local.set({ [INCLUDE_CONTEXT_STORAGE_KEY]: includeContextToggle.checked }); } catch {}
+  // Mirrored to the IndexedDB recovery layer: after an unexpected storage
+  // reset the toggle must come back as the user left it, never silently
+  // re-enable page reading via the ON default.
+  saveSettingsBackup({ [INCLUDE_CONTEXT_STORAGE_KEY]: includeContextToggle.checked }).catch(() => {});
   if (includeContextToggle.checked) {
     await refreshActivePageContext();
   } else {

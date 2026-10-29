@@ -161,4 +161,66 @@ const browserPreferred = chooseTranslationSelection("One\n\nTwo", {
 });
 assert.deepEqual(browserPreferred, { text: "One\n\nTwo", format: "text", truncated: false });
 
+// ---- round-6 regressions: markers, fences, protected URLs, tags, CJK joins ----
+{
+  const p = prepareLineTranslation("一、第一项\n1、第二项\n– 第三项\n第四项");
+  assert.ok(p, "CJK enumerator list prepares");
+  assert.equal(p.lines[0].prefix, "一、", "CJK numeral marker stays in code");
+  assert.equal(p.lines[1].prefix, "1、", "CJK digit marker stays in code");
+  assert.equal(p.lines[2].prefix, "– ", "en-dash bullet stays in code");
+}
+{
+  const p = prepareLineTranslation("3.14 is pi\n2. April starts here");
+  assert.ok(p, "decimal source prepares");
+  assert.equal(p.lines[0].prefix, "", "3.14 is not a list marker");
+  assert.equal(p.lines[1].prefix, "2. ", "'2. April' keeps its marker in code");
+}
+{
+  // An inline ``` span on one line must not open a fence.
+  const p = prepareLineTranslation("```code``` and more text here\nnext line here");
+  assert.ok(p, "an inline-span line does not kill the translation");
+  assert.ok(p.lines.every((l) => l.translatable), "no line around an inline span is treated as code");
+}
+{
+  // A real fence still opens.
+  const p = prepareLineTranslation("```py\nx = 1\n```\ntext after the fence");
+  assert.ok(p.lines[0].translatable === false && p.lines[1].translatable === false, "real fence lines are not translatable");
+}
+{
+  // A Wikipedia-style parenthesized link target survives as ONE token, with
+  // no stray ")" left in the translatable text.
+  const p = prepareLineTranslation("See [Foo](https://en.wikipedia.org/wiki/Foo_(bar)) today.");
+  assert.ok(p.lines[0].safe.includes("{{U0}}"), "link target is one protected token");
+  assert.ok(!p.lines[0].safe.includes("))"), "no stray closing paren in the translatable text");
+  assert.equal(p.lines[0].tokens[0], "https://en.wikipedia.org/wiki/Foo_(bar)", "full target captured");
+}
+{
+  // A model that markdown-escapes its tags ("\\[1\\] ...") is still understood.
+  const p = prepareLineTranslation("Hello world");
+  let escapedTagTranslated = 0;
+  const esc = new LineTranslator(p, () => {});
+  esc.push("\\[1\\] Bonjour le monde");
+  esc.finish();
+  escapedTagTranslated = esc.translated;
+  assert.equal(escapedTagTranslated, 1, "escaped [n] tag is recognized");
+}
+{
+  // CJK wrapped continuations rejoin WITHOUT the inserted space.
+  const p = prepareLineTranslation("这是一句很长的话");
+  let cjkOut = "";
+  const cjk = new LineTranslator(p, (d) => { cjkOut += d; });
+  cjk.push("[1] 这是一句很长的\n话");
+  cjk.finish();
+  assert.equal(cjkOut, "这是一句很长的话", "CJK continuation rejoins without a space");
+}
+{
+  // Latin wrapped continuations keep the space.
+  const p = prepareLineTranslation("A wrapped latin line");
+  let latinOut = "";
+  const latin = new LineTranslator(p, (d) => { latinOut += d; });
+  latin.push("[1] A wrapped latin\ncontinuation here");
+  latin.finish();
+  assert.equal(latinOut, "A wrapped latin continuation here", "latin continuation keeps its space");
+}
+
 console.log("OK: translated paragraphs, trailing whitespace, and selection-source precedence are preserved.");

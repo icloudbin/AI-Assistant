@@ -18,6 +18,15 @@ const titledImg = inlineMarkdownToHtml('![alt](https://example.com/i.png "Pic")'
 assert.ok(titledImg.includes('<img src="https://example.com/i.png"'), "titled image renders as an image tag");
 assert.ok(!titledImg.includes("&quot;Pic&quot;"), "no literal &quot; in the image output");
 
+// Image/link alt text is captured from ALREADY-escaped text: escaping it a
+// second time rendered "AT&amp;amp;T" as visible entities.
+assert.equal(
+  inlineMarkdownToHtml("![AT&T logo](https://example.com/a.png)"),
+  '<img src="https://example.com/a.png" alt="AT&amp;T logo" loading="lazy" decoding="async">',
+  "image alt is escaped exactly once"
+);
+assert.ok(inlineMarkdownToHtml("[AT&T](https://example.com/a.png)").includes('alt="AT&amp;T"'), "link-as-image alt is not double-escaped");
+
 // ---------- inline: dangerous URLs degrade to plain text ----------
 assert.equal(inlineMarkdownToHtml("[x](javascript:alert(1))"), "x", "javascript: link reduced to its label");
 assert.ok(!inlineMarkdownToHtml("![i](data:image/svg+xml;base64,AAAA)").includes("<img"), "svg data URL not rendered");

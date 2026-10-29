@@ -91,9 +91,20 @@ export async function decryptSecrets(envelope, passphrase) {
   ) {
     throw new Error("Unsupported encrypted settings format.");
   }
-  const salt = base64ToBytes(envelope.salt);
-  const iv = base64ToBytes(envelope.iv);
-  const data = base64ToBytes(envelope.data);
+  let salt;
+  let iv;
+  let data;
+  try {
+    salt = base64ToBytes(envelope.salt);
+    iv = base64ToBytes(envelope.iv);
+    data = base64ToBytes(envelope.data);
+  } catch {
+    // The envelope is structurally genuine but its base64 payload is broken
+    // (a lost character in a copy/paste throws inside atob): a distinct code
+    // so the Settings page can say "damaged block" instead of "not a
+    // settings backup".
+    throw new Error("ENVELOPE_CORRUPT");
+  }
   if (salt.length !== SALT_BYTES || iv.length !== IV_BYTES || data.length < 16) {
     throw new Error("Unsupported encrypted settings format.");
   }

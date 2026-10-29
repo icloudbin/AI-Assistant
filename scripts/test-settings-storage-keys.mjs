@@ -18,6 +18,16 @@ const MIRRORED_SETTINGS = [
   LANGUAGE_STORAGE_KEY,
   "preferredTranslationLanguage",
   "themePreference",
+  // The import path passes its whole restored object to saveSettingsBackup(),
+  // and the live toggle handlers mirror directly - all of these must survive
+  // an unexpected storage reset (especially the privacy flags).
+  "piiFilterEnabled",
+  "pageVisualsEnabled",
+  "autoWebResearchEnabled",
+  "includeCurrentPageContext",
+  "selectedModelId",
+  "micRecognitionLang",
+  "composerHeight",
 ];
 for (const key of MIRRORED_SETTINGS) {
   assert.ok(

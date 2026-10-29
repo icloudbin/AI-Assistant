@@ -122,6 +122,13 @@ if (inGit) {
         if (![".js", ".mjs", ".html"].includes(path.extname(e.name)) || e.name === "i18n.js") continue;
         const text = fs.readFileSync(p, "utf8");
         for (const m of text.matchAll(/\bt\(\s*[\w.?]+\s*,\s*["']([A-Za-z0-9_]+)["']/g)) note(m[1], rel(p));
+        // The plain regex cannot see translate calls whose FIRST argument is
+        // an await expression (the literal key never follows a simple token
+        // there - see background.js's page-too-large hint). Known remaining
+        // blind spot (documented): keys passed via VARIABLES (nameKey /
+        // messageKeys / apiPromptKey in sidepanel.js, the error-code lookup
+        // in options.js) - those are covered by review, not by this scanner.
+        for (const m of text.matchAll(/\bt\(\s*await\b[^,]*,\s*["']([A-Za-z0-9_]+)["']/g)) note(m[1], rel(p));
         // tPlural(lang, count, oneKey, otherKey, vars) passes its two message
         // keys as the 3rd/4th args; validate both (the plain t() regex above
         // cannot match the call because `t` is followed by "Plural", not "(").

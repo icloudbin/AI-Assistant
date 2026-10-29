@@ -6,6 +6,7 @@ import {
   tPlural,
   SUPPORTED_LANGUAGES,
   LANGUAGE_STORAGE_KEY,
+  normalizeLanguage,
 } from "../i18n.js";
 import { AUTO_WEB_RESEARCH_KEY, HISTORY_STORAGE_KEY, MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
 import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-storage.js";
@@ -18,10 +19,13 @@ const tavilyApiKeyInput = document.getElementById("tavilyApiKey");
 const customPromptInput = document.getElementById("customPrompt");
 const msgEl = document.getElementById("msg");
 const piiFilterToggle = document.getElementById("piiFilterToggle");
-// Privacy filter: on by default, saved immediately when toggled.
+// Privacy filter: on by default, saved immediately when toggled (and mirrored
+// to the IndexedDB recovery layer, so a storage reset cannot silently flip it
+// back to the default - see saveSettingsBackup).
 chrome.storage.local.get("piiFilterEnabled").then((s) => { piiFilterToggle.checked = s.piiFilterEnabled !== false; }).catch(() => {});
 piiFilterToggle.addEventListener("change", () => {
   chrome.storage.local.set({ piiFilterEnabled: piiFilterToggle.checked }).catch(() => {});
+  saveSettingsBackup({ piiFilterEnabled: piiFilterToggle.checked }).catch(() => {});
 });
 const pageVisualsToggle = document.getElementById("pageVisualsToggle");
 // Page screenshot/images with quick actions: OFF by default (images cannot be
@@ -29,6 +33,7 @@ const pageVisualsToggle = document.getElementById("pageVisualsToggle");
 chrome.storage.local.get("pageVisualsEnabled").then((s) => { pageVisualsToggle.checked = s.pageVisualsEnabled === true; }).catch(() => {});
 pageVisualsToggle.addEventListener("change", () => {
   chrome.storage.local.set({ pageVisualsEnabled: pageVisualsToggle.checked }).catch(() => {});
+  saveSettingsBackup({ pageVisualsEnabled: pageVisualsToggle.checked }).catch(() => {});
 });
 const autoWebResearchToggle = document.getElementById("autoWebResearchToggle");
 // Automatic web search (the question is sent to Tavily when the extension
@@ -36,6 +41,7 @@ const autoWebResearchToggle = document.getElementById("autoWebResearchToggle");
 chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY).then((s) => { autoWebResearchToggle.checked = s[AUTO_WEB_RESEARCH_KEY] === true; }).catch(() => {});
 autoWebResearchToggle.addEventListener("change", () => {
   chrome.storage.local.set({ [AUTO_WEB_RESEARCH_KEY]: autoWebResearchToggle.checked }).catch(() => {});
+  saveSettingsBackup({ [AUTO_WEB_RESEARCH_KEY]: autoWebResearchToggle.checked }).catch(() => {});
 });
 // Keep the switches truthful when a value changes behind the page's back (a
 // settings import writes it straight to storage): a toggle must never show
@@ -135,10 +141,13 @@ languageSelect.addEventListener("change", async () => {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName === "local" && changes[LANGUAGE_STORAGE_KEY]) {
-    applyLanguage(changes[LANGUAGE_STORAGE_KEY].newValue || "en");
+    // normalizeLanguage: an imported (or legacy) file can carry an unsupported
+    // code - assigning it raw left the <select> blank instead of falling back.
+    applyLanguage(normalizeLanguage(changes[LANGUAGE_STORAGE_KEY].newValue));
   }
   if (areaName === "local" && changes[PREFERRED_TRANSLATION_LANGUAGE_KEY]) {
-    preferredTranslationLanguageSelect.value = changes[PREFERRED_TRANSLATION_LANGUAGE_KEY].newValue || "en";
+    const v = changes[PREFERRED_TRANSLATION_LANGUAGE_KEY].newValue;
+    preferredTranslationLanguageSelect.value = SUPPORTED_LANGUAGES.some((l) => l.code === v) ? v : "en";
   }
 });
 
@@ -684,14 +693,20 @@ async function restoreHistory() {
     const stored = await chrome.storage.local.get(HISTORY_STORAGE_KEY);
     const existing = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
 
-    // Merge by conversation ID. Imported copies replace matching IDs, while
-    // conversations created after the backup remain untouched.
+    // Merge by conversation ID. Imported copies replace matching IDs only when
+    // they are not older than the local copy - same newest-wins rule as
+    // mergeConversationLists() in conversation-store.js. Unconditionally
+    // overwriting with the backup copy silently DELETED everything the user
+    // had added to a conversation since the backup was exported.
     const byId = new Map();
     for (const convo of existing) {
       if (convo?.id) byId.set(String(convo.id), convo);
     }
     for (const convo of normalized) {
-      byId.set(String(convo.id), convo);
+      const prev = byId.get(String(convo.id));
+      if (!prev || (Number(convo.updatedAt) || 0) >= (Number(prev.updatedAt) || 0)) {
+        byId.set(String(convo.id), convo);
+      }
     }
 
     const merged = [...byId.values()]
@@ -956,6 +971,18 @@ async function exportSettings() {
       if (!secrets.groqApiKey && typeof stored.groqKey === "string" && stored.groqKey) {
         secrets.groqApiKey = stored.groqKey;
       }
+      // Unsaved-input fallback: keys typed into the fields but not yet saved
+      // used to be silently omitted while the page still reported success -
+      // the restore-after-reinstall then had no keys at all.
+      const inputValues = {
+        apiKey: apiKeyInput.value.trim(),
+        openrouterApiKey: openrouterApiKeyInput.value.trim(),
+        groqApiKey: groqApiKeyInput.value.trim(),
+        tavilyApiKey: tavilyApiKeyInput.value.trim(),
+      };
+      for (const key of SETTINGS_BACKUP_SECRET_KEYS) {
+        if (!secrets[key] && inputValues[key]) secrets[key] = inputValues[key];
+      }
       if (Object.keys(secrets).length) backup.encryptedSecrets = await encryptSecrets(secrets, passphrase);
     }
 
@@ -1041,6 +1068,8 @@ async function importSettings() {
           ? "settingsBackup_error_decryptFailed"
           : err?.message === "PLAINTEXT_CORRUPT"
           ? "settingsBackup_error_plaintextCorrupt"
+          : err?.message === "ENVELOPE_CORRUPT"
+          ? "settingsBackup_error_envelopeCorrupt"
           : "settingsBackup_error_notSettingsBackup";
         throw new Error(t(currentLang, code));
       }

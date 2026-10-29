@@ -199,15 +199,23 @@ const RULES = [
   [/\btvly-[A-Za-z0-9_-]{16,}\b/g, "[API_KEY]"],
   [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{16,}/gi, "$1 [TOKEN]"],
   // Cookie headers carry session ids: the whole header value is a credential.
-  [/^([ \t]*(?:Set-)?Cookie2?[ \t]*:[ \t]*)(?!\[COOKIE)(\S.*)$/gim, (m, head, value) => (/^\[[A-Z_]+(?:#\d+)?\]$/.test(value.trim()) ? m : `${head}[COOKIE]`)],
+  // Skipped when the value already contains a numbered placeholder from an
+  // earlier rule: blanking the whole header with an unnumbered [COOKIE] would
+  // sever that placeholder's mapping (its value became unrecoverable) - the
+  // earlier rule already redacted exactly the sensitive part.
+  [/^([ \t]*(?:Set-)?Cookie2?[ \t]*:[ \t]*)(?!\[COOKIE)(?![^:\n]*\[[A-Z_]+(?:#\d+)?\])(\S.*)$/gim, (m, head, value) => (/^\[[A-Z_]+(?:#\d+)?\]$/.test(value.trim()) ? m : `${head}[COOKIE]`)],
   // Session cookie / CSRF values outside a Cookie header (sessionid=..., csrftoken=...).
   [COOKIE_KV_RE, (m, head, value) => (looksLikeSecret(value, false) ? `${head}[COOKIE]` : m)],
   // key = value where the key NAME contains secret / token / password / api key
   // (SECRET_KEY=..., AWS_SECRET_ACCESS_KEY=..., "password": "...") and the value
   // looks like a secret: "Password: required" and "max token: 4096" stay.
   [SECRET_KV_RE, redactSecretKeyValue],
-  // secrets inside URL query strings
-  [/([?&](?:api[_-]?key|key|token|access_token|auth|sig|signature|secret|password|pwd)=)[^&\s#]+/gi, "$1[SECRET]"],
+  // secrets inside URL query strings. The value class also excludes brackets:
+  // a value that is/contains an earlier rule's placeholder (e.g. "?token=[JWT#1]",
+  // where the "#" would additionally truncate the match) must be left alone -
+  // replacing part of it produced corrupted output like "[SECRET]#1]" and
+  // broke the placeholder→value mapping.
+  [/([?&](?:api[_-]?key|key|token|access_token|auth|sig|signature|secret|password|pwd)=)[^&\s#\[\]]+/gi, "$1[SECRET]"],
   // user:pass@host
   [/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^\s\/:@]+:[^\s\/@]+@/gi, "$1[CREDENTIALS]@"],
 

@@ -878,6 +878,13 @@ function mdSkip(el) {
   if (el.localName === 'form' && readerModeIsNoise(el)) return true;
   if (el.hasAttribute('hidden')) return true;
   if (mdDisplay(el) === 'none') return true;
+  // visibility:hidden/collapse text is invisible to the reader but was still
+  // collected here (the plain-text extractor does check visibility), so the
+  // translation showed "ghost" text the original page never displays.
+  try {
+    const visibility = getComputedStyle(el).visibility;
+    if (visibility === 'hidden' || visibility === 'collapse') return true;
+  } catch (err) { /* style unreachable: keep the element */ }
   const sig = `${el.id || ''} ${typeof el.className === 'string' ? el.className : ''}`;
   return MD_NOISE_PATTERN.test(sig);
 }
@@ -943,7 +950,10 @@ function mdCleanInline(text) {
 
 function mdTable(el) {
   const rows = [];
-  for (const tr of el.querySelectorAll('tr')) {
+  // Only rows of THIS table: querySelectorAll('tr') also collected rows of
+  // nested tables, so a nested table's cells were emitted twice (once
+  // flattened into the outer cell, once as their own rows).
+  for (const tr of el.querySelectorAll(':scope > thead > tr, :scope > tbody > tr, :scope > tfoot > tr, :scope > tr')) {
     const cells = Array.from(tr.children)
       .filter((cell) => cell.localName === 'td' || cell.localName === 'th')
       .map((cell) => mdInlineList(Array.from(cell.childNodes), false).replace(/\s+/g, ' ').replace(/\|/g, '/').trim());
@@ -962,6 +972,14 @@ function mdList(el, depth) {
   const pad = '  '.repeat(depth);
   const lines = [];
   for (const li of el.children) {
+    // Malformed HTML keeps a nested <ul>/<ol> as a SIBLING of the outer <li>
+    // (a list start tag does not close the outer list); skipping it here
+    // silently deleted that sublist's items from the translation source.
+    if (li.localName === 'ul' || li.localName === 'ol') {
+      const nested = mdList(li, depth + 1);
+      if (nested) lines.push(nested);
+      continue;
+    }
     if (li.localName !== 'li' || mdSkip(li)) continue;
     const blocks = mdBlocksOf(li, depth + 1);
     const marker = ordered ? `${n++}. ` : '- ';
@@ -1069,13 +1087,25 @@ function extractSelectionMarkdown() {
   const sel = getSelection();
   if (!sel || !sel.rangeCount || sel.isCollapsed) return null;
   const holder = document.createElement('div');
-  for (let i = 0; i < sel.rangeCount; i++) holder.appendChild(sel.getRangeAt(i).cloneContents());
+  for (let i = 0; i < sel.rangeCount; i++) {
+    // Multi-range selections (Ctrl+drag): separate the fragments with a blank
+    // line, or adjacent fragments get glued into one word ("HelloWorld"),
+    // and keep document order via the ranges' own order per fragment.
+    if (i > 0) holder.appendChild(document.createTextNode('\n\n'));
+    holder.appendChild(sel.getRangeAt(i).cloneContents());
+  }
   const text = mdCut(mdBlocksOf(holder).join('\n\n'));
   if (!text) return null;
   // Inline emphasis and deletion are Markdown structure too. If either is
   // missed here, a paragraph-recovery path can correctly retain blank lines
   // but later render its literal marker characters as plain text.
-  const structured = /^(#{1,6} |[-*] |\d+\. |> |\||```)/m.test(text) || /\*\*|(?<!\*)\*(?!\s)[^*\n]*\S[^*\n]*\*(?!\*)|~~[^~\n]*\S[^~\n]*~~|\]\(|`/.test(text);
+  // The single-asterisk alternative requires CommonMark-style flanking: an
+  // asterisk hugging a letter/digit on either side (2*3*4, *.txt files and
+  // *.md) is ordinary text, and flagging it as Markdown made the renderer
+  // rewrite exactly that text into <em>.
+  const structured = /^(#{1,6} |[-*] |\d+\. |> |\||```)/m.test(text)
+    || /\*\*|~~[^~\n]*\S[^~\n]*~~|\]\(|`/.test(text)
+    || /(?<![\p{L}\p{N}*])\*(?!\s)[^*\n]*[^\s*]\*(?![\p{L}\p{N}])/u.test(text);
   return { text, structured, truncated: pageTextTruncated };
 }
 

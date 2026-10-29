@@ -35,6 +35,19 @@ export const PERSISTED_SETTING_KEYS = [
   LANGUAGE_STORAGE_KEY,
   "preferredTranslationLanguage",
   "themePreference",
+  // Settings first introduced after the mirror was written, found missing when
+  // importSettings() started passing its whole restored object to
+  // saveSettingsBackup(): the key loop silently dropped them, so after an
+  // unexpected storage reset the privacy toggles reverted to their defaults -
+  // worst of all "Read current page" back to ON (its default), silently
+  // re-enabling page sending. Never include credentials here (see above).
+  "piiFilterEnabled",
+  "pageVisualsEnabled",
+  "autoWebResearchEnabled",
+  "includeCurrentPageContext",
+  "selectedModelId",
+  "micRecognitionLang",
+  "composerHeight",
 ];
 
 function openDatabase() {

@@ -79,6 +79,9 @@ function inlineMarkdownToHtml(text) {
   // Markdown images. Process images before normal Markdown links so that
   // ![alt](url) is not accidentally consumed as [alt](url). Only allow
   // remote HTTP(S) images and image data URLs.
+  // alt is NOT escaped again here: it was captured from text that already
+  // went through escapeHtml() above, and escaping twice made alt text with
+  // & " < > render as visible entities ("AT&amp;amp;T").
   s = s.replace(MD_IMAGE_RE, (_, alt, src) => {
     const rawSrc = src.replace(/&amp;/g, "&");
     try {
@@ -87,8 +90,7 @@ function inlineMarkdownToHtml(text) {
       const isDataImage = u.protocol === "data:" && /^data:image\/(?:png|jpeg|jpg|gif|webp);/i.test(rawSrc);
       if (!isHttpImage && !isDataImage) return `![${alt}](${src})`;
       const safeSrc = escapeHtml(isDataImage ? rawSrc : u.href);
-      const safeAlt = escapeHtml(alt);
-      return stashTag(`<img src="${safeSrc}" alt="${safeAlt}" loading="lazy" decoding="async">`);
+      return stashTag(`<img src="${safeSrc}" alt="${alt}" loading="lazy" decoding="async">`);
     } catch {
       return `![${alt}](${src})`;
     }
@@ -112,9 +114,10 @@ function inlineMarkdownToHtml(text) {
       const imagePath = u.pathname.toLowerCase();
       const isImageUrl = /\.(?:png|jpe?g|gif|webp|bmp)$/i.test(imagePath);
       if (isImageUrl && (u.protocol === "http:" || u.protocol === "https:")) {
+        // label already carries escaped entities (see the escapeHtml above) -
+        // escaping again produced "AT&amp;amp;T" style alt text.
         const safeSrc = escapeHtml(u.href);
-        const safeAlt = escapeHtml(label);
-        return stashTag(`<img src="${safeSrc}" alt="${safeAlt}" loading="lazy" decoding="async">`);
+        return stashTag(`<img src="${safeSrc}" alt="${label}" loading="lazy" decoding="async">`);
       }
 
       const safeHref = escapeHtml(u.href);

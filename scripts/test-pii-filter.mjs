@@ -104,4 +104,34 @@ check('"Please contact John Smith <a@b.com>" keeps the lead words', /^Please con
 }
 check("without a session plain placeholders are used", R("jane@x.com") === "[EMAIL]");
 
+// ---- round-6 regressions: later rules must not swallow earlier placeholders ----
+// A URL query whose value was already redacted by an earlier rule: the
+// URL-query rule used to match "?token=[JWT" (stopping at the "#"), which
+// produced corrupted output like "[SECRET]#1]" and severed the mapping.
+{
+  const s = createRedactionSession();
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJhIjoiYiJ9.c2lnbmF0dXJlMTIzNDU2Nzg";
+  const out = R(`https://api.example.com/data?token=${jwt}`, s);
+  check("JWT inside a URL stays one intact placeholder", new RegExp(`\\?token=\\[JWT#\\d+\\]$`).test(out), out);
+  check("URL-embedded JWT restores to the original value", restorePlaceholders(out, s) === `https://api.example.com/data?token=${jwt}`, restorePlaceholders(out, s));
+}
+{
+  // A raw (not-yet-redacted) query secret is still caught and restored.
+  const s = createRedactionSession();
+  const out = R("https://e.com/a?api_key=abcdef1234567890abcdef&x=1", s);
+  check("raw URL query secret is still redacted", /\?api_key=\[SECRET#\d+\]/.test(out), out);
+  check("raw URL query secret restores", restorePlaceholders(out, s) === "https://e.com/a?api_key=abcdef1234567890abcdef&x=1", restorePlaceholders(out, s));
+}
+{
+  // A Cookie header whose value already carries a placeholder (from the JWT
+  // rule, which runs earlier): the whole-header [COOKIE] rule used to blank
+  // it, orphaning the placeholder's mapping.
+  const s = createRedactionSession();
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJhIjoiYiJ9.c2lnbmF0dXJlMTIzNDU2Nzg";
+  const input = `Cookie: auth=${jwt}; session=abcdefghij`;
+  const out = R(input, s);
+  check("cookie header keeps an earlier placeholder", /\[JWT#\d+\]/.test(out) && !out.startsWith("Cookie: [COOKIE]"), out);
+  check("cookie header value restores completely", restorePlaceholders(out, s) === input, restorePlaceholders(out, s));
+}
+
 process.exit(failed ? 1 : 0);
