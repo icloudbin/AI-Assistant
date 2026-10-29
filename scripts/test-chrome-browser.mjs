@@ -121,7 +121,7 @@ const EXTENSION_STUB = `
     runtime: {
       id: "kkionkjieiilonjikggmaladjpiijbkm",
       lastError: undefined,
-      getManifest: () => ({ name: "AI Assistant", version: "1.10.116" }),
+      getManifest: () => ({ name: "AI Assistant", version: "1.10.117" }),
       getURL: (p) => location.origin + "/" + p.replace(/^\\//, ""),
       sendMessage: async (msg) => {
         window.__sentMessages.push(msg);

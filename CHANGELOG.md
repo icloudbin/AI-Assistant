@@ -4,6 +4,35 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Fix: round-7 deep review - HTTP safety, Markdown formulas/tables, submit rollback, thinking stream, vision flags, selection protection (v1.10.117)
+
+Round 7 deep review fixed 11 issues (#1, #2, #3, #4, #5, #7, #8, #9, #10, #11, #12) verified in real Google Chrome browser:
+
+- **Problem #1.** Internal/local HTTP URLs (`http://localhost:...`) were unconditionally converted to `https://`.
+- **Fix #1.** Preserves original HTTP URLs and provides graceful HTTPS retry fallback on connection failure (`sidepanel.js`).
+- **Problem #2.** Single-asterisk italic markdown regex had no boundary checks, incorrectly turning math formulas (`3*4*5`) and snake_case variables into italics.
+- **Fix #2.** Added lookaround boundary guards `/(?<![\p{L}\p{N}*])\*(?!\s)([^*\n]*[^*\s])\*(?![\p{L}\p{N}*])/gu` (`rendering/markdown.js`).
+- **Problem #3.** Table row parsing split on pipes inside inline code spans and ignored escaped pipes `\|`.
+- **Fix #3.** Refactored `splitTableRow` to respect inline code blocks and escaped pipes (`rendering/markdown.js`).
+- **Problem #4.** When a submit threw before or during transmission, the user bubble remained in the DOM and history was left in an inconsistent state.
+- **Fix #4.** Added `rollbackSubmit()` to cleanly remove user bubble from DOM, pop history, and restore composer input (`sidepanel.js`).
+- **Problem #5.** OpenAI-compatible reasoning models (`reasoning_content`) were ignored, and pure reasoning responses triggered false "Empty response" errors.
+- **Fix #5.** Extracted reasoning content into `THINKING` streaming events and displayed thought process in the UI (`providers/openai-compatible.js`, `background.js`, `sidepanel.js`).
+- **Problem #7.** `groq-qwen3.8-27b` and `openrouter-free-auto` lacked explicit `vision: false` declarations in the catalog.
+- **Fix #7.** Explicitly declared `vision: false` in `MODELS` (`models.js`).
+- **Problem #8.** Options backup import skipped empty string configurations (preventing users from clearing custom prompts) and lacked strict numeric/boolean validation.
+- **Fix #8.** Restored empty string values and added strict type validation (`options.js`).
+- **Problem #9.** `loadConversations` performed redundant reads and handling of legacy `current_conversation_id`.
+- **Fix #9.** Removed dead key query from conversation loading (`sidepanel.js`).
+- **Problem #10.** Settings recovery mirror executed unnecessary `chrome.storage.local.remove` on every invocation even when no legacy keys existed.
+- **Fix #10.** Conditionally removed legacy keys only when present (`settings-storage.js`).
+- **Problem #11.** Content script page extraction performed recursive DOM tree traversals and computed style queries on elements that were already definitely hidden.
+- **Fix #11.** Added `isDefinitelyHidden()` fast-path pruning to skip hidden subtrees (`content.js`).
+- **Problem #12.** Streaming assistant responses constantly overwrote `bubble.innerHTML`, destroying active user text selections.
+- **Fix #12.** Added `isUserSelectingInBubble()` check and `innerHTML` diff guard (`sidepanel.js`).
+- **Checked.** All 16 unit/integration suites green + automated Google Chrome CDP E2E test suite (11/11 tests) PASS.
+- Build bumped to 1.10.117.
+
 ## Fix: round-6 deep review - settings mirror completeness, restore data loss, placeholder corruption, translation pipeline edge cases (v1.10.116)
 
 Round 6 of the full-code review (3 independent review agents over the whole tree, findings verified by execution) confirmed 23 defects: 0 P1, 3 P2, 20 P3. All fixed in one build.
