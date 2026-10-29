@@ -188,5 +188,36 @@ assert.equal(openAICompatibleStreamError({ error: { code: 500 } }), '{"code":500
   assert.ok(ctxReasoningOnly.thinking.length > 0, "reasoning-only response does not throw empty error");
 }
 
+// ---------- translation mode drops the reasoning stream ----------
+// A translation must show ONLY the final translated text (the pre-1.10.116
+// behavior): no "Thought process" block in the translation box.
+{
+  const makeTranslateCtx = (translateMode) => {
+    const ctx = makeCtx();
+    ctx.translateMode = translateMode;
+    return ctx;
+  };
+  const reasoningThenContent = [
+    'data: {"choices":[{"delta":{"reasoning_content":"Let me think."}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"你好世界"}}]}\n\n',
+    'data: [DONE]\n\n',
+  ];
+
+  for (const translateMode of ["free", "lines"]) {
+    const ctx = makeTranslateCtx(translateMode);
+    const { resp } = sse(reasoningThenContent);
+    await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
+    assert.equal(ctx.thinking.length, 0, `[${translateMode}] no reasoning reaches the translation box`);
+    assert.equal(ctx.chunks.join(""), "你好世界", `[${translateMode}] final translation still streamed`);
+  }
+
+  // Chat mode (translateMode false) still receives the reasoning stream.
+  const chatCtx = makeCtx();
+  const { resp: chatResp } = sse(reasoningThenContent);
+  await readSse(chatResp, extractOpenAIDelta, chatCtx, openAICompatibleStreamError);
+  assert.equal(chatCtx.thinking.join(""), "Let me think.", "chat mode keeps the reasoning stream");
+  assert.equal(chatCtx.chunks.join(""), "你好世界", "chat mode keeps the content stream");
+}
+
 console.log("OK: openai-compatible — SSE reassembly, in-stream error release, empty-stream guard, stream-cut detection, error mapping.");
 process.exit(0);

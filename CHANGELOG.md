@@ -4,6 +4,12 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Fix: translation box no longer shows the model's thought process (v1.10.118)
+
+- **Problem.** After v1.10.117's thinking-stream feature (#5), OpenAI-compatible reasoning models streamed `reasoning_content`/`reasoning` into EVERY response panel - including translations. The translation box showed a `💭 Thought process:` block above the translated text instead of only the final translation (the v1.10.115 behavior).
+- **Fix.** `readSse()` drops the reasoning stream whenever `ctx.translateMode` is set ("free" or "lines"): a translation again streams only the final translated text, with no `THINKING` events sent to the panel. The ASK/chat conversation keeps the "Thought process" display introduced in v1.10.117. New regression assertions in `test-openai-compatible.mjs` pin both sides (translation: zero thinking chunks, translation text intact; chat: thinking + content both delivered).
+- **Checked.** All 15 unit suites green. Build bumped to 1.10.118.
+
 ## Fix: round-7 deep review - HTTP safety, Markdown formulas/tables, submit rollback, thinking stream, vision flags, selection protection (v1.10.117)
 
 Round 7 deep review fixed 11 issues (#1, #2, #3, #4, #5, #7, #8, #9, #10, #11, #12) verified in real Google Chrome browser:

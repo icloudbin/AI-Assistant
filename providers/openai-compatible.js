@@ -189,7 +189,11 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
     const delta = extractDelta(json);
     const content = typeof delta === "string" ? delta : (delta?.content ?? "");
     const reasoning = typeof delta === "object" ? (delta?.reasoning ?? "") : "";
-    if (reasoning) {
+    // A translation shows only the final translated text: the model's
+    // reasoning stream is dropped there (ctx.translateMode is "free"/"lines"),
+    // exactly the pre-thinking-display behavior. The ASK/chat panel keeps
+    // rendering it under "Thought process".
+    if (reasoning && !ctx.translateMode) {
       emitted = true;
       ctx.sendThinking?.(reasoning);
     }
