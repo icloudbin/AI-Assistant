@@ -219,5 +219,29 @@ assert.equal(openAICompatibleStreamError({ error: { code: 500 } }), '{"code":500
   assert.equal(chatCtx.chunks.join(""), "你好世界", "chat mode keeps the content stream");
 }
 
-console.log("OK: openai-compatible — SSE reassembly, in-stream error release, empty-stream guard, stream-cut detection, error mapping.");
+// ---------- stream timeout ----------
+// A provider that accepts the connection and then goes silent must not hold
+// the request (and the side panel's composer) open forever.
+{
+  const ctx = makeCtx();
+  ctx.streamIdleTimeoutMs = 25;
+  ctx.streamTotalTimeoutMs = 1000;
+  let aborted = false;
+  ctx.abort = () => { aborted = true; };
+  let controller;
+  const stream = new ReadableStream({ start(c) { controller = c; } });
+  const result = readSse({ body: stream }, extractOpenAIDelta, ctx, openAICompatibleStreamError);
+  let timer;
+  const testTimeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("test timed out waiting for the stream timeout")), 2000);
+  });
+  await Promise.race([
+    assert.rejects(result, /stopped responding|timed out|timeout/i),
+    testTimeout,
+  ]).finally(() => clearTimeout(timer));
+  assert.equal(aborted, true, "stream timeout aborts the underlying request");
+  try { controller.close(); } catch {}
+}
+
+console.log("OK: openai-compatible — SSE reassembly, in-stream error release, empty-stream guard, stream-cut detection, stream timeout, error mapping.");
 process.exit(0);

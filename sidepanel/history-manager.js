@@ -61,10 +61,15 @@ function toStoredMessage(message) {
     ...(displayContent !== content ? { displayContent } : {}),
     modelLabel: message.modelLabel || "",
     modelId: message.modelId || "",
-    // Which page (title/url only - never the page text itself) was used for
-    // this message, if any. Read back on the next submission to tell the
+    // Which page (title/url/tab only - never the page text itself) was used
+    // for this message, if any. Read back on the next submission to tell the
     // model explicitly when the page has changed - see handleSubmit() below.
     pageContext: message.pageContext || null,
+    // Page-context epoch: a page change starts a new epoch, and every later
+    // request sends only turns from the current epoch. Persisting it is what
+    // keeps the reset in force on the FOLLOW-UP after a page change, not just
+    // on the switch request itself.
+    ...(Number.isInteger(message.contextEpoch) ? { contextEpoch: message.contextEpoch } : {}),
     // Translation replies are rendered as plain text (no Markdown) so line
     // numbering/indentation survive. Without persisting the flag, a reloaded
     // conversation would re-render them through the Markdown renderer.

@@ -53,6 +53,7 @@ AI-Assistant/
 │   ├── test-openai-compatible.mjs
 │   ├── test-markdown-render.mjs
 │   ├── test-history-manager.mjs
+│   ├── test-attachment-budget.mjs
 │   └── test-sidepanel-context.py
 └── sidepanel/
     ├── sidepanel.html
@@ -63,6 +64,7 @@ AI-Assistant/
     ├── mic-permission.js
     ├── rendering/
     │   └── markdown.js
+    ├── attachment-budget.js
     └── history-manager.js
 ```
 

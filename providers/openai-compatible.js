@@ -147,6 +147,12 @@ export function extractOpenAIDelta(json) {
 // lands (see stopActiveRequest() in sidepanel.js) - reader.read() itself
 // also naturally rejects once ctx.signal aborts, ending this loop via the
 // same AbortError path the initial fetch() would take.
+// A stream that stops producing bytes must not hold the request (and the side
+// panel's composer) open forever. The idle timer resets on every chunk; the
+// total deadline bounds a provider that keeps dribbling bytes but never ends.
+const STREAM_IDLE_TIMEOUT_MS = 90 * 1000;
+const STREAM_TOTAL_TIMEOUT_MS = 15 * 60 * 1000;
+
 async function readSse(resp, extractDelta, ctx, extractError = null) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
@@ -160,6 +166,29 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
   // finished, silently presenting a truncated answer as complete (caught by
   // a real-browser E2E: offline mid-stream left no error at all).
   let sawTerminal = false;
+  const idleMs = Number.isFinite(ctx.streamIdleTimeoutMs) && ctx.streamIdleTimeoutMs > 0
+    ? ctx.streamIdleTimeoutMs
+    : STREAM_IDLE_TIMEOUT_MS;
+  const totalMs = Number.isFinite(ctx.streamTotalTimeoutMs) && ctx.streamTotalTimeoutMs > 0
+    ? ctx.streamTotalTimeoutMs
+    : STREAM_TOTAL_TIMEOUT_MS;
+  let timedOut = false;
+  let idleTimer = null;
+  let totalTimer = null;
+  const timeoutError = () => new Error(t(ctx.lang, "bg_error_streamTimeout"));
+  const abortForTimeout = () => {
+    if (timedOut) return;
+    timedOut = true;
+    // Cancel the reader first: a custom stream may not react to ctx.signal.
+    try { reader.cancel().catch(() => {}); } catch {}
+    try { ctx.abort?.(); } catch {}
+  };
+  const armIdleTimer = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(abortForTimeout, idleMs);
+  };
+  totalTimer = setTimeout(abortForTimeout, totalMs);
+  armIdleTimer();
 
   // Handles one complete SSE line; throws on a provider-reported error.
   const handleLine = (line) => {
@@ -211,19 +240,26 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
   try {
     while (true) {
       const { done, value } = await reader.read();
+      if (timedOut) throw timeoutError();
       if (done) break;
+      armIdleTimer();
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
       for (const line of lines) handleLine(line);
     }
+    if (timedOut) throw timeoutError();
     // Flush whatever is left: a final "data:" line that is not newline-terminated
     // used to be dropped, silently truncating the end of the answer.
     buffer += decoder.decode();
     if (buffer.trim()) handleLine(buffer);
   } catch (err) {
     reader.cancel().catch(() => {});
+    if (timedOut) throw timeoutError();
     throw err;
+  } finally {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (totalTimer) clearTimeout(totalTimer);
   }
 
   // A stream that ended without a single visible character (empty completion,

@@ -553,8 +553,10 @@ chrome.runtime.onConnect.addListener((port) => {
       // startup call above already has), later requests await the same
       // settled promise.
       await restoreSettingsFromBackupOnce();
+      if (abortController.signal.aborted) return;
       let { question, pageContext, includePageContext, history, images = [], modelId, factCheck, noWebResearch = false, forceWebResearch = false, translateMode = false, translateSource = null, translateSourceTruncated = false } = msg.payload;
       const lang = await getStoredLanguage();
+      if (abortController.signal.aborted) return;
       // Privacy filter (on by default): strip names, phones, emails, cards,
       // keys, tokens, etc. from EVERYTHING that leaves the browser - question,
       // attachments, page text and history - before any provider or web
@@ -574,6 +576,7 @@ chrome.runtime.onConnect.addListener((port) => {
         console.warn("[AI Assistant] privacy filter failed", err);
         throw new Error(t(lang, "bg_error_piiFilter"));
       }
+      if (abortController.signal.aborted) return;
       // Never trust a stale/accidental pageContext value when the user has
       // disabled "Read current page". This is the final privacy boundary
       // before any provider request is constructed - independent of, and
@@ -601,7 +604,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
       safePost({ type: "START", requestId });
 
-      const ctx = { port, requestId, signal: abortController.signal, lang, translateMode: translateMode === true ? "free" : false, lineTranslator: null, safePost };
+      const ctx = { port, requestId, signal: abortController.signal, abort: () => abortController.abort(), lang, translateMode: translateMode === true ? "free" : false, lineTranslator: null, safePost };
       // Everything shown to the user goes through here so the real values replace
       // the placeholders (also when one is split across two streamed chunks).
       chunkRestorer = new PlaceholderRestorer(piiSession, (delta) => safePost({ type: "CHUNK", delta, requestId }));

@@ -11,6 +11,7 @@ import {
 import { AUTO_WEB_RESEARCH_KEY, HISTORY_STORAGE_KEY, MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
 import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-storage.js";
 import { encryptSecrets, decryptSecrets, MIN_PASSPHRASE_LENGTH } from "../settings-crypto.js";
+import { withHistoryLock } from "../conversation-store.js";
 
 const apiKeyInput = document.getElementById("apiKey");
 const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
@@ -18,30 +19,61 @@ const groqApiKeyInput = document.getElementById("groqApiKey");
 const tavilyApiKeyInput = document.getElementById("tavilyApiKey");
 const customPromptInput = document.getElementById("customPrompt");
 const msgEl = document.getElementById("msg");
+let persistToggleMsgTimer = null;
+
+// Privacy toggles save immediately. The checkbox is updated by the user before
+// this runs, so a failed write must be rolled back instead of leaving the UI
+// claiming a protection is active when the stored value still says otherwise.
+async function persistToggle(key, checkbox) {
+  const value = checkbox.checked;
+  // Serialize the write with the checkbox itself: a second click while the
+  // first write is in flight could otherwise verify the other click's value
+  // and report a false failure.
+  checkbox.disabled = true;
+  try {
+    await chrome.storage.local.set({ [key]: value });
+    const verified = (await chrome.storage.local.get(key))[key];
+    if (verified !== value) throw new Error("The value was not persisted.");
+  } catch (err) {
+    checkbox.checked = !value;
+    console.error(`[AI Assistant] Unable to save ${key}:`, err);
+    msgEl.style.color = "#f55b5b";
+    msgEl.textContent = t(currentLang, "settings_saveFailed_template", {
+      message: err?.message || t(currentLang, "unknownError"),
+    });
+    clearTimeout(persistToggleMsgTimer);
+    persistToggleMsgTimer = setTimeout(() => { msgEl.textContent = ""; }, 5000);
+    return;
+  } finally {
+    checkbox.disabled = false;
+  }
+  // The primary store is authoritative; a failed recovery-mirror write is
+  // logged instead of being presented as a failure of the user's choice.
+  saveSettingsBackup({ [key]: value }).catch((err) => {
+    console.warn(`[AI Assistant] Unable to mirror ${key}:`, err);
+  });
+}
 const piiFilterToggle = document.getElementById("piiFilterToggle");
 // Privacy filter: on by default, saved immediately when toggled (and mirrored
 // to the IndexedDB recovery layer, so a storage reset cannot silently flip it
 // back to the default - see saveSettingsBackup).
 chrome.storage.local.get("piiFilterEnabled").then((s) => { piiFilterToggle.checked = s.piiFilterEnabled !== false; }).catch(() => {});
 piiFilterToggle.addEventListener("change", () => {
-  chrome.storage.local.set({ piiFilterEnabled: piiFilterToggle.checked }).catch(() => {});
-  saveSettingsBackup({ piiFilterEnabled: piiFilterToggle.checked }).catch(() => {});
+  void persistToggle("piiFilterEnabled", piiFilterToggle);
 });
 const pageVisualsToggle = document.getElementById("pageVisualsToggle");
 // Page screenshot/images with quick actions: OFF by default (images cannot be
 // run through the text privacy filter), saved immediately when toggled.
 chrome.storage.local.get("pageVisualsEnabled").then((s) => { pageVisualsToggle.checked = s.pageVisualsEnabled === true; }).catch(() => {});
 pageVisualsToggle.addEventListener("change", () => {
-  chrome.storage.local.set({ pageVisualsEnabled: pageVisualsToggle.checked }).catch(() => {});
-  saveSettingsBackup({ pageVisualsEnabled: pageVisualsToggle.checked }).catch(() => {});
+  void persistToggle("pageVisualsEnabled", pageVisualsToggle);
 });
 const autoWebResearchToggle = document.getElementById("autoWebResearchToggle");
 // Automatic web search (the question is sent to Tavily when the extension
 // guesses the page cannot answer it): OFF by default, saved immediately when toggled.
 chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY).then((s) => { autoWebResearchToggle.checked = s[AUTO_WEB_RESEARCH_KEY] === true; }).catch(() => {});
 autoWebResearchToggle.addEventListener("change", () => {
-  chrome.storage.local.set({ [AUTO_WEB_RESEARCH_KEY]: autoWebResearchToggle.checked }).catch(() => {});
-  saveSettingsBackup({ [AUTO_WEB_RESEARCH_KEY]: autoWebResearchToggle.checked }).catch(() => {});
+  void persistToggle(AUTO_WEB_RESEARCH_KEY, autoWebResearchToggle);
 });
 // Keep the switches truthful when a value changes behind the page's back (a
 // settings import writes it straight to storage): a toggle must never show
@@ -583,12 +615,17 @@ function normalizeRestoredConversation(conversation, index) {
           modelLabel: String(m.modelLabel || ""),
           modelId: String(m.modelId || ""),
           // Same shape the side panel writes (see toStoredMessage()): the
-          // page title/url the message was sent with, and the plain-text
-          // render flag for translation replies.
+          // page title/url/tab the message was sent with, the page-context
+          // epoch, and the plain-text render flag for translation replies.
           pageContext:
             m.pageContext && typeof m.pageContext === "object" && typeof m.pageContext.url === "string"
-              ? { title: String(m.pageContext.title || ""), url: m.pageContext.url }
+              ? {
+                  title: String(m.pageContext.title || ""),
+                  url: m.pageContext.url,
+                  ...(Number.isInteger(m.pageContext.tabId) ? { tabId: m.pageContext.tabId } : {}),
+                }
               : null,
+          ...(Number.isInteger(m.contextEpoch) ? { contextEpoch: m.contextEpoch } : {}),
           ...(m.plain === true ? { plain: true } : {}),
         }))
     : [];
@@ -690,31 +727,36 @@ async function restoreHistory() {
       throw new Error(t(currentLang, "zip_error_noUsableConversations"));
     }
 
-    const stored = await chrome.storage.local.get(HISTORY_STORAGE_KEY);
-    const existing = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
+    // Hold the same cross-context lock the side panels use, so a panel save
+    // running at the same time cannot merge from an old list and overwrite the
+    // restored conversations (or vice versa).
+    await withHistoryLock(async () => {
+      const stored = await chrome.storage.local.get(HISTORY_STORAGE_KEY);
+      const existing = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
 
-    // Merge by conversation ID. Imported copies replace matching IDs only when
-    // they are not older than the local copy - same newest-wins rule as
-    // mergeConversationLists() in conversation-store.js. Unconditionally
-    // overwriting with the backup copy silently DELETED everything the user
-    // had added to a conversation since the backup was exported.
-    const byId = new Map();
-    for (const convo of existing) {
-      if (convo?.id) byId.set(String(convo.id), convo);
-    }
-    for (const convo of normalized) {
-      const prev = byId.get(String(convo.id));
-      if (!prev || (Number(convo.updatedAt) || 0) >= (Number(prev.updatedAt) || 0)) {
-        byId.set(String(convo.id), convo);
+      // Merge by conversation ID. Imported copies replace matching IDs only when
+      // they are not older than the local copy - same newest-wins rule as
+      // mergeConversationLists() in conversation-store.js. Unconditionally
+      // overwriting with the backup copy silently DELETED everything the user
+      // had added to a conversation since the backup was exported.
+      const byId = new Map();
+      for (const convo of existing) {
+        if (convo?.id) byId.set(String(convo.id), convo);
       }
-    }
+      for (const convo of normalized) {
+        const prev = byId.get(String(convo.id));
+        if (!prev || (Number(convo.updatedAt) || 0) >= (Number(prev.updatedAt) || 0)) {
+          byId.set(String(convo.id), convo);
+        }
+      }
 
-    const merged = [...byId.values()]
-      .filter((c) => c?.messages?.length)
-      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
-      .slice(0, MAX_SAVED_CONVERSATIONS);
+      const merged = [...byId.values()]
+        .filter((c) => c?.messages?.length)
+        .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+        .slice(0, MAX_SAVED_CONVERSATIONS);
 
-    await chrome.storage.local.set({ [HISTORY_STORAGE_KEY]: merged });
+      await chrome.storage.local.set({ [HISTORY_STORAGE_KEY]: merged });
+    });
 
     msgEl.style.color = "#4ade80";
     msgEl.textContent = tPlural(currentLang, normalized.length, "restore_success_one", "restore_success_other");
@@ -794,7 +836,7 @@ async function deleteAllHistory() {
   msgEl.textContent = t(currentLang, "delete_deleting");
 
   try {
-    await chrome.storage.local.remove(HISTORY_STORAGE_KEY);
+    await withHistoryLock(() => chrome.storage.local.remove(HISTORY_STORAGE_KEY));
     msgEl.style.color = "#4ade80";
     msgEl.textContent = t(currentLang, "delete_success");
     setTimeout(() => (msgEl.textContent = ""), 2500);

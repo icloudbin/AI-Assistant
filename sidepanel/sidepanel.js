@@ -9,9 +9,19 @@ import { getStoredLanguage, applyStaticTranslations, t, LANGUAGE_STORAGE_KEY, no
 import { saveSettingsBackup } from "../settings-storage.js";
 // Pure save/merge helpers for the saved-conversation list (DOM-free, tested
 // in scripts/test-conversation-store.mjs).
-import { mergeConversationLists, sortedByNewest } from "../conversation-store.js";
+import { mergeConversationLists, sortedByNewest, resolveContextEpoch, withHistoryLock } from "../conversation-store.js";
 import { markdownToHtml } from "./rendering/markdown.js";
 import { makeTopicTitle, toStoredMessage, compressForQuota } from "./history-manager.js";
+import {
+  MAX_ATTACHMENTS,
+  MAX_TOTAL_ATTACHMENT_TEXT_CHARS,
+  MAX_TOTAL_ATTACHMENT_IMAGE_BYTES,
+  dataUrlByteLength,
+  attachmentTextChars,
+  attachmentImageBytes,
+  remainingTextChars,
+  fitsImageBudget,
+} from "./attachment-budget.js";
 
 // ---------- Theme ----------
 const THEME_STORAGE_KEY = "themePreference";
@@ -128,6 +138,90 @@ function isBlockedSensitivePage(url, source = "") {
   const sensitive = sensitiveHostOf(url) !== "" || MAIL_EXTRACTOR_SOURCES.has(source);
   return sensitive && !allowedSensitiveHosts.has(hostOf(url));
 }
+
+// The page-reading preference is a privacy control, so it must be known before
+// the composer is unlocked. A failed read fails safe: page reading is OFF for
+// this panel session and the user is told, instead of silently falling back to
+// the checkbox's HTML default (ON).
+let includeContextPreferenceUnavailable = false;
+let includeContextPreferenceWarningShown = false;
+
+async function loadIncludeContextPreference() {
+  let timer = null;
+  try {
+    // Never leave the composer locked forever if extension storage is wedged.
+    const saved = await Promise.race([
+      chrome.storage.local.get(INCLUDE_CONTEXT_STORAGE_KEY).then((values) => values[INCLUDE_CONTEXT_STORAGE_KEY]),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Timed out reading the page-reading preference.")), 5000);
+      }),
+    ]);
+    includeContextToggle.checked = saved !== false;
+    includeContextPreferenceUnavailable = false;
+  } catch (err) {
+    includeContextToggle.checked = false;
+    includeContextPreferenceUnavailable = true;
+    console.warn("[AI Assistant] Unable to read the page-reading preference; page reading is off for this session:", err);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function warnIncludeContextPreference() {
+  if (!includeContextPreferenceUnavailable || includeContextPreferenceWarningShown) return;
+  includeContextPreferenceWarningShown = true;
+  addBubble("notice", t(currentLang, "contextBar_preferenceUnavailable"));
+}
+
+function applyIncludeContextUi() {
+  if (includeContextToggle.checked) {
+    refreshActivePageContext().catch((err) => console.debug("[AI Assistant] Unable to refresh page context:", err));
+  } else {
+    updateContextBar(null);
+  }
+}
+
+// Settings import and the IndexedDB recovery layer write this key directly.
+// Without this listener an already-open panel kept its old checkbox value and
+// could send the page after an imported opt-out.
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local" || !changes[INCLUDE_CONTEXT_STORAGE_KEY]) return;
+  const next = changes[INCLUDE_CONTEXT_STORAGE_KEY].newValue !== false;
+  includeContextPreferenceUnavailable = false;
+  if (includeContextToggle.checked === next) return;
+  includeContextToggle.checked = next;
+  applyIncludeContextUi();
+});
+
+async function persistIncludeContextPreference() {
+  const value = includeContextToggle.checked;
+  // Prevent a second click while the first write is being verified; otherwise
+  // the two verifications can read each other's values and report a false
+  // failure (or persist a stale choice).
+  includeContextToggle.disabled = true;
+  try {
+    await chrome.storage.local.set({ [INCLUDE_CONTEXT_STORAGE_KEY]: value });
+    // Verify the write, so a storage failure cannot leave the checkbox showing
+    // a privacy choice that was not actually persisted.
+    const verified = (await chrome.storage.local.get(INCLUDE_CONTEXT_STORAGE_KEY))[INCLUDE_CONTEXT_STORAGE_KEY];
+    if (verified !== value) throw new Error("The value was not persisted.");
+  } catch (err) {
+    includeContextToggle.checked = !value;
+    addBubble("error", t(currentLang, "settings_saveFailed_template", {
+      message: err?.message || t(currentLang, "unknownError"),
+    }));
+    applyIncludeContextUi();
+    return;
+  } finally {
+    includeContextToggle.disabled = false;
+  }
+  // A failed recovery-mirror write does not change the primary setting; log it
+  // rather than claiming the user's choice failed.
+  saveSettingsBackup({ [INCLUDE_CONTEXT_STORAGE_KEY]: value }).catch((err) => {
+    console.warn("[AI Assistant] Unable to mirror the page-reading preference:", err);
+  });
+  applyIncludeContextUi();
+}
 const modelSelect = document.getElementById("modelSelect");
 const uploadBtn = document.getElementById("uploadBtn");
 const fileInput = document.getElementById("fileInput");
@@ -222,7 +316,7 @@ window.addEventListener("resize", () => {
 restoreComposerHeight();
 
 const MAX_FILE_BYTES = 12 * 1024 * 1024;
-const MAX_TOTAL_EXTRACTED_CHARS = 180000;
+const MAX_TOTAL_EXTRACTED_CHARS = MAX_TOTAL_ATTACHMENT_TEXT_CHARS;
 // At most this many TEXT files are read from one ZIP. Only text entries count:
 // directories, images and other non-text entries cost nothing, and neither do
 // entries skipped by the ignore list below. Text files past the limit are left
@@ -1123,10 +1217,8 @@ async function fetchPageImages(imageUrls, pageUrl = "") {
   }
 }
 
-function dataUrlByteLength(dataUrl) {
-  const encoded = String(dataUrl || "").split(",", 2)[1] || "";
-  return Math.floor((encoded.length * 3) / 4);
-}
+// dataUrlByteLength is shared with the attachment budget module (imported
+// above), so the image-byte accounting has one definition.
 
 // URL-based extraction cannot cover CSS backgrounds, blob: URLs, or hosts
 // that reject an extension-origin download. A bounded screenshot of the
@@ -1397,10 +1489,6 @@ function handlePortMessage(msg) {
   }
 }
 
-function getApiHistory() {
-  return history.slice(-(MAX_HISTORY_TURNS * 2));
-}
-
 function createConversation() {
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -1446,6 +1534,13 @@ function saveConversations() {
 
 async function saveConversationsNow() {
   await saveQueue;
+  // Web Locks serialize the read-merge-write across every side panel and the
+  // Settings page. Without this, two windows could both read the old list and
+  // the later write would silently drop the other window's conversation.
+  return withHistoryLock(saveConversationsWithLock);
+}
+
+async function saveConversationsWithLock() {
   const stored = await chrome.storage.local.get(HISTORY_STORAGE_KEY);
   // Whether history existed when we read it: if "Delete All History" (any
   // window) removes the key while this save is gathering its data, writing
@@ -1726,7 +1821,7 @@ function decodeTextBytes(bytes) {
 function readU16(view, offset) { return view.getUint16(offset, true); }
 function readU32(view, offset) { return view.getUint32(offset, true); }
 
-async function inflateRaw(bytes) {
+async function inflateRaw(bytes, limit = MAX_ZIP_ENTRY_BYTES) {
   if (typeof DecompressionStream === "undefined") {
     throw new Error(t(currentLang, "sp_zip_error_decompressionUnsupported"));
   }
@@ -1734,7 +1829,6 @@ async function inflateRaw(bytes) {
   // Read incrementally and stop at a hard cap: the uncompressed size declared
   // in a ZIP header is attacker-controlled, so a small "zip bomb" could
   // otherwise expand to gigabytes in memory.
-  const limit = MAX_ZIP_ENTRY_BYTES;
   const reader = stream.getReader();
   const chunks = [];
   let total = 0;
@@ -1789,7 +1883,11 @@ function zipIgnoreReason(name) {
 
 // Returns { text, report }: the text of the entries that were read, and what was
 // left out of it (see describeZipReport).
-async function extractZipText(file) {
+async function extractZipText(file, maxTotalChars = MAX_TOTAL_EXTRACTED_CHARS) {
+  const maxChars = Math.max(1, Math.floor(Number(maxTotalChars) || MAX_TOTAL_EXTRACTED_CHARS));
+  // The shared request budget may be smaller than the standalone ZIP budget;
+  // a single entry can never legitimately exceed it in UTF-8 worst case.
+  const entryByteCap = Math.min(MAX_ZIP_ENTRY_BYTES, maxChars * 4);
   const bytes = new Uint8Array(await file.arrayBuffer());
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let eocd = -1;
@@ -1827,7 +1925,9 @@ async function extractZipText(file) {
     tooLarge: newZipBucket(),
     unreadable: newZipBucket(),
     ignored: newZipBucket(),
-    ignoredReasons: new Set() // which rules matched (node_modules/ ...), not file names
+    ignoredReasons: new Set(), // which rules matched (node_modules/ ...), not file names
+    entryByteCap,
+    maxChars,
   };
 
   while (offset + 46 <= bytes.length && entriesRead < entryCount) {
@@ -1877,7 +1977,7 @@ async function extractZipText(file) {
     // that decode to mojibake rather than real text. Fail with a clear
     // message instead.
     if (flags & 1) throw new Error(t(currentLang, "sp_zip_error_encrypted"));
-    if (uncompressedSize > MAX_ZIP_ENTRY_BYTES) { addToZipBucket(report.tooLarge, name); continue; }
+    if (uncompressedSize > entryByteCap) { addToZipBucket(report.tooLarge, name); continue; }
     if (localOffset + 30 > bytes.length || readU32(view, localOffset) !== 0x04034b50) { addToZipBucket(report.unreadable, name); continue; }
 
     const localNameLen = readU16(view, localOffset + 26);
@@ -1892,7 +1992,7 @@ async function extractZipText(file) {
     const compressed = bytes.slice(dataStart, dataEnd);
     let content;
     try {
-      content = method === 0 ? compressed : await inflateRaw(compressed);
+      content = method === 0 ? compressed : await inflateRaw(compressed, entryByteCap);
     } catch (err) {
       // No DecompressionStream at all is a limit of the browser, not damage to this
       // entry: that still fails the attachment, with its own message.
@@ -1907,12 +2007,12 @@ async function extractZipText(file) {
     const text = decodeTextBytes(content);
     if (!text.trim()) continue;
     // totalChars is below the budget here: limitReached is set the moment it is used up.
-    const remain = MAX_TOTAL_EXTRACTED_CHARS - totalChars;
+    const remain = maxChars - totalChars;
     const kept = text.length > remain ? text.slice(0, remain) : text;
     if (kept.length < text.length) addToZipBucket(report.truncated, name);
     parts.push(`\n===== ZIP ENTRY: ${name} =====\n${kept}`);
     totalChars += kept.length;
-    if (totalChars >= MAX_TOTAL_EXTRACTED_CHARS) limitReached = true;
+    if (totalChars >= maxChars) limitReached = true;
   }
 
   return { text: parts.join("\n"), report };
@@ -1923,7 +2023,7 @@ async function extractZipText(file) {
 // English note that goes first in the attachment text, so the model does not
 // mistake a partial ZIP for the whole archive). Returns null if nothing was left out.
 function describeZipReport(report) {
-  const kb = Math.round(MAX_ZIP_ENTRY_BYTES / 1000);
+  const kb = Math.round((report.entryByteCap || MAX_ZIP_ENTRY_BYTES) / 1000);
   // `list` is what is shown (file names), `more` how many are not shown.
   const fromBucket = (key, model, bucket) => ({ label: t(currentLang, key), model, count: bucket.count, list: bucket.names, more: bucket.count - bucket.names.length });
   const rules = [...report.ignoredReasons];
@@ -1943,15 +2043,15 @@ function describeZipReport(report) {
     detail: [
       ...rows.map((row) => `${row.label}: ${listed(row)}`),
       "",
-      t(currentLang, "attachment_note_limits_template", { entries: MAX_ZIP_ENTRIES, chars: MAX_TOTAL_EXTRACTED_CHARS, kb })
+      t(currentLang, "attachment_note_limits_template", { entries: MAX_ZIP_ENTRIES, chars: report.maxChars || MAX_TOTAL_EXTRACTED_CHARS, kb })
     ].join("\n"),
     forModel: `\n===== ZIP NOTE =====\nNot every file of this ZIP is included below. Left out - ${rows.map((row) => `${row.model}: ${row.count} (${listed(row)})`).join("; ")}.`
   };
 }
 
 // The same three texts for a plain text file that was cut at the character limit.
-function describeTextTruncation(totalChars) {
-  const kept = MAX_TOTAL_EXTRACTED_CHARS;
+function describeTextTruncation(totalChars, keptChars = MAX_TOTAL_EXTRACTED_CHARS) {
+  const kept = Math.max(0, Math.min(keptChars, totalChars));
   return {
     items: t(currentLang, "attachment_note_truncatedChars_template", { kept, total: totalChars }),
     detail: "",
@@ -1973,7 +2073,9 @@ function setAttachmentStatus(item, status, message = "") {
 // { totalChars }), not text, so renderAttachments() can build it again in the
 // current language when the interface language changes.
 function buildAttachmentNote(note) {
-  const text = note.report ? describeZipReport(note.report) : describeTextTruncation(note.totalChars);
+  const text = note.report
+    ? describeZipReport(note.report)
+    : describeTextTruncation(note.totalChars, note.keptChars);
   const el = document.createElement("div");
   el.className = "attachment-note";
   el.textContent = `⚠️ ${t(currentLang, "attachment_note_heading")} — ${text.items}`;
@@ -2023,8 +2125,16 @@ function renderAttachments() {
 }
 
 async function processFile(file) {
+  if (attachments.length >= MAX_ATTACHMENTS) {
+    addBubble("error", t(currentLang, "attachment_error_tooMany_template", { max: String(MAX_ATTACHMENTS) }));
+    return;
+  }
   const item = { id: `${Date.now()}-${Math.random()}`, name: file.name, status: "reading", kind: "file", text: "" };
   attachments.push(item);
+  // Budgets are shared by every attachment in this request, not per file.
+  // Error chips are already excluded from the request, so they must not consume
+  // the budget; reading chips do, because they may become ready later.
+  const others = () => attachments.filter((attachment) => attachment !== item && attachment.status !== "error");
   renderAttachments();
   try {
     if (file.size > MAX_FILE_BYTES) throw new Error(t(currentLang, "attachment_error_tooLarge"));
@@ -2039,6 +2149,11 @@ async function processFile(file) {
         reader.readAsDataURL(file);
       });
       if (!dataUrl.startsWith("data:image/")) throw new Error(t(currentLang, "attachment_error_unableToEncodeImage"));
+      if (!fitsImageBudget(others(), dataUrlByteLength(dataUrl))) {
+        throw new Error(t(currentLang, "attachment_error_totalImageLimit_template", {
+          mb: String(Math.round(MAX_TOTAL_ATTACHMENT_IMAGE_BYTES / (1024 * 1024))),
+        }));
+      }
       item.kind = "image";
       item.text = "";
       item.dataUrl = dataUrl;
@@ -2046,20 +2161,30 @@ async function processFile(file) {
       return;
     }
     if (isTextFile(file)) {
+      const remaining = remainingTextChars(others());
+      if (remaining <= 0) {
+        throw new Error(t(currentLang, "attachment_error_totalTextLimit_template", { chars: String(MAX_TOTAL_EXTRACTED_CHARS) }));
+      }
       item.text = decodeTextBytes(new Uint8Array(await file.arrayBuffer()));
       if (!item.text.trim()) throw new Error(t(currentLang, "attachment_error_emptyFile"));
       let cutFrom = 0;
-      if (item.text.length > MAX_TOTAL_EXTRACTED_CHARS) {
+      let keptChars = MAX_TOTAL_EXTRACTED_CHARS;
+      if (item.text.length > remaining) {
         cutFrom = item.text.length;
-        item.text = `${describeTextTruncation(cutFrom).forModel}\n${item.text.slice(0, MAX_TOTAL_EXTRACTED_CHARS)}`;
+        keptChars = remaining;
+        item.text = `${describeTextTruncation(cutFrom, keptChars).forModel}\n${item.text.slice(0, keptChars)}`;
       }
       item.kind = "text";
       setAttachmentStatus(item, "ready", t(currentLang, "attachment_ready"));
-      setAttachmentNote(item, cutFrom ? { totalChars: cutFrom } : null);
+      setAttachmentNote(item, cutFrom ? { totalChars: cutFrom, keptChars } : null);
       return;
     }
     if (isZipFile(file)) {
-      const { text, report } = await extractZipText(file);
+      const remaining = remainingTextChars(others());
+      if (remaining <= 0) {
+        throw new Error(t(currentLang, "attachment_error_totalTextLimit_template", { chars: String(MAX_TOTAL_EXTRACTED_CHARS) }));
+      }
+      const { text, report } = await extractZipText(file, remaining);
       const note = describeZipReport(report);
       if (!text.trim()) {
         // Nothing was read. If text files were left out (ignored, too large ...) say so: "no text files" alone would be wrong.
@@ -2082,7 +2207,11 @@ uploadBtn.addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", async () => {
   const files = [...fileInput.files];
   fileInput.value = "";
-  for (const file of files) await processFile(file);
+  const room = Math.max(0, MAX_ATTACHMENTS - attachments.length);
+  if (files.length > room) {
+    addBubble("notice", t(currentLang, "attachment_error_tooMany_template", { max: String(MAX_ATTACHMENTS) }));
+  }
+  for (const file of files.slice(0, room)) await processFile(file);
 });
 
 // ---------- Voice input (speech-to-text) ----------
@@ -2409,6 +2538,24 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   }
   // Not before init() has reset the topic and opened the port.
   if (!initCoreDone) return;
+  // Final request-wide guard. processFile() enforces these budgets while
+  // reading, but this also covers restored/legacy attachment state and keeps
+  // the provider payload bounded if a future code path adds attachments.
+  const readyForBudget = attachments.filter((a) => a.status === "ready");
+  // The note/header text prepended to an attachment (and the per-file headers
+  // added by attachmentContextText) is small but real. A ZIP with the maximum
+  // 80 entries can add roughly 12k characters of entry headers and notes, so
+  // allow a bounded metadata overhead beyond the raw-text budget.
+  if (attachmentTextChars(readyForBudget) > MAX_TOTAL_EXTRACTED_CHARS + 20000) {
+    addBubble("error", t(currentLang, "attachment_error_totalTextLimit_template", { chars: String(MAX_TOTAL_EXTRACTED_CHARS) }));
+    return;
+  }
+  if (attachmentImageBytes(readyForBudget) > MAX_TOTAL_ATTACHMENT_IMAGE_BYTES) {
+    addBubble("error", t(currentLang, "attachment_error_totalImageLimit_template", {
+      mb: String(Math.round(MAX_TOTAL_ATTACHMENT_IMAGE_BYTES / (1024 * 1024))),
+    }));
+    return;
+  }
 
   const selectedModel = getSelectedModel();
   // Text-only models (GPT-OSS) reject any request containing an image part with
@@ -2571,24 +2718,32 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       ? `${baseQuestionForApi}\n\n[CURRENT PAGE VISUALS]\n${pageVisualInputCount} current-page visual input${pageVisualInputCount === 1 ? " is" : "s are"} attached. Analyze and incorporate the visible page images when they are relevant to the requested summary, translation, explanation, key points, or fact check. Do not describe images from earlier conversation turns.\n[/CURRENT PAGE VISUALS]`
       : baseQuestionForApi;
 
-    // Tell the model explicitly when the page has changed since its last
-    // answer in this conversation. history[].pageContext (title/url only, set
-    // below and persisted via toStoredMessage) records which page, if any, was
-    // used for each earlier user message; find the most recent one before this
-    // request. A plain "ignore old page content" reminder is easy for a model
-    // to under-weight against a conversation history full of the previous
-    // page's actual content - naming the specific earlier page and contrasting
-    // it with the current one (in pageContextInstruction(), background.js) is
-    // a much harder signal to miss. Only attached when a change is actually
-    // detected (different URL), so a same-page follow-up ("tell me more")
-    // isn't cluttered with an irrelevant note.
-    const previousPageContext = history
-      .slice(0, -1)
-      .reverse()
-      .find((h) => h.role === "user" && h.pageContext)?.pageContext || null;
-    history[history.length - 1].pageContext = pageContextValid ? { title: pageContext.title, url: pageContext.url } : null;
-    if (pageContextValid && previousPageContext && previousPageContext.url !== pageContext.url) {
-      pageContext = { ...pageContext, previousPage: previousPageContext };
+    // Page-context epoch. A page change starts a new epoch, and every later
+    // request in that epoch sends ONLY turns from the epoch. Doing this on the
+    // switch request alone was not enough: the next follow-up saw the previous
+    // page's assistant answer again (the model had already forgotten the
+    // contrastive "page changed" hint). tabId is included so two tabs with the
+    // same URL are still a page change.
+    const epochInfo = resolveContextEpoch(history, pageContextValid ? pageContext : null);
+    history[history.length - 1].pageContext = pageContextValid
+      ? {
+          title: pageContext.title,
+          url: pageContext.url,
+          ...(Number.isInteger(pageContext.tabId) ? { tabId: pageContext.tabId } : {}),
+        }
+      : null;
+    history[history.length - 1].contextEpoch = epochInfo.epoch;
+    if (epochInfo.changed && epochInfo.previousPage) {
+      pageContext = { ...pageContext, previousPage: epochInfo.previousPage };
+    }
+    const historyForApi = history
+      .slice(epochInfo.start, -1)
+      .slice(-(MAX_HISTORY_TURNS * 2));
+    if (epochInfo.changed) {
+      // Persist the new epoch boundary now, not only on DONE: a failed request
+      // with no assistant text may never reach the normal save, and the next
+      // reload would otherwise treat the page-change turn as legacy epoch 0.
+      saveConversations().catch((err) => console.error("[AI Assistant] Unable to save the page-context boundary:", err));
     }
 
     // Markdown sources are shown rendered (headings, lists, tables, links);
@@ -2607,15 +2762,10 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
         // present.
         includePageContext: shouldIncludePageContext && !sensitiveBlocked,
         pageContext: shouldIncludePageContext && !sensitiveBlocked ? pageContext : null,
-        // When the user changes pages, do not send the previous page's
-        // conversation turns to the model. The UI history remains intact, but
-        // old assistant answers can themselves contain facts from Page B and
-        // therefore act as stale page context even when the new Page C text is
-        // supplied correctly. A page change starts a fresh model context; normal
-        // follow-up questions on the same page retain conversation history.
-        history: (pageContextValid && previousPageContext && pageContext.url !== previousPageContext.url)
-          ? []
-          : getApiHistory().slice(0, -1),
+        // Only turns from the current page-context epoch. The UI history keeps
+        // everything, but a previous page's assistant answers must not return
+        // on the next follow-up after a page change.
+        history: historyForApi,
         images: [
           ...readyAttachments.filter((a) => a.kind === "image" && a.dataUrl).map((a) => ({ name: a.name, dataUrl: a.dataUrl })),
           ...automaticPageImages,
@@ -2896,17 +3046,8 @@ pageContextAllowBtn.addEventListener("click", async () => {
   await refreshActivePageContext();
 });
 
-includeContextToggle.addEventListener("change", async () => {
-  try { await chrome.storage.local.set({ [INCLUDE_CONTEXT_STORAGE_KEY]: includeContextToggle.checked }); } catch {}
-  // Mirrored to the IndexedDB recovery layer: after an unexpected storage
-  // reset the toggle must come back as the user left it, never silently
-  // re-enable page reading via the ON default.
-  saveSettingsBackup({ [INCLUDE_CONTEXT_STORAGE_KEY]: includeContextToggle.checked }).catch(() => {});
-  if (includeContextToggle.checked) {
-    await refreshActivePageContext();
-  } else {
-    updateContextBar(null);
-  }
+includeContextToggle.addEventListener("change", () => {
+  void persistIncludeContextPreference();
 });
 
 // Keep the displayed page context synchronized with the browser tab the user
@@ -2987,6 +3128,7 @@ function setInitLocked() {
   quickActionButtons.forEach((button) => { button.disabled = true; });
   modelSelect.disabled = true;
   uploadBtn.disabled = true;
+  includeContextToggle.disabled = true;
   if (SpeechRecognitionCtor) {
     micBtn.disabled = true;
     micLangBtn.disabled = true;
@@ -2994,6 +3136,9 @@ function setInitLocked() {
 }
 
 async function init() {
+  // Privacy first: know whether page reading is allowed before the composer is
+  // unlocked, and before any other await can fail and land in the catch below.
+  await loadIncludeContextPreference();
   populateModelSelect();
   // Render the selector immediately so the control is never dependent on the
   // timing of asynchronous model/storage initialization.
@@ -3014,13 +3159,9 @@ async function init() {
   scheduleHistoryRender();
   ensurePort();
   initCoreDone = true;
+  includeContextToggle.disabled = false;
   if (!isStreaming) setStreaming(false);
-  try {
-    // "Read current page" defaults to ON, but an explicit opt-out is
-    // remembered across sessions (it used to be reset to ON on every open).
-    const saved = (await chrome.storage.local.get(INCLUDE_CONTEXT_STORAGE_KEY))[INCLUDE_CONTEXT_STORAGE_KEY];
-    includeContextToggle.checked = saved !== false;
-  } catch {}
+  warnIncludeContextPreference();
   await consumePendingContextAction();
   if (includeContextToggle.checked) {
     await refreshActivePageContext();
@@ -3035,6 +3176,8 @@ initPromise = init().catch((err) => {
     initCoreDone = true;
     if (!isStreaming) setStreaming(false);
   }
+  includeContextToggle.disabled = false;
+  warnIncludeContextPreference();
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {

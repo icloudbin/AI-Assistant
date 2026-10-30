@@ -4,6 +4,18 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Fix: P2 deep-review batch - page-context epochs, init privacy ordering, live settings sync, cross-panel history writes, stream timeouts, attachment budgets, toggle persistence (v1.10.120)
+
+- **P2-1 - Page-context epoch.** A page change reset the model history only on the switch request; the next follow-up sent the old page's assistant answer again. `conversation-store.js` now assigns a persisted `contextEpoch` to each user turn, derives epochs for legacy conversations from their pageContext transitions, and `handleSubmit` sends only turns from the current epoch. `tabId` is recorded too, so two tabs with the same URL are a page change. The new page-context boundary is saved immediately, not only on DONE, so a failed request cannot lose it.
+- **P2-2 - Init privacy ordering.** The panel now reads `includeCurrentPageContext` before `initCoreDone`/`setStreaming(false)` and before any other failing await. A read failure (or a 5 s timeout) fails safe: page reading is off for the session and a localized notice is shown, instead of falling back to the HTML default ON.
+- **P2-3 - Live settings sync.** The side panel listens for `includeCurrentPageContext` storage changes, so a Settings import or IndexedDB recovery updates an already-open panel instead of leaving a stale checked box that would send the page anyway.
+- **P2-4 - Cross-panel history writes.** Conversation saves now run under a `Web Locks` read-merge-write lock shared by every panel and the Settings page; this closes the window where two windows read the old list and the later write dropped the other window's conversation. Two copies of the same current conversation are merged message-by-message instead of one copy overwriting the other. Settings Restore/Delete use the same lock.
+- **P2-5 - Stream timeout.** Provider streams now have an idle watchdog (90 s without a chunk) and a total deadline (15 min); a stalled request is aborted, partial text is kept, and a localized error is shown. The request also checks for abort after its early non-abortable awaits.
+- **P2-6 - Request-wide attachment budgets.** New `sidepanel/attachment-budget.js` caps one request at 10 attachments, 180,000 shared text/zip characters, and 24 MB of image bytes; text and ZIP extraction use the remaining shared budget, and submit has a final guard. Localized errors explain which limit was hit.
+- **P2-7 - Toggle persistence.** Privacy toggles now verify their storage write, roll the checkbox back and show an error if it failed, and only then update the recovery mirror. A failed PII-filter save can no longer leave the UI claiming redaction is on while requests are unredacted.
+- **Tests.** `test-conversation-store.mjs` covers page-context epochs (same page, switch, follow-up, switch back, same-URL different tab, legacy conversations), same-conversation message merging, and the write lock. New `test-attachment-budget.mjs`. `test-openai-compatible.mjs` covers the stream timeout. i18n keys added in all 6 languages; `check-package.mjs` green.
+- Build bumped to 1.10.120.
+
 ## Fix: round-8 deep review - translation token collision, dead-port research notice, misleading rate-limit hint (v1.10.119)
 
 Round 8 of the full-code review (~13,700 lines re-read end to end; findings verified by execution with throwaway harnesses before fixing) confirmed three defects: 0 P1, 1 P2, 2 P3.

@@ -69,6 +69,7 @@ const RUNTIME_FILES = [
   "sidepanel/mic-permission.css",
   "sidepanel/mic-permission.js",
   "sidepanel/history-manager.js",
+  "sidepanel/attachment-budget.js",
   "sidepanel/rendering/markdown.js",
   "icons/icon16.png",
   "icons/icon48.png",
