@@ -2,7 +2,7 @@
 // Unit tests for pii-filter.js: what must be redacted, what must be left alone,
 // numbered placeholders and restoring the real values in a reply.
 // Run:  node scripts/test-pii-filter.mjs
-import { redactSensitive as R, createRedactionSession, restorePlaceholders, PlaceholderRestorer } from "../privacy/pii-filter.js";
+import { redactSensitive as R, createRedactionSession, restorePlaceholders, PlaceholderRestorer, redactOutbound } from "../privacy/pii-filter.js";
 
 let failed = 0;
 const check = (name, ok, extra = "") => {
@@ -132,6 +132,38 @@ check("without a session plain placeholders are used", R("jane@x.com") === "[EMA
   const out = R(input, s);
   check("cookie header keeps an earlier placeholder", /\[JWT#\d+\]/.test(out) && !out.startsWith("Cookie: [COOKIE]"), out);
   check("cookie header value restores completely", restorePlaceholders(out, s) === input, restorePlaceholders(out, s));
+}
+
+// ---- literal placeholder-shaped text must not collide with generated ones ----
+{
+  const s = createRedactionSession();
+  const input = "Use [EMAIL#1] literally; the real mail is a@b.com";
+  const out = R(input, s);
+  check("literal [EMAIL#1] is reserved", out.includes("[EMAIL#1]") && out.includes("[EMAIL#2]"), out);
+  check("literal placeholder round-trips untouched", restorePlaceholders(out, s) === input, restorePlaceholders(out, s));
+}
+{
+  // Reservation spans the whole payload: a page containing [EMAIL#1] cannot
+  // steal the number a real email in the question would use.
+  const s = createRedactionSession();
+  const out = redactOutbound({
+    question: "mail a@b.com",
+    pageContext: { text: "page literally says [EMAIL#1]" },
+  }, s);
+  check("payload-wide reservation skips the literal number", out.question.includes("a@b.com") === false && out.question.includes("[EMAIL#2]"), out.question);
+  check("payload-wide reservation leaves page literal", out.pageContext.text.includes("[EMAIL#1]"), out.pageContext.text);
+  check("payload-wide restore is clean", restorePlaceholders(out.question, s) === "mail a@b.com", restorePlaceholders(out.question, s));
+}
+// ---- generic payload redaction covers fields added later ----
+{
+  const s = createRedactionSession();
+  const out = redactOutbound({
+    question: "mail a@b.com",
+    extraFutureField: { note: "call 4155550132" },
+    images: [{ name: "x.png", dataUrl: "data:image/png;base64,AAAA" }],
+  }, s);
+  check("unknown text field is redacted", !out.extraFutureField.note.includes("4155550132"), out.extraFutureField.note);
+  check("image data is left untouched", out.images[0].dataUrl === "data:image/png;base64,AAAA");
 }
 
 process.exit(failed ? 1 : 0);

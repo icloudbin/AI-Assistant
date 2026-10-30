@@ -243,5 +243,29 @@ assert.equal(openAICompatibleStreamError({ error: { code: 500 } }), '{"code":500
   try { controller.close(); } catch {}
 }
 
-console.log("OK: openai-compatible — SSE reassembly, in-stream error release, empty-stream guard, stream-cut detection, stream timeout, error mapping.");
+// ---------- HTTP 200 JSON error body and array content parts ----------
+{
+  const ctx = makeCtx();
+  const body = new TextEncoder().encode('{"error":{"message":"upstream maintenance"}}');
+  const stream = new ReadableStream({
+    start(controller) { controller.enqueue(body); controller.close(); },
+  });
+  const resp = { body: stream, headers: { get: () => "application/json" } };
+  await assert.rejects(
+    readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError),
+    /upstream maintenance/,
+    "a 200 JSON error body surfaces the provider error"
+  );
+}
+{
+  const ctx = makeCtx();
+  const { resp } = sse([
+    'data: {"choices":[{"delta":{"content":[{"type":"text","text":"Hel"},{"type":"text","text":"lo"}]}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}]}\n\n',
+  ]);
+  await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
+  assert.equal(ctx.chunks.join(""), "Hello!", "content-part arrays are flattened");
+}
+
+console.log("OK: openai-compatible — SSE reassembly, in-stream error release, empty-stream guard, stream-cut detection, stream timeout, JSON error body, content-part arrays, error mapping.");
 process.exit(0);

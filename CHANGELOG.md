@@ -4,6 +4,34 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Fix: P3 deep-review batch - selection-safe final render, extractor/privacy hardening, context-bar and i18n state, context-action queue, save/async robustness, voice edits, reader performance, Unicode and accessibility (v1.10.121)
+
+- **P3-1** The terminal DONE/ERROR repaint no longer rewrites the assistant bubble while the user is selecting text in it; the finished text is applied when the selection collapses, and the reply is still saved to history immediately.
+- **P3-2** Synology MailPlus and Proton Mail extraction now goes through `capPageText()`; `makeContext()` also sets `truncated` when its own slice shortens the text, so long emails are no longer silently cut.
+- **P3-3** Markdown extraction classifies noise with tokenized words instead of substrings (`cookie-recipe`/`newsletter-archive` survive), explicitly skips closed `<details>` bodies, and has a 200-level recursion cap for `mdBlocksOf`/`mdList`/`mdInlineList`.
+- **P3-4** Amazon extraction keeps only the outermost matching product modules (no duplicate nested text), excludes those modules from the full-page fallback, and accepts only real Amazon domains (not `amazon.evil.com`).
+- **P3-5** `redactOutbound()` is now generic over the whole ASK payload (excluding binary image fields), so a field added later is covered by default; the dead `redactPayload()` was removed and `background.js` consumes the redacted payload.
+- **P3-6** Literal placeholder-shaped text in the source now reserves its number before redaction (`[EMAIL#1]` in a page cannot collide with a generated `[EMAIL#1]`); reservation is payload-wide and tested.
+- **P3-7** Markdown tables keep data cells beyond the header count, preserve column alignment (`align` is allowed by the sanitizer), and `content.js` escapes literal pipes as `\|` instead of rewriting them to `/`.
+- **P3-8** Multi-line user messages render with `white-space: pre-wrap`; Shift+Enter lines and the attachment note no longer collapse.
+- **P3-9** The context bar now renders from one stored state: a capture failure hides the stale "Allow site" button, turning page reading off invalidates an in-flight refresh so "Will send…" cannot reappear, and the allow button grants the host the bar actually showed.
+- **P3-10** Language changes repaint the context bar, the live mic status, and remote-image labels, not just static text/history/attachments/copy buttons.
+- **P3-11** Model selection restored from a conversation (and the canonical default) is mirrored to the IndexedDB recovery store, not only manual dropdown changes.
+- **P3-12** Removed the unused `activate`/`syncModel` parameters from `loadConversations()` and corrected the comments; the function only refreshes the saved list/dropdown.
+- **P3-13** `THEME_STORAGE_KEY`, `INCLUDE_CONTEXT_STORAGE_KEY`, `PAGE_VISUALS_STORAGE_KEY`, `PII_FILTER_STORAGE_KEY`, `MIC_LANG_STORAGE_KEY`, and `COMPOSER_HEIGHT_STORAGE_KEY` now live in `storage-keys.js` and are imported everywhere.
+- **P3-14** Context-menu actions are a bounded queue (not one global slot); claim happens under a Web Lock, validates the tab before removing, and a payload still works if the background storage append failed.
+- **P3-15** Translation batches no longer receive the misleading "page too large" hint for a 413/429; the hint stays for normal page requests.
+- **P3-16** History save only applies lossy quota compression on `QuotaExceededError`/`QUOTA_BYTES`; other errors surface a localized "history could not be saved" bubble instead of only logging.
+- **P3-17** Floating initialization promises are caught (theme/language load, conversation pointer write, mic permission tab, options initialization, API/theme/language saves, open-settings fallback).
+- **P3-18** The page-reading toggle and allow button are disabled while a request streams, so their UI cannot contradict what that request already sent.
+- **P3-19** Dictation preserves text the user types while listening (new final transcripts append instead of overwriting) and waits for the stored recognition language before starting the recognizer.
+- **P3-20** Reader-mode scoring caches prose/measurement results and enforces a 250k-node budget so nested candidates cannot block the tab main thread indefinitely.
+- **P3-21** All text caps use a surrogate-safe `cutAtCodePointBoundary()` helper (`content.js` keeps a local copy because it is a classic script).
+- **P3-22** Accessibility: chat log is a live log, context bar is a status region, question/mic controls have accessible names, the delete dialog is an alertdialog with focus trap/restore and inert background, the resize separator exposes value bounds, and reduced-motion disables the pending blink.
+- **Minor** bounded the no-body image read, surfaced HTTP-200 JSON error bodies, flattened content-part arrays, corrected ZIP "ignored rules" overflow text, accepted extension-defined image MIME when the file has no type, and aligned the Fact Check/privacy docs.
+- **Tests** `test-openai-compatible` adds JSON-error/content-array cases; `test-pii-filter` adds literal-placeholder and generic-field cases; `test-models` adds surrogate cuts; `test-conversation-store` covers epochs/merge/lock; `check-package` passes 6 languages × 230 keys; Chrome harness 11/11. New `scripts/test-extension-e2e.mjs` loads the unpacked extension in real Chrome via the CDP `Extensions.loadUnpacked` command (branded Chrome ignores `--load-extension`) and verifies the real service worker, side panel, options page, content script, storage sync, context-action queue, Proton cap and FETCH_IMAGE guard against both the working tree and the extracted package: 29/29 checks.
+- Build bumped to 1.10.121.
+
 ## Fix: P2 deep-review batch - page-context epochs, init privacy ordering, live settings sync, cross-panel history writes, stream timeouts, attachment budgets, toggle persistence (v1.10.120)
 
 - **P2-1 - Page-context epoch.** A page change reset the model history only on the switch request; the next follow-up sent the old page's assistant answer again. `conversation-store.js` now assigns a persisted `contextEpoch` to each user turn, derives epochs for legacy conversations from their pageContext transitions, and `handleSubmit` sends only turns from the current epoch. `tabId` is recorded too, so two tabs with the same URL are a page change. The new page-context boundary is saved immediately, not only on DONE, so a failed request cannot lose it.

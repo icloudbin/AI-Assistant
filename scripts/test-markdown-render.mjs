@@ -69,6 +69,10 @@ const tableWithCodePipe = markdownToHtml("| Code | Description |\n| --- | --- |\
 assert.ok(tableWithCodePipe.includes("<code>a | b</code>") && tableWithCodePipe.includes("<td>pipe in code</td>"), "table cells respect pipes inside code spans");
 const tableWithEscapedPipe = markdownToHtml("| Symbol | Description |\n| --- | --- |\n| \\| | literal pipe |");
 assert.ok(tableWithEscapedPipe.includes("<td>|</td>") && tableWithEscapedPipe.includes("<td>literal pipe</td>"), "table cells respect escaped pipes");
+const tableWithExtraCells = markdownToHtml("| A | B |\n| --- | --- |\n| 1 | 2 | 3 | 4 |");
+assert.ok(tableWithExtraCells.includes("<td>3</td>") && tableWithExtraCells.includes("<td>4</td>"), "data cells beyond the header count are kept");
+const alignedTable = markdownToHtml("| L | C | R |\n| :--- | :---: | ---: |\n| a | b | c |");
+assert.ok(alignedTable.includes('<th align="left">L</th>') && alignedTable.includes('<th align="center">C</th>') && alignedTable.includes('<th align="right">R</th>'), "column alignment is preserved");
 
 // ---------- block: a paragraph's inline content is still escaped ----------
 assert.ok(markdownToHtml("hello <script>alert(1)</script>").includes("&lt;script&gt;"), "raw HTML in prose is escaped");

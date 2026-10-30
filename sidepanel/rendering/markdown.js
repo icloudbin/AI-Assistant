@@ -339,14 +339,30 @@ function markdownToHtml(markdown) {
       flushParagraph();
       flushList();
       const headers = splitTableRow(line);
+      const separator = splitTableRow(lines[i + 1]);
+      const aligns = separator.map((cell) => {
+        const value = cell.trim();
+        if (value.startsWith(":") && value.endsWith(":")) return "center";
+        if (value.endsWith(":")) return "right";
+        if (value.startsWith(":")) return "left";
+        return "";
+      });
       i += 2;
       const rows = [];
       while (i < lines.length && lines[i].trim() && lines[i].includes("|")) {
         rows.push(splitTableRow(lines[i]));
         i++;
       }
-      const headHtml = headers.map((cell) => `<th>${inlineMarkdownToHtml(cell)}</th>`).join("");
-      const bodyHtml = rows.map((row) => `<tr>${headers.map((_, idx) => `<td>${inlineMarkdownToHtml(row[idx] || "")}</td>`).join("")}</tr>`).join("");
+      // GFM allows data rows with more cells than the header; keep them
+      // instead of silently dropping the extras.
+      const width = Math.max(headers.length, ...rows.map((row) => row.length));
+      const pad = (row) => Array.from({ length: width }, (_, index) => row[index] || "");
+      const cell = (tag, value, index) =>
+        `<${tag}${aligns[index] ? ` align="${aligns[index]}"` : ""}>${inlineMarkdownToHtml(value)}</${tag}>`;
+      const headHtml = pad(headers).map((value, index) => cell("th", value, index)).join("");
+      const bodyHtml = rows
+        .map((row) => `<tr>${pad(row).map((value, index) => cell("td", value, index)).join("")}</tr>`)
+        .join("");
       out.push(`<div class="table-wrap"><table><thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`);
       continue;
     }

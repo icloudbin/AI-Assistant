@@ -155,6 +155,7 @@ body.panel-resizing * { cursor: row-resize !important; user-select: none !import
 .bubble { max-width: 92%; padding: 8px 10px; border-radius: var(--radius); line-height: 1.5; }
 .bubble-text.plain-text { white-space: pre-wrap; tab-size: 4; }
 .bubble-text { word-break: break-word; overflow-wrap: anywhere; user-select: text; }
+.bubble.user .bubble-text { white-space: pre-wrap; tab-size: 4; }
 .bubble-text p { margin: 0 0 8px; }
 .bubble-text p:last-child { margin-bottom: 0; }
 .bubble-text h1, .bubble-text h2, .bubble-text h3, .bubble-text h4, .bubble-text h5, .bubble-text h6 {
@@ -224,6 +225,9 @@ body.panel-resizing * { cursor: row-resize !important; user-select: none !import
 .bubble.notice { align-self: flex-start; font-size: 0.9em; opacity: 0.85; border: 1px dashed var(--border); background: transparent; }
 .bubble.pending::after { content: "▍"; animation: blink 1s step-start infinite; }
 @keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .bubble.pending::after { animation: none; }
+}
 
 .bubble-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .bubble-header .model-tag { margin-bottom: 0; }

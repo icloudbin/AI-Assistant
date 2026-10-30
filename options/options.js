@@ -8,10 +8,22 @@ import {
   LANGUAGE_STORAGE_KEY,
   normalizeLanguage,
 } from "../i18n.js";
-import { AUTO_WEB_RESEARCH_KEY, HISTORY_STORAGE_KEY, MAX_SAVED_CONVERSATIONS, PREFERRED_TRANSLATION_LANGUAGE_KEY } from "../storage-keys.js";
+import {
+  AUTO_WEB_RESEARCH_KEY,
+  HISTORY_STORAGE_KEY,
+  MAX_SAVED_CONVERSATIONS,
+  PREFERRED_TRANSLATION_LANGUAGE_KEY,
+  THEME_STORAGE_KEY,
+  PII_FILTER_STORAGE_KEY,
+  PAGE_VISUALS_STORAGE_KEY,
+  MIC_LANG_STORAGE_KEY,
+  COMPOSER_HEIGHT_STORAGE_KEY,
+  INCLUDE_CONTEXT_STORAGE_KEY,
+} from "../storage-keys.js";
 import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-storage.js";
 import { encryptSecrets, decryptSecrets, MIN_PASSPHRASE_LENGTH } from "../settings-crypto.js";
 import { withHistoryLock } from "../conversation-store.js";
+import { cutAtCodePointBoundary } from "../models.js";
 
 const apiKeyInput = document.getElementById("apiKey");
 const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
@@ -20,6 +32,15 @@ const tavilyApiKeyInput = document.getElementById("tavilyApiKey");
 const customPromptInput = document.getElementById("customPrompt");
 const msgEl = document.getElementById("msg");
 let persistToggleMsgTimer = null;
+
+function showSettingsError(err) {
+  msgEl.style.color = "#f55b5b";
+  msgEl.textContent = t(currentLang, "settings_saveFailed_template", {
+    message: err?.message || t(currentLang, "unknownError"),
+  });
+  clearTimeout(persistToggleMsgTimer);
+  persistToggleMsgTimer = setTimeout(() => { msgEl.textContent = ""; }, 5000);
+}
 
 // Privacy toggles save immediately. The checkbox is updated by the user before
 // this runs, so a failed write must be rolled back instead of leaving the UI
@@ -37,12 +58,7 @@ async function persistToggle(key, checkbox) {
   } catch (err) {
     checkbox.checked = !value;
     console.error(`[AI Assistant] Unable to save ${key}:`, err);
-    msgEl.style.color = "#f55b5b";
-    msgEl.textContent = t(currentLang, "settings_saveFailed_template", {
-      message: err?.message || t(currentLang, "unknownError"),
-    });
-    clearTimeout(persistToggleMsgTimer);
-    persistToggleMsgTimer = setTimeout(() => { msgEl.textContent = ""; }, 5000);
+    showSettingsError(err);
     return;
   } finally {
     checkbox.disabled = false;
@@ -57,16 +73,16 @@ const piiFilterToggle = document.getElementById("piiFilterToggle");
 // Privacy filter: on by default, saved immediately when toggled (and mirrored
 // to the IndexedDB recovery layer, so a storage reset cannot silently flip it
 // back to the default - see saveSettingsBackup).
-chrome.storage.local.get("piiFilterEnabled").then((s) => { piiFilterToggle.checked = s.piiFilterEnabled !== false; }).catch(() => {});
+chrome.storage.local.get(PII_FILTER_STORAGE_KEY).then((s) => { piiFilterToggle.checked = s[PII_FILTER_STORAGE_KEY] !== false; }).catch(() => {});
 piiFilterToggle.addEventListener("change", () => {
-  void persistToggle("piiFilterEnabled", piiFilterToggle);
+  void persistToggle(PII_FILTER_STORAGE_KEY, piiFilterToggle);
 });
 const pageVisualsToggle = document.getElementById("pageVisualsToggle");
 // Page screenshot/images with quick actions: OFF by default (images cannot be
 // run through the text privacy filter), saved immediately when toggled.
-chrome.storage.local.get("pageVisualsEnabled").then((s) => { pageVisualsToggle.checked = s.pageVisualsEnabled === true; }).catch(() => {});
+chrome.storage.local.get(PAGE_VISUALS_STORAGE_KEY).then((s) => { pageVisualsToggle.checked = s[PAGE_VISUALS_STORAGE_KEY] === true; }).catch(() => {});
 pageVisualsToggle.addEventListener("change", () => {
-  void persistToggle("pageVisualsEnabled", pageVisualsToggle);
+  void persistToggle(PAGE_VISUALS_STORAGE_KEY, pageVisualsToggle);
 });
 const autoWebResearchToggle = document.getElementById("autoWebResearchToggle");
 // Automatic web search (the question is sent to Tavily when the extension
@@ -147,8 +163,13 @@ async function loadPreferredTranslationLanguage() {
 
 preferredTranslationLanguageSelect.addEventListener("change", async () => {
   const value = preferredTranslationLanguageSelect.value;
-  await chrome.storage.local.set({ [PREFERRED_TRANSLATION_LANGUAGE_KEY]: value });
-  await saveSettingsBackup({ preferredTranslationLanguage: value });
+  try {
+    await chrome.storage.local.set({ [PREFERRED_TRANSLATION_LANGUAGE_KEY]: value });
+    await saveSettingsBackup({ [PREFERRED_TRANSLATION_LANGUAGE_KEY]: value });
+  } catch (err) {
+    console.error("[AI Assistant] Unable to save the preferred translation language:", err);
+    showSettingsError(err);
+  }
 });
 
 function applyLanguage(lang) {
@@ -166,9 +187,14 @@ async function loadLanguage() {
 
 languageSelect.addEventListener("change", async () => {
   const lang = languageSelect.value;
-  await chrome.storage.local.set({ [LANGUAGE_STORAGE_KEY]: lang });
-  await saveSettingsBackup({ [LANGUAGE_STORAGE_KEY]: lang });
-  applyLanguage(lang);
+  try {
+    await chrome.storage.local.set({ [LANGUAGE_STORAGE_KEY]: lang });
+    await saveSettingsBackup({ [LANGUAGE_STORAGE_KEY]: lang });
+    applyLanguage(lang);
+  } catch (err) {
+    console.error("[AI Assistant] Unable to save the UI language:", err);
+    showSettingsError(err);
+  }
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -193,7 +219,10 @@ async function initializeSettingsPage() {
   await loadTheme();
 }
 
-void initializeSettingsPage();
+void initializeSettingsPage().catch((err) => {
+  console.error("[AI Assistant] Settings initialization failed:", err);
+  showSettingsError(err);
+});
 
 async function loadSavedApiSettings() {
   await restoreSettingsFromBackupOnce();
@@ -220,7 +249,10 @@ async function loadSavedApiSettings() {
   customPromptInput.value = customPrompt || "";
 }
 
-void loadSavedApiSettings();
+void loadSavedApiSettings().catch((err) => {
+  console.error("[AI Assistant] Unable to load saved API settings:", err);
+  showSettingsError(err);
+});
 
 document.getElementById("save").addEventListener("click", async (event) => {
   event.preventDefault();
@@ -278,11 +310,13 @@ document.getElementById("save").addEventListener("click", async (event) => {
 // i18n. Everything the user actually sees on this page (status text, error
 // messages) is translated below.
 function sanitizeFilePart(text) {
-  return String(text || "Untitled")
-    .replace(/[\\/:*?"<>|\x00-\x1F]/g, "_")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 100) || "Untitled";
+  return cutAtCodePointBoundary(
+    String(text || "Untitled")
+      .replace(/[\\/:*?"<>|\x00-\x1F]/g, "_")
+      .replace(/\s+/g, " ")
+      .trim(),
+    100
+  ) || "Untitled";
 }
 
 function formatDate(timestamp) {
@@ -660,7 +694,7 @@ function makeRestoredTopicTitle(messages) {
     .filter(Boolean);
   if (!userTexts.length) return t(currentLang, "restoredConversationTitle");
   const words = userTexts.join(" ").split(/\s+/).filter(Boolean);
-  const title = words.slice(0, 10).join(" ").slice(0, 80).trim();
+  const title = cutAtCodePointBoundary(words.slice(0, 10).join(" "), 80).trim();
   return title || t(currentLang, "restoredConversationTitle");
 }
 
@@ -818,13 +852,21 @@ restoreHistoryBtn.addEventListener("click", () => restoreHistoryFile.click());
 restoreHistoryFile.addEventListener("change", restoreHistory);
 
 
+let deleteReturnFocus = null;
+const settingsCard = document.querySelector(".card");
+
 function openDeleteConfirmation() {
+  deleteReturnFocus = document.activeElement;
+  if (settingsCard) settingsCard.inert = true;
   deleteConfirm.classList.add("show");
   confirmNo.focus();
 }
 
 function closeDeleteConfirmation() {
   deleteConfirm.classList.remove("show");
+  if (settingsCard) settingsCard.inert = false;
+  if (deleteReturnFocus?.focus) deleteReturnFocus.focus();
+  deleteReturnFocus = null;
 }
 
 async function deleteAllHistory() {
@@ -857,12 +899,25 @@ confirmYes.addEventListener("click", deleteAllHistory);
 deleteConfirm.addEventListener("click", (event) => {
   if (event.target === deleteConfirm) closeDeleteConfirmation();
 });
+deleteConfirm.addEventListener("keydown", (event) => {
+  if (event.key !== "Tab") return;
+  const focusables = [confirmNo, confirmYes];
+  const index = focusables.indexOf(document.activeElement);
+  if (event.shiftKey) {
+    if (index <= 0) {
+      event.preventDefault();
+      confirmYes.focus();
+    }
+  } else if (index === focusables.length - 1) {
+    event.preventDefault();
+    confirmNo.focus();
+  }
+});
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && deleteConfirm.classList.contains("show")) closeDeleteConfirmation();
 });
 
 // ---------- Theme ----------
-const THEME_STORAGE_KEY = "themePreference";
 const themeButtons = [...document.querySelectorAll("[data-theme-choice]")];
 const deviceThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -888,9 +943,14 @@ async function loadTheme() {
 themeButtons.forEach((button) => {
   button.addEventListener("click", async () => {
     const preference = button.dataset.themeChoice;
-    await chrome.storage.local.set({ [THEME_STORAGE_KEY]: preference });
-    await saveSettingsBackup({ themePreference: preference });
-    applyTheme(preference);
+    try {
+      await chrome.storage.local.set({ [THEME_STORAGE_KEY]: preference });
+      await saveSettingsBackup({ [THEME_STORAGE_KEY]: preference });
+      applyTheme(preference);
+    } catch (err) {
+      console.error("[AI Assistant] Unable to save the theme:", err);
+      showSettingsError(err);
+    }
   });
 });
 
@@ -905,7 +965,10 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-loadTheme();
+loadTheme().catch((err) => {
+  console.error("[AI Assistant] Unable to load the theme:", err);
+  applyTheme("device");
+});
 
 // ---------- Settings backup ----------
 // Removing the extension from chrome://extensions deletes its entire
@@ -933,20 +996,20 @@ const SETTINGS_BACKUP_SECRET_KEYS = [
   "tavilyApiKey",
 ];
 const SETTINGS_BACKUP_PLAIN_KEYS = [
-  "piiFilterEnabled",
-  "pageVisualsEnabled",
+  PII_FILTER_STORAGE_KEY,
+  PAGE_VISUALS_STORAGE_KEY,
   AUTO_WEB_RESEARCH_KEY,
   // sidepanel.js's INCLUDE_CONTEXT_STORAGE_KEY: the "Read current page"
   // privacy choice must survive export/import - defaulting back to ON after
   // a restore would silently re-enable page sending.
-  "includeCurrentPageContext",
+  INCLUDE_CONTEXT_STORAGE_KEY,
   "customPrompt",
   THEME_STORAGE_KEY,
   LANGUAGE_STORAGE_KEY,
   PREFERRED_TRANSLATION_LANGUAGE_KEY,
   "selectedModelId",
-  "micRecognitionLang",
-  "composerHeight",
+  MIC_LANG_STORAGE_KEY,
+  COMPOSER_HEIGHT_STORAGE_KEY,
 ];
 const SETTINGS_BACKUP_KEYS = [...SETTINGS_BACKUP_SECRET_KEYS, ...SETTINGS_BACKUP_PLAIN_KEYS];
 const SETTINGS_BACKUP_FORMAT = "Brave AI Assistant Settings Backup";
@@ -1083,8 +1146,8 @@ async function importSettings() {
     // entries to their defaults, sidepanel.js validates selectedModelId
     // against models.js), so a bad value can at worst restore a default,
     // not break anything.
-    const NUMERIC_SETTINGS_KEYS = new Set(["composerHeight"]);
-    const BOOLEAN_SETTINGS_KEYS = new Set(["piiFilterEnabled", "pageVisualsEnabled", AUTO_WEB_RESEARCH_KEY, "includeCurrentPageContext"]);
+    const NUMERIC_SETTINGS_KEYS = new Set([COMPOSER_HEIGHT_STORAGE_KEY]);
+    const BOOLEAN_SETTINGS_KEYS = new Set([PII_FILTER_STORAGE_KEY, PAGE_VISUALS_STORAGE_KEY, AUTO_WEB_RESEARCH_KEY, INCLUDE_CONTEXT_STORAGE_KEY]);
     const restored = {};
     for (const key of SETTINGS_BACKUP_KEYS) {
       const value = backup.settings[key];

@@ -156,6 +156,8 @@ const STREAM_TOTAL_TIMEOUT_MS = 15 * 60 * 1000;
 async function readSse(resp, extractDelta, ctx, extractError = null) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
+  const isJsonResponse = /application\/json/i.test(resp.headers?.get?.("content-type") || "");
+  let jsonText = isJsonResponse ? "" : null;
   let buffer = "";
   let emitted = false;
   // A well-formed OpenAI-compatible stream always ends with an explicit
@@ -216,8 +218,17 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
     // missing.
     if (json?.choices?.[0]?.finish_reason) sawTerminal = true;
     const delta = extractDelta(json);
-    const content = typeof delta === "string" ? delta : (delta?.content ?? "");
-    const reasoning = typeof delta === "object" ? (delta?.reasoning ?? "") : "";
+    const rawContent = typeof delta === "string" ? delta : (delta?.content ?? "");
+    // OpenAI-compatible providers normally return a string. Some return a
+    // content-part array; flatten it rather than passing an array to the panel
+    // (which would stringify it).
+    const content = Array.isArray(rawContent)
+      ? rawContent.map((part) => (typeof part === "string" ? part : part?.text || "")).join("")
+      : (typeof rawContent === "string" ? rawContent : "");
+    const rawReasoning = typeof delta === "object" ? (delta?.reasoning ?? delta?.reasoning_content ?? "") : "";
+    const reasoning = Array.isArray(rawReasoning)
+      ? rawReasoning.map((part) => (typeof part === "string" ? part : part?.text || "")).join("")
+      : (typeof rawReasoning === "string" ? rawReasoning : "");
     // A translation shows only the final translated text: the model's
     // reasoning stream is dropped there (ctx.translateMode is "free"/"lines"),
     // exactly the pre-thinking-display behavior. The ASK/chat panel keeps
@@ -243,7 +254,9 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
       if (timedOut) throw timeoutError();
       if (done) break;
       armIdleTimer();
-      buffer += decoder.decode(value, { stream: true });
+      const decoded = decoder.decode(value, { stream: true });
+      if (jsonText !== null) jsonText += decoded;
+      buffer += decoded;
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
       for (const line of lines) handleLine(line);
@@ -251,7 +264,9 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
     if (timedOut) throw timeoutError();
     // Flush whatever is left: a final "data:" line that is not newline-terminated
     // used to be dropped, silently truncating the end of the answer.
-    buffer += decoder.decode();
+    const tail = decoder.decode();
+    if (jsonText !== null) jsonText += tail;
+    buffer += tail;
     if (buffer.trim()) handleLine(buffer);
   } catch (err) {
     reader.cancel().catch(() => {});
@@ -260,6 +275,16 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
     if (totalTimer) clearTimeout(totalTimer);
+  }
+
+  // A provider can return HTTP 200 with a JSON error body instead of an SSE
+  // stream (gateway/maintenance responses). Without this it looked like an
+  // empty completion and hid the real error.
+  if (jsonText !== null && !emitted) {
+    let parsed = null;
+    try { parsed = JSON.parse(jsonText); } catch {}
+    const jsonError = parsed ? (extractError?.(parsed) || "") : "";
+    if (jsonError) throw new Error(jsonError);
   }
 
   // A stream that ended without a single visible character (empty completion,

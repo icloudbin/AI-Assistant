@@ -11,7 +11,17 @@
 // service-worker start. Keys live only in chrome.storage.local; the Settings
 // export can carry them, but only encrypted with a passphrase (settings-crypto.js).
 
-import { LANGUAGE_STORAGE_KEY } from "./storage-keys.js";
+import {
+  LANGUAGE_STORAGE_KEY,
+  THEME_STORAGE_KEY,
+  PREFERRED_TRANSLATION_LANGUAGE_KEY,
+  PII_FILTER_STORAGE_KEY,
+  PAGE_VISUALS_STORAGE_KEY,
+  AUTO_WEB_RESEARCH_KEY,
+  INCLUDE_CONTEXT_STORAGE_KEY,
+  MIC_LANG_STORAGE_KEY,
+  COMPOSER_HEIGHT_STORAGE_KEY,
+} from "./storage-keys.js";
 
 const DB_NAME = "ai-assistant-settings";
 const DB_VERSION = 1;
@@ -33,21 +43,21 @@ export const PERSISTED_SETTING_KEYS = [
   // Backups made by older builds used the field name "language", which never
   // matched the real storage key, so the language was never actually restored.
   LANGUAGE_STORAGE_KEY,
-  "preferredTranslationLanguage",
-  "themePreference",
+  PREFERRED_TRANSLATION_LANGUAGE_KEY,
+  THEME_STORAGE_KEY,
   // Settings first introduced after the mirror was written, found missing when
   // importSettings() started passing its whole restored object to
   // saveSettingsBackup(): the key loop silently dropped them, so after an
   // unexpected storage reset the privacy toggles reverted to their defaults -
   // worst of all "Read current page" back to ON (its default), silently
   // re-enabling page sending. Never include credentials here (see above).
-  "piiFilterEnabled",
-  "pageVisualsEnabled",
-  "autoWebResearchEnabled",
-  "includeCurrentPageContext",
+  PII_FILTER_STORAGE_KEY,
+  PAGE_VISUALS_STORAGE_KEY,
+  AUTO_WEB_RESEARCH_KEY,
+  INCLUDE_CONTEXT_STORAGE_KEY,
   "selectedModelId",
-  "micRecognitionLang",
-  "composerHeight",
+  MIC_LANG_STORAGE_KEY,
+  COMPOSER_HEIGHT_STORAGE_KEY,
 ];
 
 function openDatabase() {

@@ -8,6 +8,18 @@
 // fails if the two values differ.
 export const MAX_PAGE_CONTEXT_CHARS = 120000;
 
+// UTF-16 slice() can cut an emoji / astral character in half. Every text cap
+// goes through this helper so the result never ends with a lone surrogate.
+export function cutAtCodePointBoundary(text, max) {
+  const value = String(text ?? "");
+  const limit = Math.max(0, Math.floor(Number(max) || 0));
+  if (value.length <= limit) return value;
+  let end = limit;
+  const last = value.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end--;
+  return value.slice(0, end);
+}
+
 // maxPageChars: cap on the current-page text sent with a request (about 4
 // characters per token). Free tiers (Groq, OpenRouter free) reject or
 // rate-limit large requests, so they get a much smaller budget than DeepSeek.

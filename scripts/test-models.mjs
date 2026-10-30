@@ -11,6 +11,7 @@ import {
   findKnownModel,
   resolveModelId,
   findModelIdByLabel,
+  cutAtCodePointBoundary,
 } from "../models.js";
 
 // ---------- 1. Catalog integrity & constants ----------
@@ -56,5 +57,11 @@ assert.equal(findModelIdByLabel(MODELS[0].label), MODELS[0].id, "find by exact l
 assert.equal(findModelIdByLabel("Non Existent Label"), null, "unknown label returns null");
 assert.equal(findModelIdByLabel(""), null, "empty label returns null");
 
-console.log("OK: models.js — catalog integrity, vision capability flags, aliases, strict & tolerant lookups.");
+// ---------- 5. Surrogate-safe truncation ----------
+assert.equal(cutAtCodePointBoundary("abc", 10), "abc", "short text unchanged");
+assert.equal(cutAtCodePointBoundary("a😀b", 2), "a", "a high surrogate at the boundary is backed off");
+assert.equal(cutAtCodePointBoundary("a😀b", 3), "a😀", "a complete surrogate pair is kept");
+assert.equal(cutAtCodePointBoundary("a😀b", 0), "", "zero limit returns empty string");
+
+console.log("OK: models.js — catalog integrity, vision capability flags, aliases, strict & tolerant lookups, surrogate-safe cuts.");
 process.exit(0);

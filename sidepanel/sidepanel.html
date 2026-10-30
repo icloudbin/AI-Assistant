@@ -25,19 +25,19 @@
   </header>
 
 
-  <main class="chat-log" id="chatLog">
+  <main class="chat-log" id="chatLog" role="log" aria-live="polite" aria-relevant="additions text" aria-label="Conversation" data-i18n-aria-label="app_title">
     <div class="empty-state" id="emptyState" data-i18n-html="emptyState_html">
       👋 I can answer questions using the web page you are currently viewing.<br />
       Enter your question below and press Enter to send.
     </div>
   </main>
 
-  <div class="context-bar" id="pageContextBar" hidden>
+  <div class="context-bar" id="pageContextBar" role="status" aria-live="polite" hidden>
     <span class="context-title" id="pageContextTitle"></span>
     <button id="pageContextAllowBtn" class="context-allow" type="button" hidden></button>
   </div>
 
-  <div class="panel-resize-handle" id="panelResizeHandle" role="separator" aria-orientation="horizontal" aria-label="Resize conversation and question areas" tabindex="0" title="Drag to resize conversation and question areas" data-i18n-aria-label="panelResize_ariaLabel" data-i18n-title="panelResize_title"></div>
+  <div class="panel-resize-handle" id="panelResizeHandle" role="separator" aria-orientation="horizontal" aria-label="Resize conversation and question areas" aria-valuemin="92" tabindex="0" title="Drag to resize conversation and question areas" data-i18n-aria-label="panelResize_ariaLabel" data-i18n-title="panelResize_title"></div>
 
   <form class="composer" id="chatForm">
     <div class="attachment-list" id="attachmentList" hidden aria-label="Attached files" data-i18n-aria-label="attachmentList_ariaLabel"></div>
@@ -50,7 +50,7 @@
           <button class="quick-action-btn" id="quickKeyPointsBtn" type="button" data-i18n="quickKeyPoints_button">Key Points</button>
           <button class="quick-action-btn" id="quickFactCheckBtn" type="button" data-i18n="quickFactCheck_button">Fact Check</button>
         </div>
-        <textarea id="questionInput" rows="2" placeholder="Enter your question… (Enter to send, Shift+Enter for a new line)" data-i18n-placeholder="questionInput_placeholder"></textarea>
+        <textarea id="questionInput" rows="2" placeholder="Enter your question… (Enter to send, Shift+Enter for a new line)" aria-label="Question" data-i18n-placeholder="questionInput_placeholder" data-i18n-aria-label="questionInput_ariaLabel"></textarea>
         <div class="composer-tools">
           <input id="fileInput" type="file" hidden multiple accept="image/*,.txt,.md,.csv,.json,.xml,.yaml,.yml,.html,.htm,.css,.js,.ts,.java,.py,.sql,.log,.properties,.zip,.winzip" />
           <button id="uploadBtn" class="upload-btn" type="button" title="Attach images, text, HTML, or ZIP files" data-i18n="upload_button" data-i18n-title="upload_title">📎 Upload</button>

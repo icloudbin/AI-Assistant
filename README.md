@@ -54,6 +54,7 @@ AI-Assistant/
 │   ├── test-markdown-render.mjs
 │   ├── test-history-manager.mjs
 │   ├── test-attachment-budget.mjs
+│   ├── test-extension-e2e.mjs
 │   └── test-sidepanel-context.py
 └── sidepanel/
     ├── sidepanel.html

@@ -8,6 +8,8 @@
 // queue, the cross-panel merge and the NOTICE escalation) still lives in
 // sidepanel.js because it is bound to the live conversation state and the
 // panel's DOM.
+
+import { cutAtCodePointBoundary } from "../models.js";
 //
 // makeTopicTitle() takes the empty-input fallback title as an argument:
 // sidepanel.js passes the localized "New topic" string; the default keeps
@@ -30,7 +32,7 @@ function makeTopicTitle(messages, fallbackTitle = "") {
   const words = summarySource.split(/\s+/).filter(Boolean);
   // Chinese/Japanese text has no spaces, so the whole message would become the
   // title; cap the length as well as the word count.
-  const title = words.slice(0, 10).join(" ").slice(0, 80).trim();
+  const title = cutAtCodePointBoundary(words.slice(0, 10).join(" "), 80).trim();
   return title || fallbackTitle;
 }
 

@@ -12,7 +12,9 @@
 
 import { parseIPv6 } from "../url-safety.js";
 
-export const PII_FILTER_STORAGE_KEY = "piiFilterEnabled";
+import { PII_FILTER_STORAGE_KEY } from "../storage-keys.js";
+
+export { PII_FILTER_STORAGE_KEY };
 
 function luhnValid(digits) {
   let sum = 0;
@@ -309,14 +311,33 @@ const RULES = [
 // (restorePlaceholders / PlaceholderRestorer), so a translation or summary shows
 // the user's own email address, not "[EMAIL]".
 export function createRedactionSession() {
-  return { byKey: new Map(), byPlaceholder: new Map(), counters: new Map() };
+  // reserved: numbers already used by literal placeholder-shaped text in the
+  // source, so a generated placeholder never reuses one and the restorer can
+  // leave the literal token untouched.
+  return { byKey: new Map(), byPlaceholder: new Map(), counters: new Map(), reserved: new Map() };
+}
+
+function reservePlaceholders(text, session) {
+  if (!session || typeof text !== "string" || !text.includes("[")) return;
+  for (const match of text.matchAll(PLACEHOLDER_RE)) {
+    const type = match[1];
+    const number = Number(match[2]);
+    let reserved = session.reserved.get(type);
+    if (!reserved) {
+      reserved = new Set();
+      session.reserved.set(type, reserved);
+    }
+    reserved.add(number);
+  }
 }
 
 function placeholderFor(session, type, original) {
   const key = `${type}\u0000${original}`;
   let ph = session.byKey.get(key);
   if (!ph) {
-    const n = (session.counters.get(type) || 0) + 1;
+    let n = (session.counters.get(type) || 0) + 1;
+    const reserved = session.reserved.get(type);
+    while (reserved?.has(n)) n++;
     session.counters.set(type, n);
     ph = `[${type}#${n}]`;
     session.byKey.set(key, ph);
@@ -350,6 +371,9 @@ function numberPlaceholder(full, replaced, session) {
 // plain placeholders ([EMAIL]) are produced.
 export function redactSensitive(text, session = null) {
   if (typeof text !== "string" || !text) return text;
+  // Reserve literal placeholder-shaped tokens BEFORE any rule runs, so a real
+  // value never gets the same number as text such as "use [EMAIL#1] literally".
+  reservePlaceholders(text, session);
   let out = text;
   for (const [re, rep] of RULES) {
     if (!session) {
@@ -414,36 +438,31 @@ export class PlaceholderRestorer {
   }
 }
 
-// Redacts a whole ASK payload (question, page context, history).
-export function redactPayload({ question, pageContext, history }, session = null) {
-  const pc = pageContext && typeof pageContext === "object"
-    ? {
-        ...pageContext,
-        title: redactSensitive(pageContext.title, session),
-        url: redactSensitive(pageContext.url, session),
-        text: redactSensitive(pageContext.text, session),
-        previousPage: pageContext.previousPage
-          ? { ...pageContext.previousPage, title: redactSensitive(pageContext.previousPage.title, session), url: redactSensitive(pageContext.previousPage.url, session) }
-          : pageContext.previousPage,
-      }
-    : pageContext;
-  return {
-    question: redactSensitive(question, session),
-    pageContext: pc,
-    history: Array.isArray(history)
-      ? history.map((h) => (h && typeof h.content === "string" ? { ...h, content: redactSensitive(h.content, session) } : h))
-      : history,
-  };
-}
-
 // Single choke point for EVERYTHING in an ASK payload that can leave the
 // browser (provider requests and Tavily queries are both built from these
 // fields). Every string leaf is redacted, so a field added to the payload later
 // (e.g. factCheck.selectedText, which previously bypassed the filter) is
-// covered by default. Structural keys are left alone. Images are binary and
-// cannot be redacted (see the privacy policy).
+// covered by default. Structural keys and binary image fields are left alone.
 const STRUCTURAL_KEYS = new Set(["role", "type", "id", "requestId", "modelId", "tabId"]);
+const NON_TEXT_KEYS = new Set(["images", "dataUrl", "imageUrls", "pageScreenshot"]);
+
+function walkText(value, key, visit) {
+  if (NON_TEXT_KEYS.has(key)) return;
+  if (typeof value === "string") {
+    visit(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) walkText(item, key, visit);
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const [childKey, childValue] of Object.entries(value)) walkText(childValue, childKey, visit);
+  }
+}
+
 function deepRedact(value, key, session) {
+  if (NON_TEXT_KEYS.has(key)) return value;
   if (typeof value === "string") return STRUCTURAL_KEYS.has(key) ? value : redactSensitive(value, session);
   if (Array.isArray(value)) return value.map((v) => deepRedact(v, key, session));
   if (value && typeof value === "object") {
@@ -454,12 +473,17 @@ function deepRedact(value, key, session) {
   return value;
 }
 
-export function redactOutbound({ question, pageContext, history, translateSource, factCheck }, session = null) {
-  return {
-    question: deepRedact(question, undefined, session),
-    pageContext: deepRedact(pageContext, undefined, session),
-    history: deepRedact(history, undefined, session),
-    translateSource: deepRedact(translateSource, undefined, session),
-    factCheck: deepRedact(factCheck, undefined, session),
-  };
+export function redactOutbound(payload, session = null) {
+  if (!payload || typeof payload !== "object") return payload;
+  // Reserve every literal placeholder-shaped token in the whole payload BEFORE
+  // any field is redacted, so a question and a page/history field cannot each
+  // start number assignment at #1.
+  if (session) walkText(payload, undefined, (text) => reservePlaceholders(text, session));
+  const out = {};
+  for (const [key, value] of Object.entries(payload)) {
+    out[key] = NON_TEXT_KEYS.has(key) || STRUCTURAL_KEYS.has(key)
+      ? value
+      : deepRedact(value, key, session);
+  }
+  return out;
 }

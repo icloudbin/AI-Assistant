@@ -4,7 +4,7 @@ How some of the extension's features work. These notes describe standing behavio
 
 ## File Uploads (v1.0.6)
 
-The side panel now has an Upload button below the question box. It accepts images, common text/code files, HTML, and ZIP/WinZip archives. Text and HTML files are read locally and included in the DeepSeek chat request. ZIP files are parsed locally and supported text/HTML entries are extracted and included.
+The side panel now has an Upload button below the question box. It accepts images, common text/code files, HTML, and ZIP/WinZip archives. Text and HTML files are read locally and included in the selected provider's chat request. ZIP files are parsed locally and supported text/HTML entries are extracted and included.
 
 Image attachments are encoded locally as data URLs and sent with the current request. DeepSeek image requests are handled natively by `deepseek-flash`; Groq and OpenRouter receive multimodal image content when the selected model supports vision. The two GPT-OSS models on Groq are text-only, so automatic page screenshots/images are not attached for them.
 
@@ -25,6 +25,6 @@ Assistant responses are stored as their original Markdown/plain text, but render
 
 ## Web-grounded Fact Check (v1.10.33)
 
-Fact Check can optionally use Tavily Search to retrieve current web evidence before the selected AI model evaluates the claims. The workflow is intentionally bounded to reduce search cost: up to five candidate factual claims are selected from the current page or highlighted text, each claim gets a basic Tavily news search with up to four results, duplicate URLs are removed, and the resulting evidence is supplied to the AI model with strict instructions not to invent sources.
+Fact Check can optionally use Tavily Search to retrieve current web evidence before the selected AI model evaluates the claims. The workflow is intentionally bounded to reduce search cost: up to five candidate factual claims are selected from the current page or highlighted text, each claim gets a basic Tavily general-web search with up to four results, duplicate URLs are removed, and the resulting evidence is supplied to the AI model with strict instructions not to invent sources.
 
 Configure the Tavily Search API key in Settings; Fact Check then uses it automatically (there is no separate Fact Check toggle). Tavily currently provides a free monthly API-credit allowance; advanced search consumes more credits than basic search, so this implementation uses basic search for the bounded Fact Check workflow.

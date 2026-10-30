@@ -1,8 +1,9 @@
 // background.js (root directory)
-import { findKnownModel, DEFAULT_MAX_PAGE_CHARS, MAX_PAGE_CONTEXT_CHARS } from "./models.js";
+import { findKnownModel, DEFAULT_MAX_PAGE_CHARS, MAX_PAGE_CONTEXT_CHARS, cutAtCodePointBoundary } from "./models.js";
 import { AUTO_WEB_RESEARCH_KEY, CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY } from "./storage-keys.js";
 import { getStoredLanguage, t } from "./i18n.js";
 import { restoreSettingsFromBackupOnce } from "./settings-storage.js";
+import { withNamedLock, CONTEXT_ACTION_LOCK } from "./conversation-store.js";
 import { checkImageUrl } from "./url-safety.js";
 import { redactOutbound, createRedactionSession, PlaceholderRestorer, PII_FILTER_STORAGE_KEY } from "./privacy/pii-filter.js";
 import { prepareLineTranslation, numberedBatches, LineTranslator } from "./translate-lines.js";
@@ -121,7 +122,17 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
       url: String(tab.url || ""),
       createdAt: Date.now(),
     };
-    await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: pending }).catch((err) => {
+    // Context actions are a small queue, not one global slot: a second rapid
+    // selection in another window must not overwrite the first. The lock keeps
+    // the read-append-write atomic across service-worker instances.
+    await withNamedLock(CONTEXT_ACTION_LOCK, async () => {
+      const stored = await chrome.storage.local.get(PENDING_CONTEXT_ACTION_KEY);
+      const raw = stored[PENDING_CONTEXT_ACTION_KEY];
+      const existing = Array.isArray(raw) ? raw : raw ? [raw] : [];
+      const fresh = existing.filter((item) => item && Date.now() - item.createdAt <= 120000);
+      fresh.push(pending);
+      await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: fresh.slice(-20) });
+    }).catch((err) => {
       console.warn("[AI Assistant] Unable to store context action:", err);
     });
     setTimeout(() => {
@@ -197,6 +208,11 @@ function sniffImageType(b) {
 // as the cap is exceeded (a server can lie about, or omit, Content-Length).
 async function readBodyCapped(resp, maxBytes) {
   if (!resp.body) {
+    // Fetch responses normally expose a stream; this fallback is rare. Reject a
+    // declared oversized body before materializing it, and cap after (the
+    // browser gives no streaming handle here).
+    const declared = Number(resp.headers?.get?.("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) throw new Error("too large");
     const whole = new Uint8Array(await resp.arrayBuffer());
     if (whole.length > maxBytes) throw new Error("too large");
     return whole;
@@ -540,6 +556,7 @@ chrome.runtime.onConnect.addListener((port) => {
     const releaseKeepAlive = startRequestKeepAlive();
 
     let pageSentChars = 0;
+    let requestWasTranslation = false;
     // Hoisted so the catch below can flush text the PII placeholder restorer
     // was still holding back when the request failed mid-stream (ctx is
     // declared inside the try block and is invisible to the catch).
@@ -555,6 +572,7 @@ chrome.runtime.onConnect.addListener((port) => {
       await restoreSettingsFromBackupOnce();
       if (abortController.signal.aborted) return;
       let { question, pageContext, includePageContext, history, images = [], modelId, factCheck, noWebResearch = false, forceWebResearch = false, translateMode = false, translateSource = null, translateSourceTruncated = false } = msg.payload;
+      requestWasTranslation = translateMode === true;
       const lang = await getStoredLanguage();
       if (abortController.signal.aborted) return;
       // Privacy filter (on by default): strip names, phones, emails, cards,
@@ -569,8 +587,11 @@ chrome.runtime.onConnect.addListener((port) => {
         if (piiSetting[PII_FILTER_STORAGE_KEY] !== false) {
           piiSession = createRedactionSession();
           // One choke point for every outbound text field, including
-          // factCheck.selectedText (sent to Tavily and the model).
-          ({ question, pageContext, history, translateSource, factCheck } = redactOutbound({ question, pageContext, history, translateSource, factCheck }, piiSession));
+          // factCheck.selectedText (sent to Tavily and the model). The generic
+          // redaction covers fields added to the payload later as well; image
+          // data is left untouched (see NON_TEXT_KEYS in pii-filter.js).
+          const redactedPayload = redactOutbound(msg.payload, piiSession);
+          ({ question, pageContext, history, translateSource, factCheck } = redactedPayload);
         }
       } catch (err) {
         console.warn("[AI Assistant] privacy filter failed", err);
@@ -628,7 +649,7 @@ chrome.runtime.onConnect.addListener((port) => {
       // pageCap equals that limit (the extracted text is always <= 120k), and
       // the user was never told the page was shortened.
       if (translateMode !== true && requestPageContext && !requestPageContext.captureFailed && ((requestPageContext.text || "").length > pageCap || requestPageContext.truncated === true)) {
-        let cut = requestPageContext.text.slice(0, pageCap);
+        let cut = cutAtCodePointBoundary(requestPageContext.text, pageCap);
         const nl = cut.lastIndexOf("\n");
         if (nl > pageCap * 0.8) cut = cut.slice(0, nl);
         requestPageContext = { ...requestPageContext, text: cut };
@@ -788,8 +809,9 @@ chrome.runtime.onConnect.addListener((port) => {
       // Clear hint when a page-sized request is refused or rate limited.
       // Tavily errors are excluded: a Tavily 429/5xx ("rate limit exceeded" in
       // its body) has nothing to do with the page size, and the hint would be
-      // misleading.
-      if (pageSentChars > 0 && !/^Tavily\b/i.test(errorText) && /^HTTP (413|429)\b|too large|rate.?limit|context.?length|maximum context|tokens? per (minute|day)|\bTPM\b|reduce the length/i.test(errorText)) {
+      // misleading. Translations are excluded too: they send a bounded batch,
+      // so a 429 on one batch does not mean the page is too large.
+      if (!requestWasTranslation && pageSentChars > 0 && !/^Tavily\b/i.test(errorText) && /^HTTP (413|429)\b|too large|rate.?limit|context.?length|maximum context|tokens? per (minute|day)|\bTPM\b|reduce the length/i.test(errorText)) {
         errorText += `\n\n${t(await getStoredLanguage().catch(() => "en"), "bg_hint_pageTooLarge")}`;
       }
       // Release whatever the PII placeholder restorer was still holding back

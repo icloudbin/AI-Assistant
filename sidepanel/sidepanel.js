@@ -1,15 +1,26 @@
 // sidepanel/sidepanel.js —— Fixed version: no trailing spaces; keeps import "../models.js"; API Key configuration moved to Settings
-import { MODELS, MAX_PAGE_CONTEXT_CHARS, findModelById, findKnownModel, resolveModelId, findModelIdByLabel, modelSupportsVision } from "../models.js";
-import { HISTORY_STORAGE_KEY, CURRENT_CONVERSATION_KEY, PENDING_CONTEXT_ACTION_KEY, PREFERRED_TRANSLATION_LANGUAGE_KEY, MAX_SAVED_CONVERSATIONS } from "../storage-keys.js";
+import { MODELS, MAX_PAGE_CONTEXT_CHARS, findModelById, findKnownModel, resolveModelId, findModelIdByLabel, modelSupportsVision, cutAtCodePointBoundary } from "../models.js";
+import {
+  HISTORY_STORAGE_KEY,
+  CURRENT_CONVERSATION_KEY,
+  PENDING_CONTEXT_ACTION_KEY,
+  PREFERRED_TRANSLATION_LANGUAGE_KEY,
+  MAX_SAVED_CONVERSATIONS,
+  THEME_STORAGE_KEY,
+  INCLUDE_CONTEXT_STORAGE_KEY,
+  PAGE_VISUALS_STORAGE_KEY,
+  COMPOSER_HEIGHT_STORAGE_KEY,
+  MIC_LANG_STORAGE_KEY,
+} from "../storage-keys.js";
 import { sensitiveHostOf, hostOf } from "../sensitive-sites.js";
 import { getStoredLanguage, applyStaticTranslations, t, LANGUAGE_STORAGE_KEY, normalizeLanguage } from "../i18n.js";
 // The panel owns two settings whose live writes must reach the IndexedDB
 // recovery mirror: "Read current page" (a storage reset must never silently
 // flip this privacy choice back to its ON default) and the selected model.
-import { saveSettingsBackup } from "../settings-storage.js";
+import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-storage.js";
 // Pure save/merge helpers for the saved-conversation list (DOM-free, tested
 // in scripts/test-conversation-store.mjs).
-import { mergeConversationLists, sortedByNewest, resolveContextEpoch, withHistoryLock } from "../conversation-store.js";
+import { mergeConversationLists, sortedByNewest, resolveContextEpoch, withHistoryLock, withNamedLock, CONTEXT_ACTION_LOCK } from "../conversation-store.js";
 import { markdownToHtml } from "./rendering/markdown.js";
 import { makeTopicTitle, toStoredMessage, compressForQuota } from "./history-manager.js";
 import {
@@ -24,7 +35,6 @@ import {
 } from "./attachment-budget.js";
 
 // ---------- Theme ----------
-const THEME_STORAGE_KEY = "themePreference";
 const deviceThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
 function applyTheme(preference) {
@@ -39,8 +49,12 @@ async function loadTheme() {
 }
 
 deviceThemeQuery.addEventListener?.("change", async () => {
-  const stored = await chrome.storage.local.get(THEME_STORAGE_KEY);
-  if ((stored[THEME_STORAGE_KEY] || "device") === "device") applyTheme("device");
+  try {
+    const stored = await chrome.storage.local.get(THEME_STORAGE_KEY);
+    if ((stored[THEME_STORAGE_KEY] || "device") === "device") applyTheme("device");
+  } catch (err) {
+    console.debug("[AI Assistant] Unable to read the theme preference:", err);
+  }
 });
 
 // Repaint the history selector when the side panel becomes visible/focused.
@@ -58,7 +72,10 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-loadTheme();
+loadTheme().catch((err) => {
+  console.debug("[AI Assistant] Unable to load the theme preference:", err);
+  applyTheme("device");
+});
 
 // ---------- Language ----------
 // Same "read once, then live-sync via chrome.storage.onChanged" pattern as
@@ -73,6 +90,11 @@ loadTheme();
 // the copy buttons already attached to messages from earlier in this
 // session.
 let currentLang = "en";
+// Last context-bar state, kept so a language switch (or a storage-driven
+// preference change) can repaint the bar instead of leaving old-language text.
+let lastContextBarState = null;
+// Incremented when a page-context refresh starts or must be invalidated.
+let pageContextRefreshToken = 0;
 
 function applyLanguage(lang) {
   currentLang = lang;
@@ -87,6 +109,11 @@ function applyLanguage(lang) {
   renderAttachments();
   refreshMicUiLanguage();
   refreshExistingCopyButtons();
+  renderContextBar();
+  refreshRemoteImageLabels();
+  if (isListening && micStatus.textContent) {
+    setMicStatus(t(lang, "mic_listening_template", { name: micLangDisplayName(currentMicLang()) }));
+  }
 }
 
 async function loadLanguage() {
@@ -99,7 +126,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
-loadLanguage();
+loadLanguage().catch((err) => console.debug("[AI Assistant] Unable to load the UI language:", err));
 
 
 const PORT_NAME = "ai-chat";
@@ -119,8 +146,6 @@ const includeContextToggle = document.getElementById("includeContextToggle");
 // choice is remembered across sessions. On webmail / banking sites (see
 // sensitive-sites.js) ordinary questions never send the page unless the user
 // allows that site for this panel session.
-const INCLUDE_CONTEXT_STORAGE_KEY = "includeCurrentPageContext";
-const PAGE_VISUALS_STORAGE_KEY = "pageVisualsEnabled";
 const pageContextBar = document.getElementById("pageContextBar");
 const pageContextTitle = document.getElementById("pageContextTitle");
 const pageContextAllowBtn = document.getElementById("pageContextAllowBtn");
@@ -177,6 +202,10 @@ function applyIncludeContextUi() {
   if (includeContextToggle.checked) {
     refreshActivePageContext().catch((err) => console.debug("[AI Assistant] Unable to refresh page context:", err));
   } else {
+    // Invalidate a refresh that is already waiting on getCurrentActiveTab();
+    // otherwise it resumes after this handler and repaints "Will send…" even
+    // though the user just turned page reading off.
+    pageContextRefreshToken++;
     updateContextBar(null);
   }
 }
@@ -213,7 +242,7 @@ async function persistIncludeContextPreference() {
     applyIncludeContextUi();
     return;
   } finally {
-    includeContextToggle.disabled = false;
+    includeContextToggle.disabled = isStreaming;
   }
   // A failed recovery-mirror write does not change the primary setting; log it
   // rather than claiming the user's choice failed.
@@ -239,18 +268,28 @@ const quickKeyPointsBtn = document.getElementById("quickKeyPointsBtn");
 const quickFactCheckBtn = document.getElementById("quickFactCheckBtn");
 const quickActionButtons = [quickSummarizeBtn, quickTranslateBtn, quickExplainBtn, quickKeyPointsBtn, quickFactCheckBtn].filter(Boolean);
 
-const COMPOSER_HEIGHT_STORAGE_KEY = "composerHeight";
 const MIN_COMPOSER_HEIGHT = 92;
 const MAX_COMPOSER_HEIGHT_RATIO = 0.70;
 
-function clampComposerHeight(height) {
+function composerHeightBounds() {
   const viewportHeight = Math.max(document.documentElement.clientHeight || window.innerHeight || 600, 300);
-  const maxHeight = Math.max(MIN_COMPOSER_HEIGHT, Math.floor(viewportHeight * MAX_COMPOSER_HEIGHT_RATIO));
-  return Math.max(MIN_COMPOSER_HEIGHT, Math.min(maxHeight, Math.round(height)));
+  return {
+    min: MIN_COMPOSER_HEIGHT,
+    max: Math.max(MIN_COMPOSER_HEIGHT, Math.floor(viewportHeight * MAX_COMPOSER_HEIGHT_RATIO)),
+  };
+}
+
+function clampComposerHeight(height) {
+  const bounds = composerHeightBounds();
+  return Math.max(bounds.min, Math.min(bounds.max, Math.round(height)));
 }
 
 function setComposerHeight(height, persist = true) {
   const nextHeight = clampComposerHeight(height);
+  const bounds = composerHeightBounds();
+  panelResizeHandle.setAttribute("aria-valuemin", String(bounds.min));
+  panelResizeHandle.setAttribute("aria-valuemax", String(bounds.max));
+  panelResizeHandle.setAttribute("aria-valuenow", String(nextHeight));
   document.documentElement.style.setProperty("--composer-height", `${nextHeight}px`);
   if (persist) chrome.storage.local.set({ [COMPOSER_HEIGHT_STORAGE_KEY]: nextHeight }).catch(() => {});
 }
@@ -432,7 +471,7 @@ function connectPort() {
         modelId: pendingModelId,
         plain: pendingPlainReply,
       });
-      saveConversations().catch((err) => console.error("[AI Assistant] Unable to save conversation:", err));
+      saveConversations().catch(notifyHistorySaveFailure);
     }
     currentAssistantText = "";
     currentThinkingText = "";
@@ -490,7 +529,7 @@ const ALLOWED_TAGS = new Set([
   "P", "BR", "STRONG", "EM", "DEL", "CODE", "PRE", "H1", "H2", "H3", "H4", "H5", "H6",
   "UL", "OL", "LI", "BLOCKQUOTE", "HR", "A", "IMG", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "DIV"
 ]);
-const ALLOWED_ATTRS = new Set(["href", "target", "rel", "class", "src", "alt", "loading", "decoding", "start"]);
+const ALLOWED_ATTRS = new Set(["href", "target", "rel", "class", "src", "alt", "loading", "decoding", "start", "align"]);
 
 const DROP_WITH_CONTENT = new Set([
   "SCRIPT", "STYLE", "SVG", "MATH", "TEMPLATE", "NOSCRIPT", "IFRAME", "FRAME", "FRAMESET",
@@ -653,6 +692,18 @@ function remoteImageNode(doc, url, alt) {
   box.setAttribute("title", url);
   box.textContent = `🖼️ ${t(currentLang, "imageRemote_load")}${alt.trim() ? ` - ${alt.trim()}` : ""}`;
   return box;
+}
+
+// Re-label remote-image placeholders already rendered in the chat when the
+// interface language changes. Failed placeholders keep their explanatory
+// failure text + open link; only the "click to load / alt" label is refreshed.
+function refreshRemoteImageLabels() {
+  if (!chatLog) return;
+  for (const box of chatLog.querySelectorAll(".remote-image[data-src]")) {
+    if (box.classList.contains("failed")) continue;
+    const alt = box.getAttribute("data-alt") || "";
+    box.textContent = `🖼️ ${t(currentLang, "imageRemote_load")}${alt.trim() ? ` - ${alt.trim()}` : ""}`;
+  }
 }
 
 async function loadRemoteImage(box) {
@@ -900,6 +951,11 @@ async function restoreSelectedModel() {
     if (resolvedModelId !== selectedModelId) {
       await chrome.storage.local.set({ selectedModelId: resolvedModelId });
     }
+    // Keep the IndexedDB recovery mirror in sync with the model the panel is
+    // actually using, not only with manual dropdown changes.
+    saveSettingsBackup({ selectedModelId: resolvedModelId }).catch((err) => {
+      console.warn("[AI Assistant] Unable to mirror the selected model:", err);
+    });
   }
 }
 
@@ -940,6 +996,9 @@ function applyModelSelection(modelId) {
   if (!modelId || !MODELS.some((m) => m.id === modelId) || modelSelect.value === modelId) return;
   modelSelect.value = modelId;
   chrome.storage.local.set({ selectedModelId: modelId }).catch(() => {});
+  saveSettingsBackup({ selectedModelId: modelId }).catch((err) => {
+    console.warn("[AI Assistant] Unable to mirror the selected model:", err);
+  });
 }
 
 // ---------- Open settings page ----------
@@ -949,7 +1008,11 @@ optionsBtn.addEventListener("click", async () => {
   } catch (err) {
     console.error("[AI Assistant] Unable to open settings page:", err);
     // Fallback for browsers/versions that do not implement openOptionsPage.
-    await chrome.tabs.create({ url: chrome.runtime.getURL("options/options.html") });
+    try {
+      await chrome.tabs.create({ url: chrome.runtime.getURL("options/options.html") });
+    } catch (fallbackErr) {
+      console.error("[AI Assistant] Unable to open the settings tab:", fallbackErr);
+    }
   }
 });
 
@@ -961,6 +1024,11 @@ function setStreaming(streaming) {
   quickActionButtons.forEach((button) => { button.disabled = streaming; });
   modelSelect.disabled = streaming;
   uploadBtn.disabled = streaming;
+  // The page-reading toggle controls what the NEXT request sends; disabling it
+  // during a request prevents the UI from claiming a page was excluded while
+  // that request was already built with it.
+  includeContextToggle.disabled = streaming;
+  pageContextAllowBtn.disabled = streaming;
   if (SpeechRecognitionCtor) {
     micBtn.disabled = streaming;
     micLangBtn.disabled = streaming;
@@ -999,8 +1067,11 @@ function stopActiveRequest() {
     } catch {}
   }
   if (currentAssistantBubble) {
+    clearDeferredFinalRender();
     currentAssistantBubble.remove();
     currentAssistantBubble = null;
+  } else {
+    clearDeferredFinalRender();
   }
   currentAssistantText = "";
   currentThinkingText = "";
@@ -1102,17 +1173,19 @@ async function getActivePageContext(retryCount = 0, format = null) {
       ? [...new Set(data.imageUrls.filter((url) => typeof url === "string" && /^https?:\/\//i.test(url)))].slice(0, MAX_AUTO_PAGE_IMAGE_URLS)
       : [];
     if (!text && !imageUrls.length) return null;
+    const truncated = data?.truncated === true || text.length > MAX_PAGE_CONTEXT_CHARS;
     return {
       tabId: initialTabId,
       title: String(data?.title || tab.title || ""),
       url: String(data?.url || initialUrl || ""),
-      text: text.slice(0, MAX_PAGE_CONTEXT_CHARS),
+      text: cutAtCodePointBoundary(text, MAX_PAGE_CONTEXT_CHARS),
       // "markdown" when the structure-preserving extractor produced the text.
       format: data?.format === "markdown" ? "markdown" : "text",
       source: String(data?.source || ""),
       imageUrls,
-      // The extractor cut the page text at its size limit (see content.js).
-      truncated: data?.truncated === true,
+      // The extractor cut the page text at its size limit (see content.js), or
+      // this slice did (legacy extractors such as the mail handlers).
+      truncated,
     };
   };
 
@@ -1271,22 +1344,35 @@ async function captureVisiblePageScreenshot(expectedTabId, expectedUrl) {
     return null;
   }
 }
-function updateContextBar(pageContext) {
+function renderContextBar() {
   pageContextAllowBtn.hidden = true;
-  if (!pageContext) {
+  pageContextAllowBtn.removeAttribute("data-host");
+  const state = lastContextBarState;
+  if (!state) {
     pageContextBar.hidden = true;
     return;
   }
   pageContextBar.hidden = false;
+  if (state.kind === "unavailable") {
+    pageContextTitle.textContent = `⚠️ ${t(currentLang, "contextBar_captureFailed")}`;
+    return;
+  }
+  const pageContext = state.pageContext;
   const host = hostOf(pageContext.url);
   if (isBlockedSensitivePage(pageContext.url, pageContext.source)) {
     // Webmail / banking: make it unmistakable that nothing is sent.
     pageContextTitle.textContent = `🔒 ${t(currentLang, "contextBar_sensitiveBlocked_template", { host })}`;
     pageContextAllowBtn.textContent = t(currentLang, "contextBar_allowSensitive");
+    pageContextAllowBtn.dataset.host = host;
     pageContextAllowBtn.hidden = false;
     return;
   }
   pageContextTitle.textContent = `📄 ${t(currentLang, "contextBar_willSend_template", { title: pageContext.title || pageContext.url, host })}`;
+}
+
+function updateContextBar(pageContext) {
+  lastContextBarState = pageContext ? { kind: "page", pageContext } : null;
+  renderContextBar();
 }
 
 // Shown when a request asked for page context but the capture failed. The
@@ -1294,8 +1380,8 @@ function updateContextBar(pageContext) {
 // the user had just seen (from the tab-info display) had been lost; keeping
 // it visible with an explicit warning makes the outcome unambiguous.
 function updateContextBarUnavailable() {
-  pageContextBar.hidden = false;
-  pageContextTitle.textContent = `⚠️ ${t(currentLang, "contextBar_captureFailed")}`;
+  lastContextBarState = { kind: "unavailable" };
+  renderContextBar();
 }
 
 // ---------- Streaming render coalescing ----------
@@ -1311,6 +1397,28 @@ const STREAM_RENDER_MIN_INTERVAL_MS = 100;
 let streamRenderQueued = false;
 let streamRenderTimer = null;
 let streamRenderLastAt = 0;
+// A terminal (DONE/ERROR) repaint must not rewrite the bubble while the user is
+// selecting text in it. The finished text is kept here and applied once the
+// selection collapses; the reply itself is already saved to history.
+let deferredFinalRender = null;
+
+function clearDeferredFinalRender() {
+  deferredFinalRender = null;
+}
+
+function applyDeferredFinalRender() {
+  const pending = deferredFinalRender;
+  if (!pending) return;
+  if (!pending.bubble?.isConnected) {
+    deferredFinalRender = null;
+    return;
+  }
+  if (isUserSelectingInBubble(pending.bubble)) return;
+  deferredFinalRender = null;
+  setBubbleContent(pending.bubble, pending.text, "assistant", pending.plain);
+}
+
+document.addEventListener("selectionchange", applyDeferredFinalRender);
 
 // Repaint the streaming bubble from currentAssistantText right now, dropping
 // any pending coalesced render. Also a clean no-op once the bubble is gone
@@ -1325,7 +1433,24 @@ function renderStreamingBubble(force = false) {
   streamRenderQueued = false;
   streamRenderLastAt = performance.now();
   if (!currentAssistantBubble) return;
-  if (!force && isUserSelectingInBubble(currentAssistantBubble)) {
+  if (isUserSelectingInBubble(currentAssistantBubble)) {
+    if (force) {
+      // Keep the final text for the selectionchange handler instead of
+      // destroying the user's selection with the terminal rewrite.
+      let deferredText = currentAssistantText;
+      if (currentThinkingText.trim()) {
+        const thinkingLines = currentThinkingText.trim().split("\n").map((l) => `> ${l}`).join("\n");
+        deferredText = !currentAssistantText.trim()
+          ? `> 💭 *Thinking...*\n>\n${thinkingLines}`
+          : `> 💭 *Thought process:*\n>\n${thinkingLines}\n\n${currentAssistantText}`;
+      }
+      deferredFinalRender = {
+        bubble: currentAssistantBubble,
+        text: deferredText,
+        plain: pendingPlainReply,
+      };
+      return;
+    }
     scheduleStreamingRender();
     return;
   }
@@ -1341,7 +1466,6 @@ function renderStreamingBubble(force = false) {
   setBubbleContent(currentAssistantBubble, textToRender, "assistant", pendingPlainReply);
   scrollToBottom();
 }
-
 function scheduleStreamingRender() {
   if (!currentAssistantBubble || streamRenderQueued) return;
   streamRenderQueued = true;
@@ -1379,6 +1503,7 @@ function handlePortMessage(msg) {
   if (msg.requestId !== currentRequestId) return;
   switch (msg.type) {
     case "START": {
+      clearDeferredFinalRender();
       currentAssistantText = "";
       currentThinkingText = "";
       currentAssistantBubble = addBubble("assistant", "", pendingModelLabel, pendingPlainReply);
@@ -1435,7 +1560,7 @@ function handlePortMessage(msg) {
       currentThinkingText = "";
       autoScrollEnabled = false;
       setStreaming(false);
-      saveConversations().catch((err) => console.error("[AI Assistant] Unable to save conversation:", err));
+      saveConversations().catch(notifyHistorySaveFailure);
       break;
     }
     case "NOTICE": {
@@ -1477,7 +1602,7 @@ function handlePortMessage(msg) {
           modelId: pendingModelId,
           plain: pendingPlainReply,
         });
-        saveConversations().catch((err) => console.error("[AI Assistant] Unable to save conversation:", err));
+        saveConversations().catch(notifyHistorySaveFailure);
       }
       currentAssistantText = "";
       currentThinkingText = "";
@@ -1531,6 +1656,17 @@ function saveConversations() {
   return run;
 }
 
+function notifyHistorySaveFailure(err) {
+  console.error("[AI Assistant] Unable to save conversation:", err);
+  try {
+    addBubble("error", t(currentLang, "history_saveFailed_template", {
+      message: err?.message || t(currentLang, "unknownError"),
+    }));
+  } catch {
+    // The panel may already be torn down (worker recycle); there is no UI left.
+  }
+}
+
 
 async function saveConversationsNow() {
   await saveQueue;
@@ -1578,8 +1714,14 @@ async function saveConversationsWithLock() {
       break;
     } catch (err) {
       if (attempt === 0) {
-        merged = compressForQuota(merged);
-        continue;
+        // Only quota pressure justifies the lossy escalation. A transient
+        // extension-storage failure must not strip display copies or start
+        // dropping conversations just because it happened during a save.
+        if (err?.name === "QuotaExceededError" || /quota|QUOTA_BYTES/i.test(String(err?.message || ""))) {
+          merged = compressForQuota(merged);
+          continue;
+        }
+        throw err;
       }
       if (attempt >= 4 || merged.length <= 1) throw err;
       const kept = Math.max(1, Math.floor(merged.length / 2));
@@ -1599,7 +1741,6 @@ let historyRenderQueued = false;
 
 function renderHistorySelect() {
   if (!historySelect || !document.documentElement.isConnected) return;
-  const previous = historySelect.value;
   historySelect.innerHTML = "";
   const newOpt = document.createElement("option");
   newOpt.value = NEW_TOPIC_VALUE;
@@ -1616,9 +1757,9 @@ function renderHistorySelect() {
   }
   if (currentConversationId && items.some((c) => c.id === currentConversationId && c.messages?.length)) {
     historySelect.value = currentConversationId;
-  } else if (previous && [...historySelect.options].some((o) => o.value === previous)) {
-    historySelect.value = previous;
   } else {
+    // No valid current conversation: show New Topic rather than a previous
+    // dropdown value that would contradict the chat area.
     historySelect.value = NEW_TOPIC_VALUE;
   }
 }
@@ -1640,6 +1781,7 @@ function scheduleHistoryRender() {
 
 
 function renderConversation(messages) {
+  clearDeferredFinalRender();
   chatLog.innerHTML = "";
   if (!messages.length) {
     chatLog.appendChild(emptyState);
@@ -1670,7 +1812,7 @@ function startNewTopic() {
   refreshContextBarAfterConversationSwitch();
 }
 
-async function loadConversations({ activate = false, syncModel = false } = {}) {
+async function loadConversations() {
   const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY]);
   conversations = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
   // Keep at most MAX_SAVED_CONVERSATIONS saved conversations. Conversations are
@@ -1715,7 +1857,11 @@ async function selectConversation(id) {
   questionInput.value = "";
   renderConversation(history);
   applyModelSelection(findConversationModelId(history));
-  await chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: currentConversationId });
+  try {
+    await chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: currentConversationId });
+  } catch (err) {
+    console.warn("[AI Assistant] Unable to persist the current conversation pointer:", err);
+  }
   renderHistorySelect();
   refreshContextBarAfterConversationSwitch();
 }
@@ -1758,8 +1904,21 @@ function fileExtension(name) {
   return m ? m[1] : "";
 }
 
+const IMAGE_MIME_BY_EXTENSION = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  gif: "image/gif",
+  webp: "image/webp",
+};
+
+function imageMimeFor(file) {
+  if (/^image\/(jpeg|png|gif|webp)$/i.test(file.type)) return file.type;
+  return IMAGE_MIME_BY_EXTENSION[fileExtension(file.name)] || "";
+}
+
 function isImageFile(file) {
-  return file.type.startsWith("image/") || /^image\//.test(file.type);
+  return imageMimeFor(file) !== "";
 }
 
 function isZipFile(file) {
@@ -2139,14 +2298,16 @@ async function processFile(file) {
   try {
     if (file.size > MAX_FILE_BYTES) throw new Error(t(currentLang, "attachment_error_tooLarge"));
     if (isImageFile(file)) {
-      if (!/^image\/(jpeg|png|gif|webp)$/i.test(file.type)) {
-        throw new Error(t(currentLang, "attachment_error_unsupportedImage"));
-      }
+      const imageMime = imageMimeFor(file);
+      if (!imageMime) throw new Error(t(currentLang, "attachment_error_unsupportedImage"));
+      // A file with no MIME type (common for dragged/extracted images) reads as
+      // application/octet-stream and used to be rejected despite its extension.
+      const imageBlob = file.type === imageMime ? file : new Blob([file], { type: imageMime });
       const dataUrl = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result || ""));
         reader.onerror = () => reject(new Error(t(currentLang, "attachment_error_unableToReadImage")));
-        reader.readAsDataURL(file);
+        reader.readAsDataURL(imageBlob);
       });
       if (!dataUrl.startsWith("data:image/")) throw new Error(t(currentLang, "attachment_error_unableToEncodeImage"));
       if (!fitsImageBudget(others(), dataUrlByteLength(dataUrl))) {
@@ -2172,7 +2333,7 @@ async function processFile(file) {
       if (item.text.length > remaining) {
         cutFrom = item.text.length;
         keptChars = remaining;
-        item.text = `${describeTextTruncation(cutFrom, keptChars).forModel}\n${item.text.slice(0, keptChars)}`;
+        item.text = `${describeTextTruncation(cutFrom, keptChars).forModel}\n${cutAtCodePointBoundary(item.text, keptChars)}`;
       }
       item.kind = "text";
       setAttachmentStatus(item, "ready", t(currentLang, "attachment_ready"));
@@ -2221,7 +2382,6 @@ fileInput.addEventListener("change", async () => {
 // newer on-device recognizer can fail to install, so voice input may not
 // work in Brave depending on the installed version - see the onerror
 // handling below, which surfaces this clearly instead of failing silently.
-const MIC_LANG_STORAGE_KEY = "micRecognitionLang";
 const MIC_LANG_OPTIONS = [
   { code: "en-US", label: "EN", nameKey: "micLangName_en", joiner: " " },
   { code: "zh-CN", label: "中", nameKey: "micLangName_zhCN", joiner: "" },
@@ -2238,7 +2398,9 @@ let micStoppedByError = false;
 let micLangIndex = 0;
 let micBaseText = "";
 let micFinalText = "";
+let micUserEdited = false;
 let micStatusTimer = null;
+let micLangReady = Promise.resolve();
 
 function currentMicLang() {
   return MIC_LANG_OPTIONS[micLangIndex];
@@ -2270,6 +2432,8 @@ function updateMicLangUI() {
   micBtn.title = isListening
     ? t(currentLang, "mic_stop_title_template", { name })
     : t(currentLang, "mic_start_title_template", { name });
+  micLangBtn.setAttribute("aria-label", micLangBtn.title);
+  micBtn.setAttribute("aria-label", micBtn.title);
 }
 
 // Called from applyLanguage() on every language switch. Speech-recognition
@@ -2307,6 +2471,13 @@ function joinMicText(base, finalText, interim) {
   return pieces.join(lang.joiner || " ");
 }
 
+// A user edit while dictating must not be overwritten by the next recognition
+// result. Once edited, only NEW final transcripts are appended; the existing
+// input text (including the edit) stays as the baseline.
+questionInput.addEventListener("input", () => {
+  if (isListening) micUserEdited = true;
+});
+
 function buildRecognition() {
   const rec = new SpeechRecognitionCtor();
   rec.lang = currentMicLang().code;
@@ -2317,17 +2488,27 @@ function buildRecognition() {
     // Ignore results from a recognizer that has been replaced (e.g. after
     // switching the voice language while listening).
     if (rec !== recognition) return;
+    const lang = currentMicLang();
     let interim = "";
+    let finalDelta = "";
     for (let i = event.resultIndex; i < event.results.length; i++) {
       const transcript = event.results[i][0].transcript;
       if (event.results[i].isFinal) {
-        const lang = currentMicLang();
-        micFinalText = micFinalText ? `${micFinalText}${lang.joiner || " "}${transcript.trim()}` : transcript.trim();
+        const trimmed = transcript.trim();
+        micFinalText = micFinalText ? `${micFinalText}${lang.joiner || " "}${trimmed}` : trimmed;
+        finalDelta = finalDelta ? `${finalDelta}${lang.joiner || " "}${trimmed}` : trimmed;
       } else {
         interim += transcript;
       }
     }
-    questionInput.value = joinMicText(micBaseText, micFinalText, interim);
+    if (micUserEdited) {
+      if (finalDelta) {
+        const current = questionInput.value;
+        questionInput.value = current ? `${current}${lang.joiner || " "}${finalDelta}` : finalDelta;
+      }
+    } else {
+      questionInput.value = joinMicText(micBaseText, micFinalText, interim);
+    }
   };
 
   rec.onerror = (event) => {
@@ -2370,6 +2551,7 @@ function buildRecognition() {
     // hasn't clicked off: pick dictation back up automatically.
     micBaseText = questionInput.value;
     micFinalText = "";
+    micUserEdited = false;
     try {
       rec.start();
       isListening = true;
@@ -2421,10 +2603,15 @@ function openMicPermissionTab() {
     }
     chrome.tabs.onRemoved.addListener(onTabRemoved);
     giveUpTimer = setTimeout(settle, 120000);
-    chrome.tabs.create({ url: chrome.runtime.getURL("sidepanel/mic-permission.html") }, (tab) => {
-      tabId = tab?.id;
-      if (!tabId) settle();
-    });
+    try {
+      chrome.tabs.create({ url: chrome.runtime.getURL("sidepanel/mic-permission.html") }, (tab) => {
+        tabId = tab?.id;
+        if (!tabId) settle();
+      });
+    } catch (err) {
+      console.warn("[AI Assistant] Unable to open the microphone permission tab:", err);
+      settle();
+    }
   });
 }
 
@@ -2436,6 +2623,9 @@ async function startMic() {
   userStoppedMic = false;
   micStoppedByError = false;
   try {
+    // The stored recognition language may still be loading; using the default
+    // English before it resolves started the wrong recognizer on a fast click.
+    await micLangReady;
     const permState = await ensureMicPermission();
     if (permState !== "granted") {
       setMicStatus(
@@ -2460,6 +2650,7 @@ async function startMic() {
 
     micBaseText = questionInput.value;
     micFinalText = "";
+    micUserEdited = false;
     recognition = buildRecognition();
     try {
       recognition.start();
@@ -2493,7 +2684,7 @@ if (!SpeechRecognitionCtor) {
   micLangBtn.hidden = true;
   micBtn.title = t(currentLang, "mic_unsupported_title");
 } else {
-  restoreMicLang();
+  micLangReady = restoreMicLang();
 
   micBtn.addEventListener("click", () => {
     if (isListening) {
@@ -2519,7 +2710,9 @@ if (!SpeechRecognitionCtor) {
     }
     micLangIndex = (micLangIndex + 1) % MIC_LANG_OPTIONS.length;
     updateMicLangUI();
-    chrome.storage.local.set({ [MIC_LANG_STORAGE_KEY]: currentMicLang().code });
+    chrome.storage.local.set({ [MIC_LANG_STORAGE_KEY]: currentMicLang().code }).catch((err) => {
+      console.warn("[AI Assistant] Unable to save the voice input language:", err);
+    });
     if (wasListening) await startMic();
   });
 }
@@ -2598,7 +2791,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     if (!history.length) {
       emptyState.hidden = false;
     }
-    saveConversations().catch((err) => console.error("[AI Assistant] Unable to save conversation:", err));
+    saveConversations().catch(notifyHistorySaveFailure);
   };
   try {
 
@@ -2632,7 +2825,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       await saveConversations();
     } catch (err) {
       // A storage failure must not leave the composer locked or block the answer.
-      console.error("[AI Assistant] Unable to save conversation:", err);
+      notifyHistorySaveFailure(err);
     }
     if (isCancelled()) return;
 
@@ -2743,7 +2936,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       // Persist the new epoch boundary now, not only on DONE: a failed request
       // with no assistant text may never reach the normal save, and the next
       // reload would otherwise treat the page-change turn as legacy epoch 0.
-      saveConversations().catch((err) => console.error("[AI Assistant] Unable to save the page-context boundary:", err));
+      saveConversations().catch(notifyHistorySaveFailure);
     }
 
     // Markdown sources are shown rendered (headings, lists, tables, links);
@@ -2897,52 +3090,77 @@ async function processContextAction(pending) {
 let claimedContextActionAt = null;
 
 async function consumePendingContextAction(pending = null) {
-  // Always re-read storage, even when a payload arrived via the
-  // CONTEXT_ACTION runtime message: the stored record is the single source
-  // of truth for whether this action still needs processing.
-  const stored = await chrome.storage.local.get(PENDING_CONTEXT_ACTION_KEY);
-  const storedAction = stored[PENDING_CONTEXT_ACTION_KEY] || null;
-  const action = pending || storedAction;
-  if (!action) return;
-  // Ignore a stale menu action after 2 minutes, or one that was created for a
-  // different active tab. This prevents an old selection from being reused.
-  if (!action.createdAt || Date.now() - action.createdAt > 120000) {
-    await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: null });
-    return;
-  }
-  // Only the panel in the window the selection was made in may process the
-  // action. chrome.runtime.sendMessage reaches every extension page -
-  // including side panels open in OTHER browser windows - so without this
-  // scoping a second panel could claim the same action and submit the same
-  // prompt in parallel with the intended one. Skipping (instead of claiming
-  // and clearing) leaves the record for the window it belongs to.
-  // (If this panel's window cannot be determined, fall through and process as
-  // before.)
   const thisWindowId = await getPanelWindowId();
-  if (action.windowId && thisWindowId !== null && action.windowId !== thisWindowId) return;
-  // Claim the record BEFORE processing it. background.js delivers a context
-  // action through two independent channels - the storage record (consumed
-  // here when a freshly opened panel initializes) and a delayed
-  // CONTEXT_ACTION runtime message (for a panel that is already open) - so a
-  // single menu click could previously submit the same prompt twice: the
-  // message path acted on its payload directly, without noticing the record
-  // had already been consumed. Processing now starts only when the stored
-  // record still matches this action. The in-memory timestamp guard below is
-  // checked and set synchronously (no await in between), so two racing paths
-  // within this same document cannot both claim it; the storage comparison
-  // covers a second panel document (another browser window) racing this one.
-  if (action.createdAt === claimedContextActionAt) return;
-  const stillStored =
-    storedAction &&
-    storedAction.createdAt === action.createdAt &&
-    storedAction.action === action.action &&
-    storedAction.text === action.text;
-  if (!stillStored) return;
-  claimedContextActionAt = action.createdAt;
-  await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: null });
-  const activeTab = await getCurrentActiveTab();
-  if (action.tabId && activeTab?.id && action.tabId !== activeTab.id) return;
-  await processContextAction(action);
+  const claimed = await withNamedLock(CONTEXT_ACTION_LOCK, async () => {
+    const stored = await chrome.storage.local.get(PENDING_CONTEXT_ACTION_KEY);
+    const raw = stored[PENDING_CONTEXT_ACTION_KEY];
+    let list = Array.isArray(raw) ? raw.slice() : raw ? [raw] : [];
+    const now = Date.now();
+    const beforePrune = list.length;
+    list = list.filter((item) => item && item.createdAt && now - item.createdAt <= 120000);
+    const writeList = async () => {
+      await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: list.length ? list : null });
+    };
+
+    const matchesWindow = (item) => !item.windowId || thisWindowId === null || item.windowId === thisWindowId;
+    const matchesPayload = (item) =>
+      pending &&
+      item.createdAt === pending.createdAt &&
+      item.action === pending.action &&
+      item.text === pending.text;
+
+    let action = null;
+    if (pending) {
+      action = list.find(matchesPayload) || null;
+    }
+    if (!action) {
+      const activeTab = await getCurrentActiveTab().catch(() => null);
+      const candidates = list.filter(matchesWindow);
+      action =
+        candidates.find((item) => !item.tabId || !activeTab?.id || item.tabId === activeTab.id) ||
+        candidates[0] ||
+        null;
+    }
+
+    // A payload can arrive even if the storage append failed. Process it once
+    // (the per-window check and the in-memory claim below prevent duplicates).
+    if (!action && pending) {
+      if (!pending.createdAt || now - pending.createdAt > 120000) {
+        if (list.length !== beforePrune) await writeList();
+        return null;
+      }
+      if (pending.windowId && thisWindowId !== null && pending.windowId !== thisWindowId) return null;
+      const activeTab = await getCurrentActiveTab().catch(() => null);
+      if (pending.tabId && activeTab?.id && pending.tabId !== activeTab.id) return null;
+      return pending;
+    }
+    if (!action) {
+      if (list.length !== beforePrune) await writeList();
+      return null;
+    }
+    if (!matchesWindow(action)) {
+      if (list.length !== beforePrune) await writeList();
+      return null;
+    }
+    const activeTab = await getCurrentActiveTab().catch(() => null);
+    if (action.tabId && activeTab?.id && action.tabId !== activeTab.id) {
+      // Leave the action queued for the tab it belongs to; do not clear it.
+      if (list.length !== beforePrune) await writeList();
+      return null;
+    }
+    const index = list.indexOf(action);
+    if (index >= 0) list.splice(index, 1);
+    await writeList();
+    return action;
+  }).catch((err) => {
+    console.debug("[AI Assistant] Unable to claim context action:", err);
+    return null;
+  });
+
+  if (!claimed) return;
+  if (claimed.createdAt === claimedContextActionAt) return;
+  claimedContextActionAt = claimed.createdAt;
+  await processContextAction(claimed);
 }
 
 // Only the extension's own worker may drive the panel. Content scripts share
@@ -3040,8 +3258,10 @@ historySelect.addEventListener("change", async () => {
 });
 
 pageContextAllowBtn.addEventListener("click", async () => {
+  // Allow the host the bar actually showed, not whatever tab happens to be
+  // active if the user switched tabs before clicking.
   const tab = await getCurrentActiveTab().catch(() => null);
-  const host = hostOf(tab?.url);
+  const host = pageContextAllowBtn.dataset.host || hostOf(tab?.url);
   if (host) allowedSensitiveHosts.add(host);
   await refreshActivePageContext();
 });
@@ -3053,7 +3273,6 @@ includeContextToggle.addEventListener("change", () => {
 // Keep the displayed page context synchronized with the browser tab the user
 // is currently viewing. This does not send anything to the AI provider; the
 // refreshed context is used only when the next message is submitted.
-let pageContextRefreshToken = 0;
 let lastPageContextTabId = null;
 
 async function refreshActivePageContext() {
@@ -3066,8 +3285,9 @@ async function refreshActivePageContext() {
       return;
     }
     lastPageContextTabId = tab.id;
-    // Ignore a slower result if the user has already switched tabs again.
-    if (token !== pageContextRefreshToken) return;
+    // Re-check after the await: the user may have unchecked the toggle while
+    // the tab query was in flight. The token also rejects a newer refresh.
+    if (!includeContextToggle.checked || token !== pageContextRefreshToken) return;
     // Display-only refresh: show which page the next message would use,
     // from the tab's own title/URL. This used to run the full content-script
     // extraction (cloning and stripping document.body on large pages) on
@@ -3136,6 +3356,10 @@ function setInitLocked() {
 }
 
 async function init() {
+  // Recover the IndexedDB settings mirror before reading the privacy toggle or
+  // selected model: those reads must see recovered values, and the model
+  // mirror write below must not overwrite a backup with an un-recovered default.
+  await restoreSettingsFromBackupOnce();
   // Privacy first: know whether page reading is allowed before the composer is
   // unlocked, and before any other await can fail and land in the catch below.
   await loadIncludeContextPreference();
@@ -3146,14 +3370,12 @@ async function init() {
   scheduleHistoryRender();
   await restoreSelectedModel();
   // Load the saved conversation list (so the history dropdown is populated
-  // and past conversations stay one click away), but do not activate/display
-  // whichever one happened to be open last time (activate:false) - every
-  // fresh open of the side panel (after it was closed, or after a browser
-  // restart) should start on a blank New Topic instead of silently resuming
-  // the previous session. Explicitly clears the persisted "current
-  // conversation" pointer too, so it doesn't linger and get picked up by a
-  // later reactive refresh (see the chrome.storage.onChanged listener below).
-  await loadConversations({ activate: false });
+  // and past conversations stay one click away). This only refreshes the list;
+  // startNewTopic() below deliberately starts every fresh panel on a blank
+  // New Topic instead of silently resuming the previous session. It also
+  // clears the persisted "current conversation" pointer so it cannot linger
+  // and get picked up by a later reactive refresh.
+  await loadConversations();
   startNewTopic();
   renderHistorySelect();
   scheduleHistoryRender();
@@ -3207,21 +3429,14 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   //    the stale-model problem above, reloading `history` and re-rendering
   //    the chat log here would also fight the live streaming bubble, which
   //    only exists in memory (currentAssistantBubble) until DONE saves it.
-  // 2. activate:false - refresh only the saved-conversation LIST and the
-  //    history dropdown. Previously the default (activate:true) re-read the
-  //    persisted current-conversation pointer and, when it matched, reloaded
-  //    history and rebuilt the whole chat log after every completed save:
-  //    that wiped any text the user was selecting, restarted lazy-loaded
-  //    images in past bubbles, and - with side panels open in two windows -
-  //    let one panel's save switch the other panel to a different
-  //    conversation. The displayed conversation is only ever changed by
+  // 2. Refresh only the saved-conversation LIST and the history dropdown.
+  //    loadConversations() never activates a stored conversation or touches
+  //    the displayed chat. The displayed conversation is only ever changed by
   //    explicit navigation (the history dropdown), this panel's own
   //    submissions, or Settings > Delete All History (handled above); if the
   //    displayed conversation is merely replaced by Settings > Restore, it
   //    stays visible from memory and is re-persisted on its next send.
-  //    syncModel:false keeps the dropdown from following the model of an
-  //    incidental background sync.
   if (isStreaming) return;
-  loadConversations({ activate: false, syncModel: false })
+  loadConversations()
     .catch((err) => console.error("[AI Assistant] Unable to refresh restored history:", err));
 });

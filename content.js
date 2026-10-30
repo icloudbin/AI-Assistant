@@ -101,7 +101,7 @@ function extractSynologyMailPlus() {
     source: 'synology-mailplus',
     title: document.title,
     url: location.href,
-    text: parts.join('\n\n'),
+    text: capPageText(parts.join('\n\n')),
   };
 }
 
@@ -158,7 +158,7 @@ function extractProtonMail() {
     source: 'proton-mail',
     title: document.title,
     url: location.href,
-    text: parts.join('\n\n'),
+    text: capPageText(parts.join('\n\n')),
   };
 }
 
@@ -179,10 +179,22 @@ const PAGE_CONTEXT_CHAR_LIMIT = 120000;
 // (a cut that nobody hears about silently drops the end of the page).
 let pageTextTruncated = false;
 
+// Classic content script: cannot import models.js, so keep the same safe
+// UTF-16-to-code-point cut used by the module-side truncation paths.
+function cutAtCodePointBoundary(text, max) {
+  const value = String(text ?? '');
+  const limit = Math.max(0, Math.floor(Number(max) || 0));
+  if (value.length <= limit) return value;
+  let end = limit;
+  const last = value.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end--;
+  return value.slice(0, end);
+}
+
 function capPageText(text) {
   if (text.length <= PAGE_CONTEXT_CHAR_LIMIT) return text;
   pageTextTruncated = true;
-  return text.slice(0, PAGE_CONTEXT_CHAR_LIMIT);
+  return cutAtCodePointBoundary(text, PAGE_CONTEXT_CHAR_LIMIT);
 }
 const PAGE_IMAGE_URL_LIMIT = 8;
 const PAGE_IMAGE_MIN_DIMENSION = 120;
@@ -294,17 +306,29 @@ const READER_MODE_MAIN_PROSE_SHARE = 0.5;
 // Classification results and the page-wide text length are computed lazily and
 // cached for one extraction run (reset at the start of extractPageContent()).
 let readerModeNoiseCache = new WeakMap();
+let readerModeProseCache = new WeakMap();
+let readerModeMeasureCache = new WeakMap();
 let readerModePageProse = -1;
+// Cap the total number of nodes scored in one extraction. A page with many
+// nested candidates could otherwise make findReaderModeBestEl() do
+// O(candidates x subtree) work on the tab's main thread.
+const READER_MODE_MAX_SCORED_NODES = 250000;
+let readerModeScoredNodes = 0;
 
 function resetReaderModeCache() {
   readerModeNoiseCache = new WeakMap();
+  readerModeProseCache = new WeakMap();
+  readerModeMeasureCache = new WeakMap();
   readerModePageProse = -1;
+  readerModeScoredNodes = 0;
 }
 
 // Length of the text in el's subtree that is not inside a link. Scripts,
 // styles and other non-rendered tags are left out. Deliberately does not call
 // readerModeIsNoise(): it is what readerModeIsNoise() uses to decide.
 function readerModeProseLength(el) {
+  const cached = readerModeProseCache.get(el);
+  if (cached !== undefined) return cached;
   let length = 0;
   const walk = (node, inLink, depth) => {
     for (let c = node.firstChild; c; c = c.nextSibling) {
@@ -316,6 +340,7 @@ function readerModeProseLength(el) {
     }
   };
   walk(el, false, 0);
+  readerModeProseCache.set(el, length);
   return length;
 }
 
@@ -397,7 +422,7 @@ const VISIBLE_TEXT_SKIP_TAGS = new Set([
 // (<p> a blank line), <br> is a newline, table cells are tab-separated, and
 // whitespace is collapsed unless the element is preformatted. Noise elements
 // (see readerModeIsNoise) are skipped. Nothing is cloned, inserted, or modified.
-function readVisibleText(root, { filterNoise = true } = {}) {
+function readVisibleText(root, { filterNoise = true, skipElements = null } = {}) {
   const items = []; // text tokens ({ text, pre }) and required-line-break counts (numbers)
   const pushBreak = (n) => {
     const last = items.length - 1;
@@ -425,6 +450,7 @@ function readVisibleText(root, { filterNoise = true } = {}) {
   };
 
   const walk = (el, depth) => {
+    if (skipElements?.has(el)) return;
     if (isDefinitelyHidden(el)) return;
     const style = getComputedStyle(el);
     const display = style.display;
@@ -450,6 +476,7 @@ function readVisibleText(root, { filterNoise = true } = {}) {
         }
         if (text) items.push({ text, pre: preserve });
       } else if (c.nodeType === 1) {
+        if (skipElements?.has(c)) continue;
         const tag = c.localName;
         if (VISIBLE_TEXT_SKIP_TAGS.has(tag) || (filterNoise && readerModeIsNoise(c))) continue;
         if (isDefinitelyHidden(c)) continue;
@@ -513,27 +540,47 @@ function readVisibleText(root, { filterNoise = true } = {}) {
 // compare candidates against each other. Reads the live tree directly and skips
 // noise subtrees, so nothing is cloned and the live page is never affected.
 function readerModeMeasure(root) {
+  const cached = readerModeMeasureCache.get(root);
+  if (cached) return cached;
+  if (readerModeScoredNodes > READER_MODE_MAX_SCORED_NODES) {
+    return { textLength: 0, linkDensity: 1, longParagraphCount: 0 };
+  }
   let linkText = '';
   let longParagraphCount = 0;
+  let budgetHit = false;
   const walk = (node, inLink, depth) => {
+    if (budgetHit) return '';
     let own = '';
     for (let c = node.firstChild; c; c = c.nextSibling) {
       if (c.nodeType === 3) {
         own += c.nodeValue;
       } else if (c.nodeType === 1 && depth < EXTRACT_MAX_DEPTH && !readerModeIsNoise(c)) {
+        if (++readerModeScoredNodes > READER_MODE_MAX_SCORED_NODES) {
+          budgetHit = true;
+          return '';
+        }
         const isLink = c.localName === 'a';
         const sub = walk(c, inLink || isLink, depth + 1);
         own += sub;
+        if (budgetHit) break;
         if (isLink && !inLink) linkText += sub;
         if (c.localName === 'p' && sub.trim().length > 40) longParagraphCount++;
       }
     }
     return own;
   };
-  const text = walk(root, false, 0).replace(/\s+/g, ' ').trim();
+  const raw = walk(root, false, 0);
+  if (budgetHit) {
+    const aborted = { textLength: 0, linkDensity: 1, longParagraphCount: 0 };
+    readerModeMeasureCache.set(root, aborted);
+    return aborted;
+  }
+  const text = raw.replace(/\s+/g, ' ').trim();
   linkText = linkText.replace(/\s+/g, ' ').trim();
   const linkDensity = text.length ? linkText.length / text.length : 1;
-  return { textLength: text.length, linkDensity, longParagraphCount };
+  const result = { textLength: text.length, linkDensity, longParagraphCount };
+  readerModeMeasureCache.set(root, result);
+  return result;
 }
 
 // Returns a numeric score, or null if root fails the minimum bar outright
@@ -807,7 +854,7 @@ function extractReaderModeArticle() {
 // the clone before it is read.
 function extractAmazonProductPage() {
   const host = String(location.hostname || '').toLowerCase();
-  if (!/(^|\.)amazon\.[a-z.]+$/.test(host)) return null;
+  if (!/(^|\.)amazon\.[a-z]{2,3}(?:\.[a-z]{2})?$/.test(host)) return null;
 
   const sectionSelectors = [
     '#productTitle',
@@ -827,23 +874,30 @@ function extractAmazonProductPage() {
     '#productFactsMobileExpander',
   ];
   const seen = new Set();
-  const sections = [];
 
   for (const selector of sectionSelectors) {
-    for (const el of document.querySelectorAll(selector)) {
-      if (seen.has(el)) continue;
-      seen.add(el);
-      const text = textContentWithoutNoise(el).replace(/\s+/g, ' ').trim();
-      if (text) sections.push(text);
-    }
+    for (const el of document.querySelectorAll(selector)) seen.add(el);
+  }
+  // Several of the selectors are nested (for example #productDescription is
+  // inside #productDescription_feature_div). Keep only the outermost matching
+  // elements so the same text is not appended once per selector.
+  const captured = [...seen].filter(
+    (el) => ![...seen].some((other) => other !== el && other.contains(el))
+  );
+  const sections = [];
+  for (const el of captured) {
+    const text = textContentWithoutNoise(el).replace(/\s+/g, ' ').trim();
+    if (text) sections.push(text);
   }
   if (!sections.length) return null;
 
   // Preserve a cleaned representation of the rest of the page as well. This
   // lets questions about material outside the standard product modules still
   // use the full page, while product facts remain at the front of the context.
+  // The captured modules are skipped here, otherwise every product fact would
+  // appear a second time in the FULL READABLE PAGE block.
   const fullPageText = document.body
-    ? readVisibleText(document.body).replace(/\n{3,}/g, '\n\n').trim()
+    ? readVisibleText(document.body, { skipElements: new Set(captured) }).replace(/\n{3,}/g, '\n\n').trim()
     : '';
 
   const text = [
@@ -876,6 +930,17 @@ const MD_SKIP_TAGS = new Set([
   'nav', 'aside', 'footer', 'head', 'title', 'meta', 'link',
 ]);
 const MD_NOISE_PATTERN = /cookie|consent|banner|newsletter|popup|modal|overlay|advert|sponsor|skip-link/i;
+// Container words do not make a block chrome by themselves; they let a name
+// such as "comment-list" be classified as noise while a real content wrapper
+// such as "cookie-recipe" or "newsletter-archive" is kept.
+const MD_NEUTRAL_NAME_WORDS = new Set([
+  'list', 'container', 'wrapper', 'section', 'block', 'area', 'panel', 'inner',
+  'outer', 'box', 'grid', 'row', 'column', 'col', 'left', 'right', 'top', 'bottom',
+  'dialog', 'content', 'main', 'body',
+]);
+// Deeply nested pages must not overflow the recursive Markdown walker. Beyond
+// this depth the subtree is flattened to plain text instead of recursing.
+const MD_MAX_DEPTH = 200;
 const MD_BLOCK_TAGS = new Set([
   'address', 'article', 'blockquote', 'body', 'dd', 'details', 'div', 'dl', 'dt',
   'fieldset', 'figcaption', 'figure', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header',
@@ -887,6 +952,31 @@ const MD_LIST_MARK = '\u0001';
 
 function mdDisplay(el) {
   try { return getComputedStyle(el).display || ''; } catch (err) { return ''; }
+}
+
+function mdNameNoise(el) {
+  const signature = `${el.id || ''} ${typeof el.className === 'string' ? el.className : ''}`;
+  if (!MD_NOISE_PATTERN.test(signature)) return false;
+  if (READER_MODE_SKIP_LINK_PATTERN.test(signature)) return true;
+  const words = readerModeNameWords(signature);
+  if (!words.length) return false;
+  const strong = words.some((word) => READER_MODE_STRONG_NOISE_WORDS.has(word));
+  const layout = words.some((word) => READER_MODE_LAYOUT_NOISE_WORDS.has(word));
+  if (!strong && !layout) return false;
+  // Only classify as chrome when every word is a noise or neutral container
+  // word. This keeps legitimate compound content names (cookie-recipe,
+  // newsletter-archive, commentary, ...) instead of dropping them because one
+  // substring matched.
+  const allNoise = words.every((word) =>
+    READER_MODE_STRONG_NOISE_WORDS.has(word) ||
+    READER_MODE_LAYOUT_NOISE_WORDS.has(word) ||
+    MD_NEUTRAL_NAME_WORDS.has(word)
+  );
+  if (!allNoise) return false;
+  // Layout names are also routinely on wrappers around the real content; a
+  // wrapper holding most of the page's prose is content, not chrome.
+  if (layout) return !readerModeHoldsMostOfPage(el);
+  return strong;
 }
 
 function mdSkip(el) {
@@ -903,8 +993,11 @@ function mdSkip(el) {
     const visibility = getComputedStyle(el).visibility;
     if (visibility === 'hidden' || visibility === 'collapse') return true;
   } catch (err) { /* style unreachable: keep the element */ }
-  const sig = `${el.id || ''} ${typeof el.className === 'string' ? el.className : ''}`;
-  return MD_NOISE_PATTERN.test(sig);
+  // The body of a closed <details> is not rendered; only <summary> is. Without
+  // this, translation included invisible text the reader never sees.
+  const closedDetails = el.parentElement?.closest?.('details:not([open])');
+  if (closedDetails && !el.closest('summary')) return true;
+  return mdNameNoise(el);
 }
 
 function mdIsBlock(el) {
@@ -926,7 +1019,14 @@ function mdWrap(inner, mark) {
   return `${inner.match(/^\s*/)[0]}${mark}${core}${mark}${inner.match(/\s*$/)[0]}`;
 }
 
-function mdInlineList(nodes, pre) {
+function mdInlineList(nodes, pre, depth = 0) {
+  if (depth > MD_MAX_DEPTH) {
+    return Array.from(nodes)
+      .map((node) => (node.nodeType === 3 ? node.nodeValue || '' : node.textContent || ''))
+      .join('')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
   let out = '';
   for (const c of nodes) {
     if (c.nodeType === 3) {
@@ -947,7 +1047,7 @@ function mdInlineList(nodes, pre) {
       if (src) out += `![${(c.getAttribute('alt') || '').replace(/[\[\]\n]/g, ' ').trim()}](${src})`;
       continue;
     }
-    const inner = mdInlineList(Array.from(c.childNodes), pre);
+    const inner = mdInlineList(Array.from(c.childNodes), pre, depth + 1);
     if (tag === 'strong' || tag === 'b') out += mdWrap(inner, '**');
     else if (tag === 'em' || tag === 'i') out += mdWrap(inner, '*');
     else if (tag === 'del' || tag === 's' || tag === 'strike') out += mdWrap(inner, '~~');
@@ -974,7 +1074,7 @@ function mdTable(el) {
   for (const tr of el.querySelectorAll(':scope > thead > tr, :scope > tbody > tr, :scope > tfoot > tr, :scope > tr')) {
     const cells = Array.from(tr.children)
       .filter((cell) => cell.localName === 'td' || cell.localName === 'th')
-      .map((cell) => mdInlineList(Array.from(cell.childNodes), false).replace(/\s+/g, ' ').replace(/\|/g, '/').trim());
+      .map((cell) => mdInlineList(Array.from(cell.childNodes), false).replace(/\s+/g, ' ').replace(/\|/g, '\\|').trim());
     if (cells.length) rows.push(cells);
   }
   if (!rows.length) return '';
@@ -985,6 +1085,7 @@ function mdTable(el) {
 }
 
 function mdList(el, depth) {
+  if (depth > MD_MAX_DEPTH) return mdCleanInline(el.textContent || '');
   const ordered = el.localName === 'ol';
   let n = parseInt(el.getAttribute('start') || '1', 10) || 1;
   const pad = '  '.repeat(depth);
@@ -1024,22 +1125,32 @@ function mdList(el, depth) {
 }
 
 function mdBlocksOf(root, depth = 0) {
+  if (depth > MD_MAX_DEPTH) {
+    const text = mdCleanInline(root.textContent || '');
+    return text ? [text] : [];
+  }
   const blocks = [];
   let run = [];
   const flush = () => {
     if (!run.length) return;
-    const text = mdCleanInline(mdInlineList(run, false));
+    const text = mdCleanInline(mdInlineList(run, false, depth));
     run = [];
     if (text) blocks.push(text);
   };
-  const visit = (parent) => {
+  const visit = (parent, level) => {
     for (const c of Array.from(parent.childNodes)) {
       if (c.nodeType === 3) { run.push(c); continue; }
       if (c.nodeType !== 1 || mdSkip(c)) continue;
       const tag = c.localName;
+      if (level >= MD_MAX_DEPTH) {
+        flush();
+        const text = mdCleanInline(c.textContent || '');
+        if (text) blocks.push(text);
+        continue;
+      }
       if (/^h[1-6]$/.test(tag)) {
         flush();
-        const text = mdInlineList(Array.from(c.childNodes), false).replace(/\s+/g, ' ').trim();
+        const text = mdInlineList(Array.from(c.childNodes), false, level + 1).replace(/\s+/g, ' ').trim();
         if (text) blocks.push(`${'#'.repeat(Number(tag[1]))} ${text}`);
       } else if (tag === 'ul' || tag === 'ol') {
         flush();
@@ -1047,7 +1158,7 @@ function mdBlocksOf(root, depth = 0) {
         if (list) blocks.push(depth > 0 ? MD_LIST_MARK + list : list);
       } else if (tag === 'blockquote') {
         flush();
-        const inner = mdBlocksOf(c, 0).map((b) => b.replace(new RegExp(MD_LIST_MARK, 'g'), '')).join('\n\n');
+        const inner = mdBlocksOf(c, depth + 1).map((b) => b.replace(new RegExp(MD_LIST_MARK, 'g'), '')).join('\n\n');
         if (inner) blocks.push(inner.split('\n').map((l) => (l ? `> ${l}` : '>')).join('\n'));
       } else if (tag === 'pre') {
         flush();
@@ -1062,14 +1173,14 @@ function mdBlocksOf(root, depth = 0) {
         blocks.push('---');
       } else if (mdIsBlock(c) || c.querySelector(MD_BLOCK_SELECTOR)) {
         flush();
-        visit(c);
+        visit(c, level + 1);
         flush();
       } else {
         run.push(c);
       }
     }
   };
-  visit(root);
+  visit(root, depth);
   flush();
   return blocks;
 }
@@ -1078,7 +1189,7 @@ function mdCut(text) {
   let out = text.replace(new RegExp(MD_LIST_MARK, 'g'), '').replace(/\n{3,}/g, '\n\n').trim();
   if (out.length > PAGE_CONTEXT_CHAR_LIMIT) {
     pageTextTruncated = true;
-    out = out.slice(0, PAGE_CONTEXT_CHAR_LIMIT);
+    out = cutAtCodePointBoundary(out, PAGE_CONTEXT_CHAR_LIMIT);
     const cut = out.lastIndexOf('\n');
     if (cut > 0) out = out.slice(0, cut);
   }

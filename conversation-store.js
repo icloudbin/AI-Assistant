@@ -84,11 +84,16 @@ export function mergeConversationLists(stored, local, currentId) {
 // participate. Older environments without navigator.locks keep the previous
 // behaviour (the per-panel save queue still serializes that panel).
 export const HISTORY_WRITE_LOCK = "ai-assistant-history-write";
+export const CONTEXT_ACTION_LOCK = "ai-assistant-context-action";
 
-export async function withHistoryLock(task) {
+export async function withNamedLock(name, task) {
   const locks = globalThis.navigator?.locks;
   if (!locks?.request) return task();
-  return locks.request(HISTORY_WRITE_LOCK, { mode: "exclusive" }, () => task());
+  return locks.request(name, { mode: "exclusive" }, () => task());
+}
+
+export async function withHistoryLock(task) {
+  return withNamedLock(HISTORY_WRITE_LOCK, task);
 }
 
 function samePage(a, b) {

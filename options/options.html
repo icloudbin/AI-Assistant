@@ -241,10 +241,10 @@
     </div>
   </div>
 
-  <div id="deleteConfirm" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+  <div id="deleteConfirm" class="modal-backdrop" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmText">
     <div class="confirm-modal">
       <h3 id="confirmTitle" data-i18n="deleteConfirm_title">Delete all history?</h3>
-      <p data-i18n="deleteConfirm_text">This will permanently delete all saved conversation history. This action cannot be undone.</p>
+      <p id="confirmText" data-i18n="deleteConfirm_text">This will permanently delete all saved conversation history. This action cannot be undone.</p>
       <div class="confirm-actions">
         <button id="confirmNo" type="button" data-i18n="deleteConfirm_no">No</button>
         <button id="confirmYes" type="button" data-i18n="deleteConfirm_yes">Yes</button>

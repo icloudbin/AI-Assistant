@@ -4,9 +4,20 @@
 // now import from here instead of each hard-coding their own copy).
 export const HISTORY_STORAGE_KEY = "conversationHistory";
 export const CURRENT_CONVERSATION_KEY = "currentConversationId";
-// UI display language (see i18n.js) - independent of MIC_LANG_STORAGE_KEY in
-// sidepanel.js, which only picks the Web Speech recognition language.
+// UI display language (see i18n.js) - independent of MIC_LANG_STORAGE_KEY,
+// which only picks the Web Speech recognition language.
 export const LANGUAGE_STORAGE_KEY = "languagePreference";
+// UI theme: "light" | "dark" | "device".
+export const THEME_STORAGE_KEY = "themePreference";
+// Privacy: send the current page with ordinary questions.
+export const INCLUDE_CONTEXT_STORAGE_KEY = "includeCurrentPageContext";
+// Privacy: attach page screenshots/images to quick actions.
+export const PAGE_VISUALS_STORAGE_KEY = "pageVisualsEnabled";
+// Privacy filter default-on flag (see privacy/pii-filter.js).
+export const PII_FILTER_STORAGE_KEY = "piiFilterEnabled";
+// Voice recognition language and the persisted composer height.
+export const MIC_LANG_STORAGE_KEY = "micRecognitionLang";
+export const COMPOSER_HEIGHT_STORAGE_KEY = "composerHeight";
 
 // Text selected from a webpage for the AI context menu.
 export const PENDING_CONTEXT_ACTION_KEY = "pendingContextAction";
