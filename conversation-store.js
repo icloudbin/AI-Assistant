@@ -121,14 +121,23 @@ export function resolveContextEpoch(history, currentPageContext) {
   const prior = list.slice(0, -1);
   let previousPage = null;
   let previousEpoch = 0;
+  // Scan backward for two INDEPENDENT facts: the epoch of the most recent
+  // submitted turn, and the most recent page context anywhere before this
+  // request. They can sit in different messages: a turn submitted with page
+  // reading off (or after a failed capture) carries an epoch but no page, and
+  // stopping the scan at that message hid a later page change - the previous
+  // page's turns stayed in the request history and the "page changed" hint was
+  // never built.
+  let epochFound = false;
   for (let i = prior.length - 1; i >= 0; i--) {
     const message = prior[i];
     if (!message || message.role !== "user") continue;
     if (!previousPage && message.pageContext) previousPage = message.pageContext;
-    if (Number.isInteger(message.contextEpoch)) {
+    if (!epochFound && Number.isInteger(message.contextEpoch)) {
       previousEpoch = message.contextEpoch;
-      break;
+      epochFound = true;
     }
+    if (previousPage && epochFound) break;
   }
   // Conversations saved by older builds have no explicit epoch. Derive one
   // from the pageContext transitions so a page change that was persisted

@@ -4,6 +4,20 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Fix: round-10 deep review - store zip CWS-incompatible, masked page-change detection, display-template drift, packaging doc (v1.10.122)
+
+Round 10 of the full-code review (diff since round 8 read line by line, plus whole-tree review agents; findings verified by execution before fixing) confirmed four defects: 1 P1, 1 P2, 2 P3.
+
+- **Problem 1 (P1).** Every store zip built by `scripts/build-package.mjs` was Chrome-Web-Store-incompatible: on Windows it compressed with PowerShell 5.1's `Compress-Archive`, which stores nested entry names with backslash separators (`providers\messages.js` as one literal name). The store rejects such archives, and the script's own `Expand-Archive` round-trip tolerated them, so the mistake never surfaced.
+- **Fix 1.** The builder now uses a pure-Node zip writer (zlib deflate with a store fallback, table CRC-32, forward-slash entry names, no directory entries) and verifies the finished archive at the byte level: it re-parses the central directory and every local header, inflates each entry, and compares CRC-32 and raw bytes against the source files, rejecting any backslash or directory entry by name. Verified with an independent Python `zipfile` extraction (byte-diff against the repo) and a real-Chrome boot of the extracted package copy.
+- **Problem 2 (P2).** A page change went undetected when the previous turn had no page context. `resolveContextEpoch()` stopped searching for the "previous page" at the most recent epoch-tagged turn, so a turn submitted with page reading off (or after a failed capture) made `previousPage` null: the next request on a different page kept the old page's turns in the model history and never built the "page changed" hint - exactly what the epoch feature exists to prevent, and weaker than the pre-epoch code.
+- **Fix 2.** The backward scan now tracks two independent facts: the newest epoch (sticky) and the most recent page context anywhere before the request, stopping only once both are known. +8 regression assertions in `test-conversation-store.mjs` (masked switch, legacy-masked switch, and the reverse order that must keep working).
+- **Problem 3 (P3).** The thought-process display block was constructed from the same string template in five places (worker-recycle recovery, streaming render, deferred final render, DONE and ERROR display copies) - any future wording change would silently diverge them.
+- **Fix 3.** One `assistantDisplayText()` helper now produces the block for all five producers; the template strings appear exactly once.
+- **Problem 4 (P3).** `docs/packaging.md` never mentioned the store-package build script.
+- **Fix 4.** A "Build the store zip" section documents `node scripts/build-package.mjs`, why the writer is pure Node, and warns against replacing it with `Compress-Archive`.
+- **Checked.** All 16 suites green (real-Chrome E2E 11/11, extension E2E 29/29) + `check-package.mjs` OK. The provider/service-worker side was re-reviewed by a separate agent with execution harnesses (epoch-empty history, field leakage, redaction walk, stream timers, safePost coverage): no new findings. Build bumped to 1.10.122.
+
 ## Fix: P3 deep-review batch - selection-safe final render, extractor/privacy hardening, context-bar and i18n state, context-action queue, save/async robustness, voice edits, reader performance, Unicode and accessibility (v1.10.121)
 
 - **P3-1** The terminal DONE/ERROR repaint no longer rewrites the assistant bubble while the user is selecting text in it; the finished text is applied when the selection collapses, and the reply is still saved to history immediately.

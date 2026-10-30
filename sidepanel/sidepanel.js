@@ -456,13 +456,7 @@ function connectPort() {
       currentAssistantBubble = null;
     }
     if (textToKeep) {
-      let displayContent = currentAssistantText;
-      if (currentThinkingText.trim()) {
-        const thinkingLines = currentThinkingText.trim().split("\n").map((l) => `> ${l}`).join("\n");
-        displayContent = !currentAssistantText.trim()
-          ? `> 💭 *Thinking...*\n>\n${thinkingLines}`
-          : `> 💭 *Thought process:*\n>\n${thinkingLines}\n\n${currentAssistantText}`;
-      }
+      const displayContent = assistantDisplayText(currentAssistantText, currentThinkingText);
       history.push({
         role: "assistant",
         content: textToKeep,
@@ -1420,6 +1414,20 @@ function applyDeferredFinalRender() {
 
 document.addEventListener("selectionchange", applyDeferredFinalRender);
 
+// The thought-process block rendered above an assistant reply. ONE definition
+// for every producer of that display text - the streaming renderer, the
+// deferred final repaint, the DONE/ERROR display copies and the
+// worker-recycle recovery - so the wording can never drift apart.
+function assistantDisplayText(assistantText, thinkingText) {
+  const reply = String(assistantText || "");
+  const thinking = String(thinkingText || "").trim();
+  if (!thinking) return reply;
+  const thinkingLines = thinking.split("\n").map((l) => `> ${l}`).join("\n");
+  return !reply.trim()
+    ? `> 💭 *Thinking...*\n>\n${thinkingLines}`
+    : `> 💭 *Thought process:*\n>\n${thinkingLines}\n\n${reply}`;
+}
+
 // Repaint the streaming bubble from currentAssistantText right now, dropping
 // any pending coalesced render. Also a clean no-op once the bubble is gone
 // (STOP, or a superseded request): the queued flags are cleared first, so a
@@ -1437,13 +1445,7 @@ function renderStreamingBubble(force = false) {
     if (force) {
       // Keep the final text for the selectionchange handler instead of
       // destroying the user's selection with the terminal rewrite.
-      let deferredText = currentAssistantText;
-      if (currentThinkingText.trim()) {
-        const thinkingLines = currentThinkingText.trim().split("\n").map((l) => `> ${l}`).join("\n");
-        deferredText = !currentAssistantText.trim()
-          ? `> 💭 *Thinking...*\n>\n${thinkingLines}`
-          : `> 💭 *Thought process:*\n>\n${thinkingLines}\n\n${currentAssistantText}`;
-      }
+      const deferredText = assistantDisplayText(currentAssistantText, currentThinkingText);
       deferredFinalRender = {
         bubble: currentAssistantBubble,
         text: deferredText,
@@ -1454,15 +1456,7 @@ function renderStreamingBubble(force = false) {
     scheduleStreamingRender();
     return;
   }
-  let textToRender = currentAssistantText;
-  if (currentThinkingText.trim()) {
-    const thinkingLines = currentThinkingText.trim().split("\n").map((l) => `> ${l}`).join("\n");
-    if (!currentAssistantText.trim()) {
-      textToRender = `> 💭 *Thinking...*\n>\n${thinkingLines}`;
-    } else {
-      textToRender = `> 💭 *Thought process:*\n>\n${thinkingLines}\n\n${currentAssistantText}`;
-    }
-  }
+  const textToRender = assistantDisplayText(currentAssistantText, currentThinkingText);
   setBubbleContent(currentAssistantBubble, textToRender, "assistant", pendingPlainReply);
   scrollToBottom();
 }
@@ -1538,15 +1532,7 @@ function handlePortMessage(msg) {
       if (currentAssistantBubble) {
         currentAssistantBubble.classList.remove("pending");
       }
-      let displayContent = currentAssistantText;
-      if (currentThinkingText.trim()) {
-        const thinkingLines = currentThinkingText.trim().split("\n").map((l) => `> ${l}`).join("\n");
-        if (!currentAssistantText.trim()) {
-          displayContent = `> 💭 *Thinking...*\n>\n${thinkingLines}`;
-        } else {
-          displayContent = `> 💭 *Thought process:*\n>\n${thinkingLines}\n\n${currentAssistantText}`;
-        }
-      }
+      const displayContent = assistantDisplayText(currentAssistantText, currentThinkingText);
       history.push({
         role: "assistant",
         content: currentAssistantText || currentThinkingText,
@@ -1587,13 +1573,7 @@ function handlePortMessage(msg) {
         currentAssistantBubble = null;
       }
       if (textToKeep) {
-        let displayContent = currentAssistantText;
-        if (currentThinkingText.trim()) {
-          const thinkingLines = currentThinkingText.trim().split("\n").map((l) => `> ${l}`).join("\n");
-          displayContent = !currentAssistantText.trim()
-            ? `> 💭 *Thinking...*\n>\n${thinkingLines}`
-            : `> 💭 *Thought process:*\n>\n${thinkingLines}\n\n${currentAssistantText}`;
-        }
+        const displayContent = assistantDisplayText(currentAssistantText, currentThinkingText);
         history.push({
           role: "assistant",
           content: textToKeep,

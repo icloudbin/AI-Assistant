@@ -192,6 +192,47 @@ const assistant = (content) => ({ role: "assistant", content });
   eq("legacy follow-up after switch: derived epoch 1", legacyFollowUp.epoch, 1);
   eq("legacy follow-up after switch: starts at page-B turn", legacyFollowUp.start, 2);
 }
+{
+  // A turn submitted WITHOUT a page context (page reading toggled off, or a
+  // failed capture) carries an epoch but no pageContext. It must not hide a
+  // later page change: the search for the previous page continues past it,
+  // otherwise the previous page's turns stay in the request history and the
+  // "page changed" hint is never built.
+  const masked = resolveContextEpoch(
+    [user("q1", pageA, 0), assistant("a1 (page A)"), user("q2 private", null, 0), assistant("a2"), user("q3")],
+    pageB
+  );
+  eq("no-page turn between pages: change still detected", masked.changed, true);
+  eq("no-page turn between pages: new epoch", masked.epoch, 1);
+  eq("no-page turn between pages: previous page found", masked.previousPage.url, pageA.url);
+  eq("no-page turn between pages: no earlier history", masked.start, 4);
+}
+{
+  // Same masking shape from a legacy history: the only page context is older
+  // than the most recent epoch-bearing (no-page) turn.
+  const legacyMasked = resolveContextEpoch(
+    [user("q1", pageA), assistant("a1"), user("q2", null, 0), assistant("a2"), user("q3")],
+    pageB
+  );
+  eq("legacy no-page turn: change still detected", legacyMasked.changed, true);
+  eq("legacy no-page turn: new epoch", legacyMasked.epoch, 1);
+  eq("legacy no-page turn: no earlier history", legacyMasked.start, 4);
+}
+{
+  // The reverse order must keep working: a no-page turn AFTER the switch does
+  // not un-scope the current (page-B) epoch.
+  const after = resolveContextEpoch(
+    [
+      user("q1", pageA, 0), assistant("a1"),
+      user("q2", pageB, 1), assistant("a2"),
+      user("q3", null, 1), assistant("a3"),
+      user("q4"),
+    ],
+    pageB
+  );
+  eq("no-page follow-up on the new page: same epoch", after.epoch, 1);
+  eq("no-page follow-up on the new page: starts at page-B turn", after.start, 2);
+}
 
 // ---------- cross-context history write lock ----------
 {
