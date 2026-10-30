@@ -13,6 +13,8 @@
 //      commentary from the model is dropped.
 // The result always has exactly the same line layout as the source.
 
+import { cutAtCodePointBoundary } from "./models.js";
+
 // List markers / numbering that stay in code: latin "1."/"1)" (the space
 // after is mandatory so "3.14" never loses its "3."), CJK enumerators
 // "1、"/"一、" (written tight against the text, so no space required),
@@ -68,7 +70,10 @@ export function prepareLineTranslation(source, maxChars = 120000) {
   let truncated = false;
   if (text.length > maxChars) {
     truncated = true;
-    text = text.slice(0, maxChars);
+    // Cut between code points: a UTF-16 slice can halve an emoji / astral
+    // character and send a lone surrogate to the model (every other text cap
+    // in the codebase goes through this helper - see models.js).
+    text = cutAtCodePointBoundary(text, maxChars);
     const cut = text.lastIndexOf("\n");
     if (cut > 0) text = text.slice(0, cut);
   }

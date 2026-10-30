@@ -165,7 +165,16 @@ export function resolveContextEpoch(history, currentPageContext) {
   const changed = Boolean(
     currentPageContext && previousPage && !samePage(previousPage, currentPageContext)
   );
-  const epoch = changed ? previousEpoch + 1 : previousEpoch;
+  // A page change gets a wall-clock epoch id, not previousEpoch + 1: two side
+  // panels sharing one conversation (and submitting from different pages) each
+  // incremented the counter to the SAME value, and after the union merge the
+  // history contained two runs of that epoch - the forward start-scan then
+  // locked onto the first run and sent the OTHER page's turns as context.
+  // Timestamps make every page change unique, so the current epoch always has
+  // exactly one run. max() keeps the value monotonic if the clock steps
+  // backwards; two panels changing pages within the same millisecond falls
+  // back to the old shared-id behaviour (vanishingly rare, human-driven).
+  const epoch = changed ? Math.max(previousEpoch + 1, Date.now()) : previousEpoch;
   // The current message is not tagged yet, so only search the prior turns for
   // the start of this epoch. If none exists this is a new epoch and the request
   // starts at the current message (no earlier history).

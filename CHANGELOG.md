@@ -4,6 +4,23 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Fix: round-10 review part 2 - URL secret over-capture, duplicated attachment turns, epoch uniqueness, surrogate-safe cut, deferred final render (v1.10.123)
+
+Second batch of the round-10 review fixes (findings verified by execution before fixing, then re-verified end to end in real Chrome).
+
+- **Problem 1 (P1).** The secret key=value rule's bare-value class did not exclude `&`, `[` or `]`: a URL like `?token=X&page=2&id=7` swallowed the rest of the query string as one secret (the model never saw the harmless parameters), and a value that an earlier rule had already turned into a placeholder (`?token=[JWT#1]&prompt=none`) was rewritten to an unnumbered `[SECRET]` - the placeholder was destroyed, its value mapping permanently severed and the query tail unrecoverable.
+- **Fix 1.** The bare-value class now stops at `&`, `[` and `]` (base64 padding `=` stays inside, so padded secrets still redact fully), and a value containing a numbered placeholder is never re-redacted (the guard also covers the quoted alternatives). `?token=X&page=2&id=7` now redacts only X with a full restore round-trip; placeholder-valued parameters survive intact. +7 regression cases.
+- **Problem 2 (P2).** A quota-escalated save persisted condensed copies of attachment-bearing turns, but the next save re-projected the full text: the stored condensed copy and the fresh copy had different merge identities, so the union merge kept BOTH - a duplicate user bubble after a reload and the same question sent to the model twice, stable across saves.
+- **Fix 2.** The condensed projection is remembered on the live messages after the compressed write succeeds (only when the stored copy is exactly the condensed form of this panel's own message - another panel's divergent turn at the same index is never adopted), and the projector reuses it. Saves are now idempotent: one copy, no duplication, and the live session keeps the full text. Pinned by a test that demonstrates the duplication without the flag and the single copy with it.
+- **Problem 3 (P3).** Two side panels sharing a conversation and submitting from different pages each computed the SAME page-change epoch id (a small counter); after the cross-panel merge the history contained two runs of that epoch and the start-scan locked onto the first run, sending the other page's turns as context.
+- **Fix 3.** Page-change epochs are now wall-clock values (monotonic via max), unique per page change, so the current epoch always has exactly one run even after a merge. Clock skew stays monotonic; legacy small-epoch conversations keep deriving as before.
+- **Problem 4 (P3).** The translation length cap cut with a raw UTF-16 slice, which can halve an emoji at the boundary and send a lone surrogate to the model.
+- **Fix 4.** The cap goes through the same surrogate-safe `cutAtCodePointBoundary()` helper as every other text cap.
+- **Problem 5 (P3).** A final assistant render deferred by an active text selection was DISCARDED when the next request started (START), leaving the previous bubble without its last characters until a reload.
+- **Fix 5.** START now applies a pending deferred render instead of dropping it: a bubble that is still connected gets its final text, an active selection keeps the deferral for later, a disconnected bubble is dropped.
+- **Checked.** All 18 suites + `check-package.mjs` green (real-Chrome E2E 11/11, extension E2E 29/29, +20 unit assertions). Adversarial probes: 18 PII checks (multi-secret URLs, JWT mid-URL, placeholder guards, ReDoS timing) and 12 quota/epoch checks (three-save cycle, cross-panel adoption, divergent-turn refusal, clock-skew monotonicity). Real-Chrome CDP retest 8/8: the outbound provider request body redacts the token while `&page=2&id=7` stays visible, and the deferred final render survives a new submission and lands when the selection collapses.
+- Build bumped to 1.10.123.
+
 ## Fix: round-10 deep review - store zip CWS-incompatible, masked page-change detection, display-template drift, packaging doc (v1.10.122)
 
 Round 10 of the full-code review (diff since round 8 read line by line, plus whole-tree review agents; findings verified by execution before fixing) confirmed four defects: 1 P1, 1 P2, 2 P3.

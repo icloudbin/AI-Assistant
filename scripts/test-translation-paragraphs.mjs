@@ -247,3 +247,16 @@ assert.deepEqual(browserPreferred, { text: "One\n\nTwo", format: "text", truncat
 }
 
 console.log("OK: translated paragraphs, trailing whitespace, and selection-source precedence are preserved.");
+
+// ---------- the length cap cuts between code points (round-10 P3) ----------
+{
+  // 119999 "a" + one astral emoji = 120001 UTF-16 units: the cap at 120000
+  // lands between the surrogate pair. A raw slice() sent a lone high
+  // surrogate to the model.
+  const text = "a".repeat(119999) + "😀" + "\nlast line";
+  const prepared = prepareLineTranslation(text);
+  assert.equal(prepared.truncated, true, "oversized source is flagged as truncated");
+  const all = prepared.lines.map((l) => l.raw).join("\n");
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(all), "no lone high surrogate after the cut");
+  assert.ok(!/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(all), "no lone low surrogate after the cut");
+}

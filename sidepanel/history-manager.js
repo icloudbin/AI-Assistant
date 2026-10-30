@@ -51,7 +51,16 @@ function condenseStoredContent(text) {
 }
 
 function toStoredMessage(message) {
-  const content = message.role === "user" ? condenseStoredContent(message.content) : message.content;
+  // Once a quota-escalated save condensed this message for storage
+  // (rememberQuotaCondensedContent), the condensed form IS the storage
+  // projection: re-projecting the full text would give the stored condensed
+  // copy a different merge identity and duplicate the turn. A reload never
+  // sees the flag - it reads the condensed copy back as content.
+  const content = message.role === "user"
+    ? (typeof message.quotaCondensedContent === "string" && message.quotaCondensedContent
+        ? message.quotaCondensedContent
+        : condenseStoredContent(message.content))
+    : message.content;
   // displayContent is a display-only copy; store it ONLY when it differs
   // from content - every reader falls back to `content`. Identical copies
   // (every assistant turn, plain user turns) used to double the stored size
@@ -84,6 +93,16 @@ function toStoredMessage(message) {
 // display-only copy of every message (readers fall back to `content`).
 // Lossy for display, but every conversation and every turn is kept.
 const QUOTA_ATTACHMENT_PREVIEW_CHARS = 800;
+// The exact per-content transform of the quota pass. Shared with
+// rememberQuotaCondensedContent(), which must recognize the condensed form it
+// produced - the two must never drift apart.
+function quotaCondenseContent(text) {
+  return String(text || "").replace(/\[ATTACHMENTS\][\s\S]*?\[\/ATTACHMENTS\]/gi, (block) =>
+    block.length <= QUOTA_ATTACHMENT_PREVIEW_CHARS
+      ? block
+      : `${block.slice(0, QUOTA_ATTACHMENT_PREVIEW_CHARS).trimEnd()}\n...[/ATTACHMENTS]`
+  );
+}
 function compressForQuota(list) {
   return list.map((c) => ({
     ...c,
@@ -92,15 +111,39 @@ function compressForQuota(list) {
       const compressed = { ...m };
       delete compressed.displayContent;
       if (typeof compressed.content === "string") {
-        compressed.content = compressed.content.replace(/\[ATTACHMENTS\][\s\S]*?\[\/ATTACHMENTS\]/gi, (block) =>
-          block.length <= QUOTA_ATTACHMENT_PREVIEW_CHARS
-            ? block
-            : `${block.slice(0, QUOTA_ATTACHMENT_PREVIEW_CHARS).trimEnd()}\n...[/ATTACHMENTS]`
-        );
+        compressed.content = quotaCondenseContent(compressed.content);
       }
       return compressed;
     }),
   }));
+}
+
+// After a quota-escalated save persisted condensed copies, remember the
+// condensed text on the LIVE messages (index-aligned with the stored current
+// conversation - syncCurrentConversationFromHistory projects history 1:1).
+// Without this, the next save re-projects the full text, the stored condensed
+// copy gets a different merge identity (role+modelId+content), and the union
+// merge keeps BOTH copies: a duplicate bubble after a reload and the same
+// question sent to the model twice. Only a genuine condensed form of the live
+// content is remembered - a diverged stored turn (another panel appended its
+// own turn at this index) must never overwrite this panel's message. A reload
+// needs no flag: it reads the condensed copy back as content, so its
+// re-projection is already identical.
+function rememberQuotaCondensedContent(history, storedMessages) {
+  if (!Array.isArray(history) || !Array.isArray(storedMessages)) return;
+  const length = Math.min(history.length, storedMessages.length);
+  for (let i = 0; i < length; i++) {
+    const live = history[i];
+    const stored = storedMessages[i];
+    if (!live || !stored || live.role !== stored.role || typeof stored.content !== "string") break;
+    const fresh = toStoredMessage(live).content;
+    if (fresh === stored.content) continue;
+    if (quotaCondenseContent(fresh) === stored.content) {
+      live.quotaCondensedContent = stored.content;
+    } else {
+      break;
+    }
+  }
 }
 
 export {
@@ -109,6 +152,7 @@ export {
   condenseStoredContent,
   toStoredMessage,
   compressForQuota,
+  rememberQuotaCondensedContent,
   STORED_ATTACHMENT_PREVIEW_CHARS,
   QUOTA_ATTACHMENT_PREVIEW_CHARS,
 };

@@ -109,6 +109,7 @@ eq(
 // history always includes the CURRENT user message as its last entry.
 const pageA = { title: "A", url: "https://a.example/", tabId: 1 };
 const pageB = { title: "B", url: "https://b.example/", tabId: 2 };
+const pageC = { title: "C", url: "https://c.example/", tabId: 3 };
 const user = (content, pageContext, contextEpoch) => ({
   role: "user",
   content,
@@ -129,11 +130,14 @@ const assistant = (content) => ({ role: "assistant", content });
   eq("same-page follow-up: previous page available but not a change", firstWithPage.previousPage.url, pageA.url);
 }
 {
+  const before = Date.now();
   const switched = resolveContextEpoch(
     [user("q1", pageA, 0), assistant("a1 (page A)"), user("q2")],
     pageB
   );
-  eq("page switch: new epoch", switched.epoch, 1);
+  // A page change gets a wall-clock epoch id (unique per change, so a
+  // cross-panel merge can never produce two runs of the same epoch).
+  eq("page switch: new epoch is wall-clock fresh", switched.epoch >= before, true);
   eq("page switch: change detected", switched.changed, true);
   eq("page switch: previous page reported", switched.previousPage.url, pageA.url);
   eq("page switch: current request gets no earlier history", switched.start, 2);
@@ -159,17 +163,18 @@ const assistant = (content) => ({ role: "assistant", content });
     ],
     pageA
   );
-  eq("switch back: new epoch", back.epoch, 2);
+  eq("switch back: new epoch", back.epoch > 1, true);
   eq("switch back: starts at current request", back.start, 4);
 }
 {
   // Same URL but a different tab is a different page context.
   const otherTab = { ...pageA, tabId: 99 };
+  const before = Date.now();
   const tabSwitch = resolveContextEpoch(
     [user("q1", pageA, 0), assistant("a1"), user("q2")],
     otherTab
   );
-  eq("same URL in a different tab: new epoch", tabSwitch.epoch, 1);
+  eq("same URL in a different tab: new epoch", tabSwitch.epoch >= before, true);
   eq("same URL in a different tab: change detected", tabSwitch.changed, true);
 }
 {
@@ -179,7 +184,7 @@ const assistant = (content) => ({ role: "assistant", content });
     [user("q1", pageA), assistant("a1"), user("q2")],
     pageB
   );
-  eq("legacy history: page switch gets epoch 1", legacy.epoch, 1);
+  eq("legacy history: page switch gets a fresh epoch", legacy.epoch >= Date.now() - 1, true);
   eq("legacy history: current request gets no earlier history", legacy.start, 2);
 }
 {
@@ -203,7 +208,7 @@ const assistant = (content) => ({ role: "assistant", content });
     pageB
   );
   eq("no-page turn between pages: change still detected", masked.changed, true);
-  eq("no-page turn between pages: new epoch", masked.epoch, 1);
+  eq("no-page turn between pages: new epoch", masked.epoch >= Date.now() - 1, true);
   eq("no-page turn between pages: previous page found", masked.previousPage.url, pageA.url);
   eq("no-page turn between pages: no earlier history", masked.start, 4);
 }
@@ -215,7 +220,7 @@ const assistant = (content) => ({ role: "assistant", content });
     pageB
   );
   eq("legacy no-page turn: change still detected", legacyMasked.changed, true);
-  eq("legacy no-page turn: new epoch", legacyMasked.epoch, 1);
+  eq("legacy no-page turn: new epoch", legacyMasked.epoch >= Date.now() - 1, true);
   eq("legacy no-page turn: no earlier history", legacyMasked.start, 4);
 }
 {
@@ -232,6 +237,41 @@ const assistant = (content) => ({ role: "assistant", content });
   );
   eq("no-page follow-up on the new page: same epoch", after.epoch, 1);
   eq("no-page follow-up on the new page: starts at page-B turn", after.start, 2);
+}
+{
+  // Cross-panel merge hazard (round-10 P3): two panels sharing a conversation,
+  // each submitting from its own page, used to produce two runs of the SAME
+  // small epoch id after the union merge; the forward start-scan then locked
+  // onto the first run and sent the other page's turns. Wall-clock epoch ids
+  // are unique per page change, so the follow-up on B must bind to the page-B
+  // run and never include the page-C turns.
+  const t1 = Date.now() - 5000;
+  const t2 = Date.now() - 1000;
+  const merged = [
+    user("q1", pageA, 0), assistant("a1"),
+    user("qc", pageC, t1), assistant("ac (page C)"),
+    user("qb", pageB, t2), assistant("ab (page B)"),
+    user("qNew"),
+  ];
+  const r = resolveContextEpoch(merged, pageB);
+  eq("cross-panel two epoch runs: no change", r.changed, false);
+  eq("cross-panel two epoch runs: binds to the newest run", r.epoch, t2);
+  eq("cross-panel two epoch runs: starts at the page-B turn", r.start, 4);
+}
+{
+  // Two page changes never share an epoch id (the old counter gave both the
+  // same value when two panels each incremented independently).
+  const before = Date.now();
+  const first = resolveContextEpoch(
+    [user("q1", pageA, 0), assistant("a1"), user("q2")],
+    pageB
+  );
+  const second = resolveContextEpoch(
+    [user("q1", pageA, 0), assistant("a1"), user("q2", pageB, first.epoch), assistant("a2"), user("q3")],
+    pageC
+  );
+  eq("consecutive page switches get unique epochs", second.epoch > first.epoch, true);
+  eq("page switch epoch is wall-clock fresh", first.epoch >= before, true);
 }
 
 // ---------- cross-context history write lock ----------

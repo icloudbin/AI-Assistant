@@ -119,10 +119,18 @@ function looksLikeSecret(raw, passwordLike) {
 // Whole-identifier match, so "tokenizer" and "max_tokens" are not keys.
 const SECRET_KEY_NAME = String.raw`(?<![\w.-])[\w.-]*?(?:secret|token|passw(?:or)?d|pwd|passphrase|api[ _-]?key|private[ _-]?key|access[ _-]?key|credentials?)(?:[_-]?(?:access|key|value|string|id|hash|base)){0,3}(?![\w-])|密码|口令|密钥`;
 const PASSWORD_LIKE_KEY_RE = /passw|pwd|passphrase|密码|口令/i;
-const SECRET_KV_RE = new RegExp(`(${SECRET_KEY_NAME})(["']?\\s*[:=：]\\s*)(?:"([^"\\r\\n]{1,200})"|'([^'\\r\\n]{1,200})'|([^\\s"',;]+))`, "gi");
+// The bare-value class excludes & [ ] (like the URL-query rule below): without
+// that, "?token=abc&page=2" swallowed the rest of the query string as one
+// secret, hiding the harmless parameters from the model.
+const SECRET_KV_RE = new RegExp(`(${SECRET_KEY_NAME})(["']?\\s*[:=：]\\s*)(?:"([^"\\r\\n]{1,200})"|'([^'\\r\\n]{1,200})'|([^\\s"',;&\\[\\]]+))`, "gi");
 function redactSecretKeyValue(m, key, sep, dq, sq, bare) {
   const value = dq ?? sq ?? bare;
   if (value === undefined || !looksLikeSecret(value, PASSWORD_LIKE_KEY_RE.test(key))) return m;
+  // A value that is/contains an earlier rule's numbered placeholder (the JWT
+  // rule may already have produced "[JWT#1]") must never be re-redacted:
+  // replacing it would destroy the placeholder, orphan its value mapping and
+  // sever the placeholder→value restoration (the round-6 corruption class).
+  if (/\[[A-Z_]+#\d+\]/.test(value)) return m;
   const q = dq !== undefined ? '"' : sq !== undefined ? "'" : "";
   return `${key}${sep}${q}[SECRET]${q}`;
 }

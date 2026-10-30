@@ -8,9 +8,11 @@ import {
   condenseStoredContent,
   toStoredMessage,
   compressForQuota,
+  rememberQuotaCondensedContent,
   STORED_ATTACHMENT_PREVIEW_CHARS,
   QUOTA_ATTACHMENT_PREVIEW_CHARS,
 } from "../sidepanel/history-manager.js";
+import { mergeConversationLists } from "../conversation-store.js";
 
 // ---------- cleanForTopic strips attachment blocks ----------
 assert.equal(cleanForTopic("hi [ATTACHMENTS]\nblob\n[/ATTACHMENTS] there"), "hi there");
@@ -55,6 +57,45 @@ assert.equal(quotaOut[0].messages[1].content, "answer", "non-attachment messages
 const before = JSON.stringify(quotaIn);
 compressForQuota(quotaIn);
 assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
+
+// ---------- quota condensation is idempotent across saves (round-10 P2) ----------
+// A quota-escalated save persists condensed copies; the next save re-projects
+// the current conversation from the live history. Without the remembered
+// condensed content the fresh full-text copy and the stored condensed copy
+// have different merge identities (role+modelId+content) and the union merge
+// keeps BOTH - a duplicate bubble after a reload, the same question sent to
+// the model twice.
+{
+  const bigBlock = `[ATTACHMENTS]\n${"x".repeat(9000)}\n[/ATTACHMENTS]`;
+  const live = { role: "user", content: `Question?\n${bigBlock}`, displayContent: "Question?", modelLabel: "", modelId: "" };
+  const history = [live];
+  const storedConvo = { id: "c", updatedAt: 1, messages: [toStoredMessage(live)] };
+  const compressed = compressForQuota([storedConvo])[0];
+  assert.ok(compressed.messages[0].content.length < storedConvo.messages[0].content.length, "quota pass shortens this message further");
+
+  // The bug this fixes, pinned: without the remembered condensed content the
+  // union merge keeps both copies of the turn.
+  const staleMerge = mergeConversationLists(
+    [compressed],
+    [{ id: "c", updatedAt: 2, messages: [toStoredMessage(live)] }],
+    "c"
+  );
+  assert.equal(staleMerge[0].messages.length, 2, "fresh full-text projection duplicates the stored condensed copy without the flag");
+
+  // The fix: the panel remembers the condensed projection on the live message.
+  rememberQuotaCondensedContent(history, compressed.messages);
+  const freshConvo = { id: "c", updatedAt: 2, messages: history.map(toStoredMessage) };
+  const fixedMerge = mergeConversationLists([compressed], [freshConvo], "c");
+  assert.equal(fixedMerge[0].messages.length, 1, "remembered condensed content collapses the stored and fresh copies");
+  assert.equal(fixedMerge[0].messages[0].content, compressed.messages[0].content, "the condensed form is what gets stored");
+}
+{
+  // rememberQuotaCondensedContent must never adopt a diverged stored turn
+  // (another panel's different message at this index) as this panel's content.
+  const live = { role: "user", content: "my question" };
+  rememberQuotaCondensedContent([live], [{ role: "user", content: "another panel's different turn" }]);
+  assert.equal(live.quotaCondensedContent, undefined, "diverged stored turn is not adopted");
+}
 
 console.log("OK: history-manager.js — titles, stored-message projection, quota compression.");
 process.exit(0);

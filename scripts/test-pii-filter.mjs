@@ -123,6 +123,44 @@ check("without a session plain placeholders are used", R("jane@x.com") === "[EMA
   check("raw URL query secret restores", restorePlaceholders(out, s) === "https://e.com/a?api_key=abcdef1234567890abcdef&x=1", restorePlaceholders(out, s));
 }
 {
+  // The SECRET_KV bare-value class must stop at "&": "?token=...&page=2"
+  // used to swallow the rest of the query string as one secret, hiding the
+  // harmless parameters from the model (the restore round-trip masked it).
+  const s = createRedactionSession();
+  const out = R("https://e.com/a?token=abcdef1234567890abcdef&page=2&id=7", s);
+  check("KV secret in a URL keeps the following params visible", /\?token=\[SECRET#\d+\]&page=2&id=7$/.test(out), out);
+  check("KV secret in a URL restores fully", restorePlaceholders(out, s) === "https://e.com/a?token=abcdef1234567890abcdef&page=2&id=7", restorePlaceholders(out, s));
+}
+{
+  // A URL query whose value an earlier rule already turned into a placeholder
+  // AND that has parameters after it: the bare-value class used to swallow
+  // "[JWT#1]&prompt=none" into an unnumbered [SECRET], destroying the
+  // placeholder and permanently severing its mapping.
+  const s = createRedactionSession();
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJhIjoiYiJ9.c2lnbmF0dXJlMTIzNDU2Nzg";
+  const input = `Open https://id.example.com/authorize?state=xyz&token=${jwt}&prompt=none to continue.`;
+  const out = R(input, s);
+  check("placeholder-valued query param with a tail keeps the placeholder", /[?&]token=\[JWT#\d+\]&prompt=none to continue\.$/.test(out), out);
+  check("placeholder-valued query param with a tail restores", restorePlaceholders(out, s) === input, restorePlaceholders(out, s));
+}
+{
+  // A quoted KV value that contains an earlier placeholder is left alone too
+  // (the placeholder guard covers the quoted alternatives as well).
+  const s = createRedactionSession();
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJhIjoiYiJ9.c2lnbmF0dXJlMTIzNDU2Nzg5";
+  const input = `api_key: "${jwt} and more"`;
+  const out = R(input, s);
+  check("quoted KV value holding a placeholder is not re-redacted", /api_key: "\[JWT#\d+\] and more"/.test(out), out);
+  check("quoted KV value holding a placeholder restores", restorePlaceholders(out, s) === input, restorePlaceholders(out, s));
+}
+{
+  // "=" stays inside the bare-value class, so a base64-padded secret in KV
+  // form is redacted including its padding (no "[SECRET]==" residue).
+  const s = createRedactionSession();
+  const out = R("SECRET_KEY=abc123def456==", s);
+  check("base64-padded bare value fully redacted", /SECRET_KEY=\[SECRET#\d+\]$/.test(out) && !out.includes("abc123def456"), out);
+}
+{
   // A Cookie header whose value already carries a placeholder (from the JWT
   // rule, which runs earlier): the whole-header [COOKIE] rule used to blank
   // it, orphaning the placeholder's mapping.

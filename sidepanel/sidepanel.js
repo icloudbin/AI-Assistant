@@ -22,7 +22,7 @@ import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-s
 // in scripts/test-conversation-store.mjs).
 import { mergeConversationLists, sortedByNewest, resolveContextEpoch, withHistoryLock, withNamedLock, CONTEXT_ACTION_LOCK } from "../conversation-store.js";
 import { markdownToHtml } from "./rendering/markdown.js";
-import { makeTopicTitle, toStoredMessage, compressForQuota } from "./history-manager.js";
+import { makeTopicTitle, toStoredMessage, compressForQuota, rememberQuotaCondensedContent } from "./history-manager.js";
 import {
   MAX_ATTACHMENTS,
   MAX_TOTAL_ATTACHMENT_TEXT_CHARS,
@@ -1497,7 +1497,11 @@ function handlePortMessage(msg) {
   if (msg.requestId !== currentRequestId) return;
   switch (msg.type) {
     case "START": {
-      clearDeferredFinalRender();
+      // Apply (not drop) a pending final render so the previous bubble keeps
+      // the tail that arrived while the user was selecting in it. A still
+      // active selection keeps the deferral for selectionchange; a bubble
+      // that is no longer connected is dropped there.
+      applyDeferredFinalRender();
       currentAssistantText = "";
       currentThinkingText = "";
       currentAssistantBubble = addBubble("assistant", "", pendingModelLabel, pendingPlainReply);
@@ -1709,6 +1713,13 @@ async function saveConversationsWithLock() {
       merged = merged.slice(0, kept);
     }
   }
+  // Remember any quota-condensed projection on the live messages: the next
+  // save re-projects the current conversation from `history`, and a fresh
+  // full-text copy would no longer match the stored condensed copy's merge
+  // identity - the union merge would keep both copies of the turn (duplicate
+  // bubble after a reload, same question sent to the model twice).
+  const mergedCurrent = merged.find((c) => c?.id === currentConversationId);
+  if (mergedCurrent) rememberQuotaCondensedContent(history, mergedCurrent.messages);
   conversations = merged;
   renderHistorySelect();
   scheduleHistoryRender();
