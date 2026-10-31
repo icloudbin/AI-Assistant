@@ -25,6 +25,22 @@ assert.equal(makeTopicTitle([{ role: "user", content: longWords }]).split(" ").l
 assert.equal(makeTopicTitle([{ role: "user", content: "很长的中文标题".repeat(30) }]).length, 80, "CJK capped at 80 chars");
 assert.equal(makeTopicTitle([{ role: "user", displayContent: "shown", content: "stored" }]), "shown", "displayContent preferred for titles");
 
+// ---------- surrogate safety at the preview caps (v1.10.134) ----------
+const LONE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+{
+  // A preview cap landing inside a surrogate pair: the condensed content
+  // must never carry a lone surrogate (it goes to the model, and
+  // JSON.stringify emits an unpaired \ud83d that some backends reject
+  // with 400/500).
+  const convo = { id: "c1", messages: [{ role: "user", content: "[ATTACHMENTS]text\n" + "\u{1F600}".repeat(400) + "\n[/ATTACHMENTS]" }] };
+  const compressed = compressForQuota([convo]);
+  const content = compressed[0].messages[0].content;
+  assert.ok(!LONE.test(content), "quota-condensed content has no lone surrogate");
+  assert.ok(content.length <= 950, "condensed to a bounded length (" + content.length + ")");
+  // The stored-copy condenser (4k cap) is safe the same way.
+  const stored = condenseStoredContent("[ATTACHMENTS]text\n" + "\u{1F600}".repeat(2500) + "\n[/ATTACHMENTS]");
+  assert.ok(!LONE.test(stored), "stored condensation has no lone surrogate");
+}
 // ---------- condenseStoredContent / toStoredMessage ----------
 const big = `[ATTACHMENTS]\n${"z".repeat(STORED_ATTACHMENT_PREVIEW_CHARS + 500)}\n[/ATTACHMENTS]`;
 const stored = toStoredMessage({ role: "user", content: `q ${big}` });

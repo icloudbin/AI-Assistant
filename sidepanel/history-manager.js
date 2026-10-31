@@ -46,7 +46,7 @@ const STORED_ATTACHMENT_PREVIEW_CHARS = 4000;
 function condenseStoredContent(text) {
   return String(text || "").replace(/\[ATTACHMENTS\][\s\S]*?\[\/ATTACHMENTS\]/gi, (block) => {
     if (block.length <= STORED_ATTACHMENT_PREVIEW_CHARS) return block;
-    return `${block.slice(0, STORED_ATTACHMENT_PREVIEW_CHARS).trimEnd()}\n...[attachment contents truncated]\n[/ATTACHMENTS]`;
+    return `${cutAtCodePointBoundary(block, STORED_ATTACHMENT_PREVIEW_CHARS).trimEnd()}\n...[attachment contents truncated]\n[/ATTACHMENTS]`;
   });
 }
 
@@ -100,7 +100,7 @@ function quotaCondenseContent(text) {
   return String(text || "").replace(/\[ATTACHMENTS\][\s\S]*?\[\/ATTACHMENTS\]/gi, (block) =>
     block.length <= QUOTA_ATTACHMENT_PREVIEW_CHARS
       ? block
-      : `${block.slice(0, QUOTA_ATTACHMENT_PREVIEW_CHARS).trimEnd()}\n...[/ATTACHMENTS]`
+      : `${cutAtCodePointBoundary(block, QUOTA_ATTACHMENT_PREVIEW_CHARS).trimEnd()}\n...[/ATTACHMENTS]`
   );
 }
 function compressForQuota(list) {

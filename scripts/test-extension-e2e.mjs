@@ -256,14 +256,14 @@ async function main() {
     // P3-14 context-action queue: queue a translation for this panel tab, reload, claim it.
     const ids = await page.eval("(async () => { const t = await chrome.tabs.getCurrent(); return { tabId: t.id, windowId: t.windowId }; })()");
     await page.eval(`chrome.tabs.update(${ids.tabId}, { active: true })`);
-    await page.eval(`chrome.storage.local.set({ pendingContextAction: ${JSON.stringify([{
+    await page.eval(`chrome.storage.session.set({ pendingContextAction: ${JSON.stringify([{
       action: "translate", text: "hello queue", format: "text", truncated: false,
       tabId: ids.tabId, windowId: ids.windowId, createdAt: Date.now(),
     }])} })`);
     await page.send("Page.reload", { ignoreCache: true });
     await sleep(2200);
     const queueState = await page.eval(`(async () => ({
-      pending: await chrome.storage.local.get('pendingContextAction'),
+      pending: await chrome.storage.session.get('pendingContextAction'),
       user: [...document.querySelectorAll('.bubble.user .bubble-text')].map((b) => b.textContent).join('\\n')
     }))()`);
     check("queued context action is claimed and rendered", queueState.user.includes("hello queue"), JSON.stringify(queueState).slice(0, 300));

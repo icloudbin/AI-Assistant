@@ -4,7 +4,7 @@
 // integration-tested in the browser; here the shared machinery is driven
 // with synthetic Response bodies. Run:  node scripts/test-openai-compatible.mjs
 import assert from "node:assert/strict";
-import { readSse, openAICompatibleStreamError, providerHttpError, extractOpenAIDelta } from "../providers/openai-compatible.js";
+import { readSse, openAICompatibleStreamError, providerHttpError, extractOpenAIDelta, fetchWithHeadersTimeout } from "../providers/openai-compatible.js";
 
 const encoder = new TextEncoder();
 function sse(chunks) {
@@ -156,6 +156,8 @@ assert.equal(openAICompatibleStreamError({ error: { code: 500 } }), '{"code":500
 }
 
 // ---------- reasoning_content / reasoning stream support ----------
+// extractOpenAIDelta still PARSES reasoning fields, but readSse drops them for
+// EVERY request (v1.10.126): the conversation box shows only the final result.
 {
   assert.deepEqual(
     extractOpenAIDelta({ choices: [{ delta: { reasoning_content: "thinking...", content: "answer" } }] }),
@@ -175,22 +177,27 @@ assert.equal(openAICompatibleStreamError({ error: { code: 500 } }), '{"code":500
     'data: [DONE]\n\n',
   ]);
   await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
-  assert.equal(ctx.thinking.join(""), "Let me think.", "thinking chunks routed to ctx.sendThinking");
+  assert.equal(ctx.thinking.length, 0, "reasoning is never routed to ctx.sendThinking");
   assert.equal(ctx.chunks.join(""), "Done!", "content chunks routed to ctx.sendChunk");
 
-  // Reasoning only (no content) does NOT throw empty response error
+  // Reasoning only (no content) IS an empty completion now: nothing was
+  // displayed, so the request fails like any other empty reply.
   const ctxReasoningOnly = makeCtx();
   const { resp: respReasoning } = sse([
     'data: {"choices":[{"delta":{"reasoning_content":"only reasoning"}}]}\n\n',
     'data: [DONE]\n\n',
   ]);
-  await readSse(respReasoning, extractOpenAIDelta, ctxReasoningOnly, openAICompatibleStreamError);
-  assert.ok(ctxReasoningOnly.thinking.length > 0, "reasoning-only response does not throw empty error");
+  await assert.rejects(
+    () => readSse(respReasoning, extractOpenAIDelta, ctxReasoningOnly, openAICompatibleStreamError),
+    /empty/i,
+    "reasoning-only response fails as an empty completion"
+  );
 }
 
-// ---------- translation mode drops the reasoning stream ----------
-// A translation must show ONLY the final translated text (the pre-1.10.116
-// behavior): no "Thought process" block in the translation box.
+// ---------- NO mode shows the reasoning stream ----------
+// A translation must show ONLY the final translated text (pre-1.10.116
+// behavior), and since v1.10.126 a chat / fact-check / any other request does
+// too: no "Thought process" block anywhere in the conversation box.
 {
   const makeTranslateCtx = (translateMode) => {
     const ctx = makeCtx();
@@ -211,12 +218,54 @@ assert.equal(openAICompatibleStreamError({ error: { code: 500 } }), '{"code":500
     assert.equal(ctx.chunks.join(""), "你好世界", `[${translateMode}] final translation still streamed`);
   }
 
-  // Chat mode (translateMode false) still receives the reasoning stream.
+  // Chat mode (translateMode false) drops the reasoning stream as well.
   const chatCtx = makeCtx();
   const { resp: chatResp } = sse(reasoningThenContent);
   await readSse(chatResp, extractOpenAIDelta, chatCtx, openAICompatibleStreamError);
-  assert.equal(chatCtx.thinking.join(""), "Let me think.", "chat mode keeps the reasoning stream");
+  assert.equal(chatCtx.thinking.length, 0, "chat mode drops the reasoning stream too");
   assert.equal(chatCtx.chunks.join(""), "你好世界", "chat mode keeps the content stream");
+}
+
+// ---------- first-byte (response headers) watchdog (v1.10.134) ----------
+{
+  // A provider that accepts the connection and never answers must fail with
+  // the no-response error (the user's own STOP still propagates as
+  // AbortError). Stub fetch with a promise that never settles.
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts) => new Promise((resolve, reject) => {
+    opts.signal.addEventListener("abort", () => reject(opts.signal.reason));
+  });
+  const ctx = makeCtx();
+  const t0 = Date.now();
+  await assert.rejects(
+    () => fetchWithHeadersTimeout("https://api.example.com/x", { method: "POST" }, ctx, 50),
+    /did not respond/i,
+    "headers timeout rejects with the no-response error"
+  );
+  globalThis.fetch = originalFetch;
+  assert.ok(Date.now() - t0 < 2000, `timeout fired in ${Date.now() - t0}ms`);
+  // The user's own STOP keeps the AbortError (the outer handler stays silent).
+  globalThis.fetch = (url, opts) => new Promise((resolve, reject) => {
+    opts.signal.addEventListener("abort", () => reject(opts.signal.reason));
+  });
+  const stop = new AbortController();
+  const ctxStop = makeCtx();
+  ctxStop.signal = stop.signal;
+  setTimeout(() => stop.abort(), 10);
+  await assert.rejects(
+    () => fetchWithHeadersTimeout("https://api.example.com/x", { method: "POST" }, ctxStop, 5000),
+    (err) => err?.name === "AbortError",
+    "user STOP propagates as AbortError"
+  );
+  globalThis.fetch = originalFetch;
+  // An ordinary network failure keeps its own error.
+  globalThis.fetch = () => Promise.reject(new Error("ECONNREFUSED"));
+  await assert.rejects(
+    () => fetchWithHeadersTimeout("https://api.example.com/x", { method: "POST" }, makeCtx(), 5000),
+    /ECONNREFUSED/,
+    "network errors pass through unchanged"
+  );
+  globalThis.fetch = originalFetch;
 }
 
 // ---------- stream timeout ----------

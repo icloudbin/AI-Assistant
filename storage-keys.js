@@ -20,6 +20,8 @@ export const MIC_LANG_STORAGE_KEY = "micRecognitionLang";
 export const COMPOSER_HEIGHT_STORAGE_KEY = "composerHeight";
 
 // Text selected from a webpage for the AI context menu.
+// Values live in chrome.storage.session (RAM, wiped when the browser session
+// ends): a right-click selection must never persist on disk.
 export const PENDING_CONTEXT_ACTION_KEY = "pendingContextAction";
 export const PREFERRED_TRANSLATION_LANGUAGE_KEY = "preferredTranslationLanguage";
 // "Automatically search the web" (Settings > Web Research). Boolean, OFF unless

@@ -57,6 +57,19 @@ assert.deepEqual(
   "merge same-role runs, drop leading assistant / empty / invalid turns"
 );
 
+// ---------- surrogate safety at the condensation caps (v1.10.134) ----------
+const LONE_MSG = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+{
+  // A history attachment block cut inside a surrogate pair: the condensed
+  // preview rides in every later request - no lone surrogates allowed.
+  const longBlock = "[ATTACHMENTS]\n" + "\u{1F600}".repeat(3000) + "\n[/ATTACHMENTS]";
+  const condensed = condenseHistoryAttachments(longBlock);
+  assert.ok(!LONE_MSG.test(condensed), "history attachment preview has no lone surrogate");
+  // The page-text cap inside the untrusted block is surrogate-safe too.
+  const page = { tabId: 1, title: "T", url: "https://x/", text: "\u{1F600}".repeat(40000) };
+  const block = pageContextDataBlock(page);
+  assert.ok(!LONE_MSG.test(block), "page text cap has no lone surrogate");
+}
 // ---------- condenseHistoryAttachments ----------
 const longBlock = `[ATTACHMENTS]\n${"x".repeat(5000)}\n[/ATTACHMENTS]`;
 const condensed = condenseHistoryAttachments(longBlock);

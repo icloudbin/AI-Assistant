@@ -60,6 +60,27 @@ function protect(body) {
 function restore(text, tokens) {
   return tokens.length ? text.replace(/\{\{\s*U(\d+)\s*\}\}/g, (m, i) => (tokens[Number(i)] ?? m)) : text;
 }
+
+// Whether the model's raw reply kept exactly the line's {{Un}} tokens.
+// restore() can only replace tokens that are still present: a model that drops
+// {{U0}} silently deletes the URL / inline code / link target from the output,
+// and a hallucinated {{U5}} would print as literal garbage. The check compares
+// the MULTISETOF token VALUES the reply references against the line's own
+// token values - exact, and immune to two traps: substring-matching restored
+// values (an inline-code token like `a` is a substring of almost any sentence)
+// and same-value tokens (a reply that writes {{U0}} twice for {{U0}}+{{U1}}
+// restores to the correct text when both tokens hold the same URL, so raw
+// index coverage would false-flag it). A violation marks the line
+// untranslated: the original line (value intact) is written and the line
+// counts toward `missing`, which fires the missing-lines NOTICE and gives the
+// single-batch replay its chance.
+function tokensKept(heldText, tokens) {
+  const actual = [...heldText.matchAll(/\{\{\s*U(\d+)\s*\}\}/g)]
+    .map((m) => tokens[Number(m[1])])
+    .sort();
+  const expected = [...tokens].sort();
+  return actual.length === expected.length && actual.every((v, i) => v === expected[i]);
+}
 const HAS_LETTER_RE = /\p{L}/u;
 // Whitespace-insensitive equality: a model that "translates" a line by echoing
 // it back (with its own line wrapping re-joined) has not translated it.
@@ -168,11 +189,14 @@ export class LineTranslator {
     this.fill(this.heldId);
     const l = this.lines[this.heldId];
     const restored = restore(this.heldText.trim(), l.tokens);
-    // An echo of the source line is not a translation: keep the original in
-    // the slot (the visible text is identical either way) but count the line
-    // as untranslated, so `missing` stays truthful and the caller's
-    // completeness check (the single-batch replay in background.js) fires.
-    const translatedText = restored && collapseWs(restored) !== collapseWs(l.body) ? restored : "";
+    // Two ways a "translation" is not a translation: an echo of the source
+    // line, or a reply that dropped (or hallucinated) a {{Un}} token - the
+    // visible text would lose the URL / inline code / link target. Both fall
+    // back to the original line and leave the line counted as missing.
+    const usable = restored
+      && tokensKept(this.heldText, l.tokens)
+      && collapseWs(restored) !== collapseWs(l.body);
+    const translatedText = usable ? restored : "";
     if (translatedText) this.translated++;
     this.write(`${l.prefix}${translatedText || l.body}${l.trailingWhitespace}`);
     this.next = this.heldId + 1;

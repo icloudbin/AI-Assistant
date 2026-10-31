@@ -84,5 +84,46 @@ assert.ok(markdownToHtml("See [doc](https://example.com/d \"Docs\").").includes(
 const anchored = markdownToHtml("-\n  - alpha nested entry\n- plain sibling item");
 assert.ok(anchored.includes("alpha nested entry") && anchored.includes("plain sibling item"), "empty-parent anchor markup renders both levels");
 
+// ---------- field-report fixes: apostrophe URLs, 4-backtick fences, link-scan cost ----------
+{
+  // An apostrophe in the URL: escapeHtml turned ' into &#39; and the old
+  // &amp;-only decode left the ENTITY in the href -> the Wikipedia-style link
+  // 404'd. The attribute now carries &#39;, which the HTML parser decodes
+  // back to ' - and a literal &lt; written in the source round-trips
+  // (&amp; decodes LAST).
+  const html = inlineMarkdownToHtml("[docs](https://en.wikipedia.org/wiki/Don't_Stop)");
+  assert.ok(html.includes('href="https://en.wikipedia.org/wiki/Don&#39;t_Stop"'), "apostrophe URL survives as a single-escaped attribute: " + html);
+  assert.ok(!html.includes("&amp;#39;"), "no double-escaped apostrophe in the href");
+  assert.ok(inlineMarkdownToHtml("[q](https://example.com/a?x=1&amp;lt;z)").includes('href="https://example.com/a?x=1&amp;amp;lt;z"'), "a literal entity in the URL round-trips (the attribute is the escaped form of the decoded value)");
+  const img = inlineMarkdownToHtml("![pic](https://example.com/it's.png)");
+  assert.ok(img.includes('src="https://example.com/it&#39;s.png"') && !img.includes("&amp;#39;"), "apostrophe image src survives");
+}
+{
+  // A four-backtick outer fence contains an inner ``` fence: the old
+  // startsWith("```") closer (fence = the first 3 chars) split the sample in
+  // two and leaked the rest as markdown.
+  const md = ["````", "```js", "const a = 1;", "```", "still code: const b = 2;", "````"].join("\n");
+  const html = markdownToHtml(md);
+  assert.equal((html.match(/<pre/g) || []).length, 1, "one code block for a 4-backtick fence with an inner fence");
+  assert.ok(html.includes("const a = 1;") && html.includes("still code: const b = 2;"), "inner fence and following code stay inside");
+  // A "```js" line inside a ``` block is CONTENT: a closing fence cannot carry
+  // an info string (CommonMark).
+  const inner = markdownToHtml(["```", "```js", "x = 1", "```"].join("\n"));
+  assert.equal((inner.match(/<pre/g) || []).length, 1, "inner fence line stays inside");
+  assert.ok(inner.includes("```js"), "the inner fence line is code content");
+  // Tilde fences still close, and only on tildes.
+  const tilde = markdownToHtml("~~~\ncode\n~~~\nafter");
+  assert.ok(tilde.indexOf("</code>") < tilde.indexOf("after"), "tilde fence closes on tildes");
+}
+{
+  // The link scan must not go quadratic on "[" runs: 40k "[" took >1.2s per
+  // render (amplified by streaming re-renders). The label class excludes "[".
+  const s = "[".repeat(40000);
+  const t0 = Date.now();
+  const html = inlineMarkdownToHtml(s);
+  assert.ok(Date.now() - t0 < 300, `40k "[" rendered in ${Date.now() - t0}ms`);
+  assert.ok(!html.includes("<a "), "no link in bracket soup");
+}
+
 console.log("OK: rendering/markdown.js — escaping order, titled links/images, URL policy, fences, nested/loose lists, tables.");
 process.exit(0);

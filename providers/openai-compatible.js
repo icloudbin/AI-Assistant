@@ -35,6 +35,36 @@ async function providerHttpError(resp) {
   return `HTTP ${resp.status}${message ? ` ${message.slice(0, 500)}${message.length > 500 ? "…" : ""}` : ""}`;
 }
 
+// First-byte watchdog: the stream idle/total timers only start once the
+// response HEADERS have arrived - a provider (or middlebox) that accepts
+// the connection and then never answers used to hang fetch() forever,
+// keeping the connection and the service-worker keep-alive alive until
+// the user clicked Clear. The user's own STOP still propagates as
+// AbortError; the timeout surfaces as a plain, reported error.
+export const FIRST_BYTE_TIMEOUT_MS = 60 * 1000;
+
+export async function fetchWithHeadersTimeout(url, init, ctx, timeoutMs = FIRST_BYTE_TIMEOUT_MS) {
+  const timeout = new AbortController();
+  const onStop = () => timeout.abort(ctx.signal?.reason);
+  if (ctx.signal) {
+    if (ctx.signal.aborted) throw new DOMException("Aborted", "AbortError");
+    ctx.signal.addEventListener("abort", onStop, { once: true });
+  }
+  const timer = setTimeout(() => timeout.abort(new DOMException("headers timeout", "TimeoutError")), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: timeout.signal });
+  } catch (err) {
+    if (ctx.signal?.aborted) throw err; // deliberate STOP: keep the AbortError
+    if (err?.name === "TimeoutError") {
+      throw new Error(t(ctx.lang, "bg_error_noResponse", { seconds: String(Math.round(timeoutMs / 1000)) }));
+    }
+    throw err; // ordinary network failure (DNS, refused, TLS ...)
+  } finally {
+    clearTimeout(timer);
+    ctx.signal?.removeEventListener("abort", onStop);
+  }
+}
+
 async function streamDeepSeek(model, question, pageContext, history, images, ctx) {
   const stored = await chrome.storage.local.get(["apiKey", "customPrompt"]);
   // Trim: a key imported from a settings file may carry a trailing newline,
@@ -47,7 +77,7 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
   // the same `apiModel` is used for both text and image requests - there is
   // no separate vision model to swap in (the old deepseek-v4-*-vision-exp
   // endpoint is retired). See the `deepseek-flash` note in models.js.
-  const resp = await fetch("https://api.deepseek.com/chat/completions", {
+  const resp = await fetchWithHeadersTimeout("https://api.deepseek.com/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -60,8 +90,7 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
       ...(model.thinking ? { thinking: { type: model.thinking } } : {}),
       ...(model.reasoningEffort ? { reasoning_effort: model.reasoningEffort } : {}),
     }),
-    signal: ctx.signal,
-  });
+  }, ctx);
   if (!resp.ok) throw new Error(await providerHttpError(resp));
 
   await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
@@ -77,7 +106,7 @@ async function streamGroq(model, question, pageContext, history, images, ctx) {
   const customPrompt = stored.customPrompt || "";
   if (!groqApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "Groq" }));
 
-  const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+  const resp = await fetchWithHeadersTimeout("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -88,8 +117,7 @@ async function streamGroq(model, question, pageContext, history, images, ctx) {
       messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang, ctx.translateMode),
       stream: true,
     }),
-    signal: ctx.signal,
-  });
+  }, ctx);
   if (!resp.ok) throw new Error(await providerHttpError(resp));
 
   await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
@@ -107,7 +135,7 @@ async function streamOpenRouter(model, question, pageContext, history, images, c
   const customPrompt = stored.customPrompt;
   if (!openrouterApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "OpenRouter" }));
 
-  const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const resp = await fetchWithHeadersTimeout("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -120,8 +148,7 @@ async function streamOpenRouter(model, question, pageContext, history, images, c
       messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang, ctx.translateMode),
       stream: true,
     }),
-    signal: ctx.signal,
-  });
+  }, ctx);
   if (!resp.ok) throw new Error(await providerHttpError(resp));
 
   await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
@@ -225,18 +252,11 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
     const content = Array.isArray(rawContent)
       ? rawContent.map((part) => (typeof part === "string" ? part : part?.text || "")).join("")
       : (typeof rawContent === "string" ? rawContent : "");
-    const rawReasoning = typeof delta === "object" ? (delta?.reasoning ?? delta?.reasoning_content ?? "") : "";
-    const reasoning = Array.isArray(rawReasoning)
-      ? rawReasoning.map((part) => (typeof part === "string" ? part : part?.text || "")).join("")
-      : (typeof rawReasoning === "string" ? rawReasoning : "");
-    // A translation shows only the final translated text: the model's
-    // reasoning stream is dropped there (ctx.translateMode is "free"/"lines"),
-    // exactly the pre-thinking-display behavior. The ASK/chat panel keeps
-    // rendering it under "Thought process".
-    if (reasoning && !ctx.translateMode) {
-      emitted = true;
-      ctx.sendThinking?.(reasoning);
-    }
+    // Only the final result is ever displayed: the model's reasoning stream is
+    // dropped for EVERY request (translations since v1.10.118, everything else
+    // since v1.10.126) - the conversation box shows no "Thought process" block.
+    // A stream that produced reasoning but no content therefore counts as an
+    // empty completion and fails below, exactly like the translation behavior.
     if (content) {
       emitted = true;
       if (ctx.lineTranslator) ctx.lineTranslator.push(content);

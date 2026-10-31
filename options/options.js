@@ -23,6 +23,7 @@ import {
 import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-storage.js";
 import { encryptSecrets, decryptSecrets, MIN_PASSPHRASE_LENGTH } from "../settings-crypto.js";
 import { withHistoryLock } from "../conversation-store.js";
+import { compressForQuota } from "../sidepanel/history-manager.js";
 import { cutAtCodePointBoundary } from "../models.js";
 
 const apiKeyInput = document.getElementById("apiKey");
@@ -165,7 +166,7 @@ preferredTranslationLanguageSelect.addEventListener("change", async () => {
   const value = preferredTranslationLanguageSelect.value;
   try {
     await chrome.storage.local.set({ [PREFERRED_TRANSLATION_LANGUAGE_KEY]: value });
-    await saveSettingsBackup({ [PREFERRED_TRANSLATION_LANGUAGE_KEY]: value });
+    await saveSettingsBackup({ [PREFERRED_TRANSLATION_LANGUAGE_KEY]: value }).catch((err) => console.warn("[AI Assistant] settings mirror write failed:", err));
   } catch (err) {
     console.error("[AI Assistant] Unable to save the preferred translation language:", err);
     showSettingsError(err);
@@ -189,7 +190,7 @@ languageSelect.addEventListener("change", async () => {
   const lang = languageSelect.value;
   try {
     await chrome.storage.local.set({ [LANGUAGE_STORAGE_KEY]: lang });
-    await saveSettingsBackup({ [LANGUAGE_STORAGE_KEY]: lang });
+    await saveSettingsBackup({ [LANGUAGE_STORAGE_KEY]: lang }).catch((err) => console.warn("[AI Assistant] settings mirror write failed:", err));
     applyLanguage(lang);
   } catch (err) {
     console.error("[AI Assistant] Unable to save the UI language:", err);
@@ -275,7 +276,10 @@ document.getElementById("save").addEventListener("click", async (event) => {
     };
     await chrome.storage.local.set(settingsToSave);
     // API keys live only in chrome.storage.local (never mirrored to IndexedDB).
-    await saveSettingsBackup({ customPrompt });
+    // The IndexedDB mirror is a best-effort recovery layer: chrome.storage
+    // already holds the values, so a mirror failure must not fail the Save
+    // (it used to report failure AFTER the primary write had succeeded).
+    await saveSettingsBackup({ customPrompt }).catch((err) => console.warn("[AI Assistant] settings mirror write failed:", err));
 
     // Verify the write immediately. This makes a broken Save operation visible
     // instead of showing "Saved" when the value was not actually persisted.
@@ -789,13 +793,38 @@ async function restoreHistory() {
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
         .slice(0, MAX_SAVED_CONVERSATIONS);
 
-      await chrome.storage.local.set({ [HISTORY_STORAGE_KEY]: merged });
+      // The side panel's save path escalates on storage-quota pressure
+      // (compressForQuota, then halving) - a restore must too: a large backup
+      // merged into an existing history used to fail with a raw QUOTA error
+      // and restore NOTHING. Same lossy-but-keeps-everything escalation.
+      let list = merged;
+      let condensed = false;
+      let dropped = 0;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await chrome.storage.local.set({ [HISTORY_STORAGE_KEY]: list });
+          break;
+        } catch (err) {
+          if (attempt === 0 && (err?.name === "QuotaExceededError" || /quota|QUOTA_BYTES/i.test(String(err?.message || "")))) {
+            list = compressForQuota(list);
+            condensed = true;
+            continue;
+          }
+          if (attempt >= 4 || list.length <= 1) throw err;
+          const kept = Math.max(1, Math.floor(list.length / 2));
+          dropped += list.length - kept;
+          list = list.slice(0, kept);
+        }
+      }
     });
 
     msgEl.style.color = "#4ade80";
-    msgEl.textContent = tPlural(currentLang, normalized.length, "restore_success_one", "restore_success_other");
+    let doneText = tPlural(currentLang, normalized.length, "restore_success_one", "restore_success_other");
+    if (condensed) doneText += ` ${t(currentLang, "restore_quotaCondensed")}`;
+    if (dropped > 0) doneText += ` ${t(currentLang, "history_quotaDropped_template", { count: String(dropped) })}`;
+    msgEl.textContent = doneText;
     restoreHistoryFile.value = "";
-    setTimeout(() => (msgEl.textContent = ""), 3000);
+    setTimeout(() => (msgEl.textContent = ""), condensed || dropped > 0 ? 8000 : 3000);
   } catch (err) {
     console.error("[AI Assistant] Unable to restore history:", err);
     msgEl.style.color = "#f55b5b";
@@ -945,7 +974,7 @@ themeButtons.forEach((button) => {
     const preference = button.dataset.themeChoice;
     try {
       await chrome.storage.local.set({ [THEME_STORAGE_KEY]: preference });
-      await saveSettingsBackup({ [THEME_STORAGE_KEY]: preference });
+      await saveSettingsBackup({ [THEME_STORAGE_KEY]: preference }).catch((err) => console.warn("[AI Assistant] settings mirror write failed:", err));
       applyTheme(preference);
     } catch (err) {
       console.error("[AI Assistant] Unable to save the theme:", err);
@@ -1155,7 +1184,10 @@ async function importSettings() {
         if (typeof value === "number" && Number.isFinite(value)) restored[key] = value;
       } else if (BOOLEAN_SETTINGS_KEYS.has(key)) {
         if (typeof value === "boolean") restored[key] = value;
-      } else if (typeof value === "string") {
+      } else if (typeof value === "string" && (value || !SETTINGS_BACKUP_SECRET_KEYS.includes(key))) {
+        // v1 plaintext files may carry EMPTY-STRING keys: skipping those keeps
+        // an existing stored key alive (the comment below promises exactly
+        // this), while an empty customPrompt stays a legitimate import.
         restored[key] = value;
       }
     }
@@ -1190,7 +1222,10 @@ async function importSettings() {
     if (!Object.keys(restored).length) throw new Error(t(currentLang, "settingsBackup_error_notSettingsBackup"));
 
     await chrome.storage.local.set(restored);
-    await saveSettingsBackup(restored);
+    // Best-effort mirror: a failure here used to abort BEFORE
+    // loadSavedApiSettings() refreshed the inputs, so a later Save
+    // overwrote the just-imported keys with the stale field values.
+    await saveSettingsBackup(restored).catch((err) => console.warn("[AI Assistant] settings mirror write failed:", err));
 
     // The API-key inputs and prompt textarea are loaded once at page load
     // and have no storage.onChanged listener,

@@ -246,6 +246,57 @@ assert.deepEqual(browserPreferred, { text: "One\n\nTwo", format: "text", truncat
   assert.equal(out, "在配置中使用令牌 {{U0}}。", "literal token survives on a token-free line");
 }
 {
+  // A model that DROPS a {{Un}} token silently deletes the URL / inline code /
+  // link target from the output (field report): the line falls back to its
+  // original (value intact) and counts as missing, which fires the NOTICE and
+  // the single-batch replay.
+  let out = "";
+  const dropped = new LineTranslator(prepareLineTranslation("Visit https://example.com/x for more details."), (d) => { out += d; });
+  dropped.push("[1] Visitez pour plus de détails.");
+  dropped.finish();
+  assert.equal(out, "Visit https://example.com/x for more details.", "dropped URL falls back to the original line");
+  assert.equal(dropped.missing, 1, "a dropped token counts as untranslated");
+  assert.equal(dropped.translated, 0, "a token-dropping reply is not counted as translated");
+}
+{
+  // Inline code is a protected token too.
+  let out = "";
+  const code = new LineTranslator(prepareLineTranslation("Press `Ctrl+S` to save the file now."), (d) => { out += d; });
+  code.push("[1] Appuyez sur pour enregistrer le fichier.");
+  code.finish();
+  assert.equal(out, "Press `Ctrl+S` to save the file now.", "dropped inline code falls back to the original line");
+  assert.equal(code.missing, 1);
+}
+{
+  // A hallucinated out-of-range token would print as literal garbage after
+  // restore (restore leaves unknown {{Un}} as-is): the line falls back too.
+  let out = "";
+  const stray = new LineTranslator(prepareLineTranslation("Just an ordinary line here."), (d) => { out += d; });
+  stray.push("[1] Une ligne avec {{U5}} ici.");
+  stray.finish();
+  assert.equal(out, "Just an ordinary line here.", "a hallucinated token falls back to the original line");
+  assert.equal(stray.missing, 1);
+}
+{
+  // Two same-value tokens ({{U0}}+{{U1}} holding one URL twice): a reply that
+  // writes {{U0}} for both restores to the correct text - accepted, not flagged.
+  let out = "";
+  const merged = new LineTranslator(prepareLineTranslation("See https://example.com/x and https://example.com/x again."), (d) => { out += d; });
+  merged.push("[1] Voir {{U0}} et {{U0}} encore.");
+  merged.finish();
+  assert.equal(out, "Voir https://example.com/x et https://example.com/x encore.", "same-value token merge is accepted");
+  assert.equal(merged.missing, 0);
+}
+{
+  // ... but dropping ONE of two DISTINCT tokens is a real loss: fallback.
+  let out = "";
+  const half = new LineTranslator(prepareLineTranslation("See https://a.com/x and https://b.com/y again."), (d) => { out += d; });
+  half.push("[1] Voir {{U0}} et encore.");
+  half.finish();
+  assert.equal(out, "See https://a.com/x and https://b.com/y again.", "dropping one of two distinct tokens falls back");
+  assert.equal(half.missing, 1);
+}
+{
   // A model that "translates" by echoing the source line did not translate it:
   // the slot keeps the original (identical text either way) but the line
   // counts as missing, so the single-batch replay in background.js fires.

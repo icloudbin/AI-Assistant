@@ -21,6 +21,21 @@ function escapeHtml(text) {
     .replace(/'/g, "&#39;");
 }
 
+// href/src are captured from text that already went through escapeHtml(): every
+// `&` is `&amp;`, quotes are &quot;/&#39;, angle brackets &lt;/&gt;. Decode ALL
+// of them - &amp; LAST, so a literal "&lt;" written in the source round-trips -
+// before handing the value to the URL parser. Decoding only &amp; (the old
+// behavior) turned a Wikipedia-style ".../Don't_Stop" into ".../Don&#39;t_Stop"
+// and the link 404'd.
+function decodeUrlEntities(s) {
+  return String(s ?? "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
 // URL part of a Markdown link or image. Matches text that may contain one level
 // of balanced parentheses, so Wikipedia-style "Foo_(bar)" survives. If the
 // parentheses are unbalanced it falls back to everything up to the first ")".
@@ -29,9 +44,15 @@ function escapeHtml(text) {
 // escapeHtml (see inlineMarkdownToHtml), where every `"` is `&quot;` - a raw
 // `"...` title group could never match and titled links/images degraded to
 // literal text.
+// The label/alt class excludes `[` as well as `]`: with `[` allowed, a long
+// run of "[" with no "]( " made the greedy label consume to the end of the
+// text and backtrack one character at a time - O(n²) per render, 40k "[" took
+// >1.2s, amplified by the streaming re-renders. Excluding `[` matches
+// CommonMark (the inner link of "[a [b](url)" wins, the outer "[" is literal)
+// and makes every failed attempt O(1).
 const MD_LINK_URL = String.raw`((?:[^()\s]|\([^()\s]*\))+|[^)\s]+)`;
-const MD_IMAGE_RE = new RegExp(String.raw`!\[([^\]]*)\]\(` + MD_LINK_URL + String.raw`(?:\s+(?:"[^"]*"|&quot;[^"]*&quot;))?\)`, "g");
-const MD_LINK_RE = new RegExp(String.raw`\[([^\]]+)\]\(` + MD_LINK_URL + String.raw`(?:\s+(?:"[^"]*"|&quot;[^"]*&quot;))?\)`, "g");
+const MD_IMAGE_RE = new RegExp(String.raw`!\[([^\]\[]*)\]\(` + MD_LINK_URL + String.raw`(?:\s+(?:"[^"]*"|&quot;[^"]*&quot;))?\)`, "g");
+const MD_LINK_RE = new RegExp(String.raw`\[([^\]\[]+)\]\(` + MD_LINK_URL + String.raw`(?:\s+(?:"[^"]*"|&quot;[^"]*&quot;))?\)`, "g");
 
 function inlineMarkdownToHtml(text) {
   // Code spans and the generated tags below are swapped for placeholders while
@@ -76,56 +97,61 @@ function inlineMarkdownToHtml(text) {
     (_, alt, src) => `![${alt}](${src})`
   );
 
-  // Markdown images. Process images before normal Markdown links so that
-  // ![alt](url) is not accidentally consumed as [alt](url). Only allow
-  // remote HTTP(S) images and image data URLs.
+  // Markdown images and links. Both rules require the literal sequence "](":
+  // skipping them outright when it is absent keeps pathological input (40k "["
+  // with no close) at a single indexOf scan instead of a regex sweep. Images
+  // run before normal Markdown links so that ![alt](url) is not accidentally
+  // consumed as [alt](url). Only allow remote HTTP(S) images and image data
+  // URLs.
   // alt is NOT escaped again here: it was captured from text that already
   // went through escapeHtml() above, and escaping twice made alt text with
   // & " < > render as visible entities ("AT&amp;amp;T").
-  s = s.replace(MD_IMAGE_RE, (_, alt, src) => {
-    const rawSrc = src.replace(/&amp;/g, "&");
-    try {
-      const u = new URL(rawSrc, location.href);
-      const isHttpImage = ["http:", "https:"].includes(u.protocol);
-      const isDataImage = u.protocol === "data:" && /^data:image\/(?:png|jpeg|jpg|gif|webp);/i.test(rawSrc);
-      if (!isHttpImage && !isDataImage) return `![${alt}](${src})`;
-      const safeSrc = escapeHtml(isDataImage ? rawSrc : u.href);
-      return stashTag(`<img src="${safeSrc}" alt="${alt}" loading="lazy" decoding="async">`);
-    } catch {
-      return `![${alt}](${src})`;
-    }
-  });
-
-  // Markdown links: only permit safe navigable protocols.
-  s = s.replace(MD_LINK_RE, (_, label, href) => {
-    const rawHref = href.replace(/&amp;/g, "&");
-    try {
-      const u = new URL(rawHref, location.href);
-      if (!["http:", "https:", "mailto:"].includes(u.protocol)) return label;
-
-      // Some models ignore the requested Markdown-image syntax and return
-      // [image](https://host/path/file.webp) instead. Treat links whose URL
-      // clearly points at an image the worker can actually fetch as images,
-      // so the conversation UI still renders the requested image rather than
-      // showing a clickable "image" link. SVG is deliberately excluded: the
-      // worker refuses SVG by content sniffing (see background.js), so an
-      // .svg link converted here could only ever render a permanently
-      // failing placeholder - it stays an ordinary link instead.
-      const imagePath = u.pathname.toLowerCase();
-      const isImageUrl = /\.(?:png|jpe?g|gif|webp|bmp)$/i.test(imagePath);
-      if (isImageUrl && (u.protocol === "http:" || u.protocol === "https:")) {
-        // label already carries escaped entities (see the escapeHtml above) -
-        // escaping again produced "AT&amp;amp;T" style alt text.
-        const safeSrc = escapeHtml(u.href);
-        return stashTag(`<img src="${safeSrc}" alt="${label}" loading="lazy" decoding="async">`);
+  if (s.includes("](")) {
+    s = s.replace(MD_IMAGE_RE, (_, alt, src) => {
+      const rawSrc = decodeUrlEntities(src);
+      try {
+        const u = new URL(rawSrc, location.href);
+        const isHttpImage = ["http:", "https:"].includes(u.protocol);
+        const isDataImage = u.protocol === "data:" && /^data:image\/(?:png|jpeg|jpg|gif|webp);/i.test(rawSrc);
+        if (!isHttpImage && !isDataImage) return `![${alt}](${src})`;
+        const safeSrc = escapeHtml(isDataImage ? rawSrc : u.href);
+        return stashTag(`<img src="${safeSrc}" alt="${alt}" loading="lazy" decoding="async">`);
+      } catch {
+        return `![${alt}](${src})`;
       }
+    });
 
-      const safeHref = escapeHtml(u.href);
-      return `${stashTag(`<a href="${safeHref}" target="_blank" rel="noopener noreferrer">`)}${label}</a>`;
-    } catch {
-      return label;
-    }
-  });
+    // Markdown links: only permit safe navigable protocols.
+    s = s.replace(MD_LINK_RE, (_, label, href) => {
+      const rawHref = decodeUrlEntities(href);
+      try {
+        const u = new URL(rawHref, location.href);
+        if (!["http:", "https:", "mailto:"].includes(u.protocol)) return label;
+
+        // Some models ignore the requested Markdown-image syntax and return
+        // [image](https://host/path/file.webp) instead. Treat links whose URL
+        // clearly points at an image the worker can actually fetch as images,
+        // so the conversation UI still renders the requested image rather than
+        // showing a clickable "image" link. SVG is deliberately excluded: the
+        // worker refuses SVG by content sniffing (see background.js), so an
+        // .svg link converted here could only ever render a permanently
+        // failing placeholder - it stays an ordinary link instead.
+        const imagePath = u.pathname.toLowerCase();
+        const isImageUrl = /\.(?:png|jpe?g|gif|webp|bmp)$/i.test(imagePath);
+        if (isImageUrl && (u.protocol === "http:" || u.protocol === "https:")) {
+          // label already carries escaped entities (see the escapeHtml above) -
+          // escaping again produced "AT&amp;amp;T" style alt text.
+          const safeSrc = escapeHtml(u.href);
+          return stashTag(`<img src="${safeSrc}" alt="${label}" loading="lazy" decoding="async">`);
+        }
+
+        const safeHref = escapeHtml(u.href);
+        return `${stashTag(`<a href="${safeHref}" target="_blank" rel="noopener noreferrer">`)}${label}</a>`;
+      } catch {
+        return label;
+      }
+    });
+  }
 
   s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
   // Underscore and asterisk emphasis follow word/arithmetic boundary guards:
@@ -282,14 +308,21 @@ function markdownToHtml(markdown) {
       continue;
     }
 
-    if (/^```/.test(trimmed) || /^~~~/.test(trimmed)) {
+    const fenceMatch = trimmed.match(/^(`{3,}|~{3,})/);
+    if (fenceMatch) {
       flushParagraph();
       flushList();
-      const fence = trimmed.slice(0, 3);
-      const language = trimmed.slice(3).trim().split(/\s+/)[0] || "";
+      const fence = fenceMatch[1];
+      const fenceChar = fence[0];
+      const language = trimmed.slice(fence.length).trim().split(/\s+/)[0] || "";
       const codeLines = [];
       i++;
-      while (i < lines.length && !lines[i].trim().startsWith(fence)) {
+      // CommonMark closing fence: a run of the SAME character, at least as long
+      // as the opening one, alone on its line. The old startsWith(fence) check
+      // (fence = the first 3 chars) ended a ```` outer fence at an inner ```
+      // and swallowed inner-open lines like "```js" as closers.
+      const closeRe = new RegExp(`^${fenceChar}{${fence.length},}$`);
+      while (i < lines.length && !closeRe.test(lines[i].trim())) {
         codeLines.push(lines[i]);
         i++;
       }

@@ -2,7 +2,7 @@
 // Unit tests for pii-filter.js: what must be redacted, what must be left alone,
 // numbered placeholders and restoring the real values in a reply.
 // Run:  node scripts/test-pii-filter.mjs
-import { redactSensitive as R, createRedactionSession, restorePlaceholders, PlaceholderRestorer, redactOutbound } from "../privacy/pii-filter.js";
+import { redactSensitive as R, createRedactionSession, restorePlaceholders, restoreNamePlaceholders, PlaceholderRestorer, redactOutbound } from "../privacy/pii-filter.js";
 
 let failed = 0;
 const check = (name, ok, extra = "") => {
@@ -39,8 +39,6 @@ const MUST = [
   ["Ship to 10 Downing Street, London SW1A 2AA", "Downing", "[ADDRESS]"],
   ["Ship to 10 Downing Street, London SW1A 2AA", "SW1A 2AA", "[POSTAL_CODE]"],
   ["地址：北京市朝阳区建国路88号3号楼502室", "建国路88号", "[ADDRESS]"],
-  ["John Smith approved the request", "John Smith", "[NAME]"],
-  ["Meeting with Mary Johnson and Robert Brown", "Mary Johnson", "[NAME]"],
   ["From: John Smith <john@x.com>", "John Smith", "[NAME]"],
 ];
 for (const [input, secret, ph] of MUST) {
@@ -62,12 +60,117 @@ const KEEP = [
   "Hello World, hi everyone, Dear Customer Support Team",
   "In 2024 Will Smith visited the Main Street Bank.",
   "Paris Hilton Street food in Austin Texas", "Mark the date: 5 Easy Steps",
+  // Names WITHOUT a cue are never redacted (the documented contract): a
+  // bare-name rule used to blind every Q&A about a public figure and made
+  // fact-check claims unsearchable.
+  "John Smith approved the request",
+  "Meeting with Mary Johnson and Robert Brown",
+  "Who was Charles Darwin?",
+  "Fact check: Michael Jordan won 6 championships",
+  "The theory was developed by Alfred Wallace in 1858.",
+  // "Name:" after a non-person qualifier is a label, not a person cue.
+  "Product Name: Widget Pro Max",
+  "Brand Name: Acme Corp",
+  "File Name: Report-2026.PDF",
+  "Hi Google, please help me.",
 ];
 for (const input of KEEP) check(`unchanged: ${input.slice(0, 60)}`, R(input) === input, `-> ${R(input)}`);
 
 // ---- display-name rule still redacts a real name, keeps role words ----
 check('"Please Contact Support Team <a@b.com>" is not a name', !R("Please Contact Support Team <a@b.com>").includes("[NAME"), R("Please Contact Support Team <a@b.com>"));
 check('"Please contact John Smith <a@b.com>" keeps the lead words', /^Please contact \[NAME\] <\[EMAIL\]>$/.test(R("Please contact John Smith <a@b.com>")), R("Please contact John Smith <a@b.com>"));
+
+// ---- cued names still redacted after the bare-name rule removal ----
+check('"Name: John Smith" still redacts', R("Name: John Smith").includes("[NAME"), R("Name: John Smith"));
+check('"My name is Jane Doe" still redacts', R("My name is Jane Doe").includes("[NAME"), R("My name is Jane Doe"));
+check('"Dear John" still redacts', R("Dear John").includes("[NAME"), R("Dear John"));
+check('"Hi John," still redacts', R("Hi John, hello").includes("[NAME"), R("Hi John, hello"));
+check('"Dr. Smith examined" still redacts', R("Dr. Smith examined the results").includes("[NAME"), R("Dr. Smith examined the results"));
+check('"姓名：张三" still redacts', R("姓名：张三").includes("[NAME"), R("姓名：张三"));
+check('"Customer Name: John Smith" still redacts (person-plausible qualifier)', R("Customer Name: John Smith").includes("[NAME"), R("Customer Name: John Smith"));
+
+// ---- v1.10.132: placeholder pipeline edges (field report round 8) ----
+{
+  // A literal [EMAIL#1] in the source is RESERVED: the real email gets #2 and
+  // the literal token is never restored to a real value (streaming included).
+  const s = createRedactionSession();
+  const red = R("Quote [EMAIL#1] literally. Mail jane@example.com.", s);
+  check("literal token reserves its number", red.includes("[EMAIL#1]") && red.includes("[EMAIL#2]"), red);
+  check("literal token survives restore", restorePlaceholders("Here: [EMAIL#1] and [EMAIL#2].", s) === "Here: [EMAIL#1] and jane@example.com.");
+  let acc = "";
+  const stream = new PlaceholderRestorer(s, (d) => { acc += d; });
+  for (const piece of ["Here: [EMA", "IL#1] and [EMAIL", "#2]."]) stream.push(piece);
+  stream.flush();
+  check("literal token survives the streaming restorer", acc === "Here: [EMAIL#1] and jane@example.com.", JSON.stringify(acc));
+}
+{
+  // A backslash at a CHUNK boundary escaping the next chunk's placeholder:
+  // emitting it immediately left a stray "\" before the restored value.
+  const s = createRedactionSession();
+  R("call 415-555-0132 or 650-555-0134 now", s); // [PHONE#1], [PHONE#2]
+  let out = "";
+  const r = new PlaceholderRestorer(s, (d) => { out += d; });
+  r.push("see \\");
+  r.push("[PHONE#2\] ok");
+  r.flush();
+  check("cross-chunk escaped placeholder has no stray backslash", out === "see 650-555-0134 ok", JSON.stringify(out));
+}
+{
+  // numberPlaceholder: a rule whose matched value ends with "]" (or starts at
+  // a literal "[") used to degrade to an UNNUMBERED [COOKIE] - unrestorable.
+  const s = createRedactionSession();
+  const red = R("Set-Cookie: sid=abc123456]", s);
+  check("cookie value ending in ] is numbered", red === "Set-Cookie: [COOKIE#1]", red);
+  check("... and restores the original value", restorePlaceholders(red, s) === "Set-Cookie: sid=abc123456]");
+  const red2 = R("Cookie:[9", s);
+  check("value starting at a literal [ is numbered", red2 === "Cookie:[COOKIE#2]", red2);
+  check("... and restores", restorePlaceholders(red2, s) === "Cookie:[9");
+}
+
+// ---- v1.10.131: worst-case timing + coverage (field report round 8) ----
+{
+  const s = "区".repeat(16000);
+  const t0 = Date.now();
+  R(s);
+  check(`16k 区 in ${Date.now() - t0}ms (was 4.3s)`, Date.now() - t0 < 500, `${Date.now() - t0}ms`);
+  check("16k 区 untouched", R(s) === s);
+  const sp = "phone " + " ".repeat(50000);
+  const t1 = Date.now();
+  R(sp);
+  check(`phone + 50k spaces in ${Date.now() - t1}ms (was 3.8s)`, Date.now() - t1 < 500, `${Date.now() - t1}ms`);
+  check("DOB rule stays linear too", R("生日 " + " ".repeat(50000)) === "生日 " + " ".repeat(50000));
+}
+{
+  check("French mobile redacted", R("06 12 34 56 78") === "[PHONE]", R("06 12 34 56 78"));
+  check("Japanese mobile redacted", R("090-1234-5678") === "[PHONE]", R("090-1234-5678"));
+  check("Taiwanese mobile redacted", R("0912-345-678") === "[PHONE]", R("0912-345-678"));
+  check("Spanish mobile is [PHONE], not [SIN]", R("612 345 678") === "[PHONE]", R("612 345 678"));
+  check("accented/IDN email redacted", R("josé@exämple.com") === "[EMAIL]", R("josé@exämple.com"));
+  check("ETH address redacted", R("0x71C7656EC7ab88b098defB751B7401B5f6d8976F") === "[CRYPTO_ADDRESS]", R("0x71C7656EC7ab88b098defB751B7401B5f6d8976F"));
+  check("BTC base58 redacted", R("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa") === "[CRYPTO_ADDRESS]", R("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"));
+  check("BTC bech32 redacted", R("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh") === "[CRYPTO_ADDRESS]", R("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"));
+}
+{
+  check("Taiwan ID redacted", R("A123456789") === "[ID_NUMBER]", R("A123456789"));
+  check("Spanish DNI redacted", R("12345678Z") === "[ID_NUMBER]", R("12345678Z"));
+  check("UK NI (spaced) redacted", R("AB 12 34 56 C") === "[ID_NUMBER]", R("AB 12 34 56 C"));
+  check("Aadhaar (Verhoeff-valid) redacted", R("2345 6789 0121") === "[ID_NUMBER]", R("2345 6789 0121"));
+  check("French NIR redacted", R("184127645108451") === "[ID_NUMBER]", R("184127645108451"));
+  check("Luhn-true URL path digits are not a card", R("https://x.com/status/1580000000000000000") === "https://x.com/status/1580000000000000000");
+  check("Aadhaar with a wrong check digit stays", R("2345 6789 0123") === "2345 6789 0123");
+}
+
+// ---- restoreNamePlaceholders: names only, other placeholders untouched ----// ---- restoreNamePlaceholders: names only, other placeholders untouched ----
+{
+  const s = createRedactionSession();
+  const red = R("Name: John Smith, mail jane@x.com", s);
+  check("setup: name and email redacted", red.includes("[NAME#1]") && red.includes("[EMAIL#1]"), red);
+  const namesBack = restoreNamePlaceholders(red, s);
+  check("restoreNamePlaceholders: name restored", namesBack === "Name: John Smith, mail [EMAIL#1]", namesBack);
+  check("restoreNamePlaceholders: full restore still works", restorePlaceholders(red, s) === "Name: John Smith, mail jane@x.com");
+  check("restoreNamePlaceholders: unknown token untouched", restoreNamePlaceholders("[NAME#9]", s) === "[NAME#9]");
+  check("restoreNamePlaceholders: no session is a no-op", restoreNamePlaceholders(red, null) === red);
+}
 
 // ---- numbered placeholders and restore ----
 {

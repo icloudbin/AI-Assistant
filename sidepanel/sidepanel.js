@@ -3092,14 +3092,16 @@ let claimedContextActionAt = null;
 async function consumePendingContextAction(pending = null) {
   const thisWindowId = await getPanelWindowId();
   const claimed = await withNamedLock(CONTEXT_ACTION_LOCK, async () => {
-    const stored = await chrome.storage.local.get(PENDING_CONTEXT_ACTION_KEY);
+    // Mirrors the background write: the queue lives in RAM-only
+    // chrome.storage.session, so selected text never persists on disk.
+    const stored = await chrome.storage.session.get(PENDING_CONTEXT_ACTION_KEY);
     const raw = stored[PENDING_CONTEXT_ACTION_KEY];
     let list = Array.isArray(raw) ? raw.slice() : raw ? [raw] : [];
     const now = Date.now();
     const beforePrune = list.length;
     list = list.filter((item) => item && item.createdAt && now - item.createdAt <= 120000);
     const writeList = async () => {
-      await chrome.storage.local.set({ [PENDING_CONTEXT_ACTION_KEY]: list.length ? list : null });
+      await chrome.storage.session.set({ [PENDING_CONTEXT_ACTION_KEY]: list.length ? list : null });
     };
 
     const matchesWindow = (item) => !item.windowId || thisWindowId === null || item.windowId === thisWindowId;
