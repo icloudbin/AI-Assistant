@@ -245,6 +245,37 @@ assert.deepEqual(browserPreferred, { text: "One\n\nTwo", format: "text", truncat
   lt.finish();
   assert.equal(out, "在配置中使用令牌 {{U0}}。", "literal token survives on a token-free line");
 }
+{
+  // A model that "translates" by echoing the source line did not translate it:
+  // the slot keeps the original (identical text either way) but the line
+  // counts as missing, so the single-batch replay in background.js fires.
+  const p = prepareLineTranslation("Hello world\n\nSecond line here.");
+  let out = "";
+  const lt = new LineTranslator(p, (d) => { out += d; });
+  lt.push("[1] Hello world\n[3] Second line translated.");
+  lt.finish();
+  assert.equal(out, "Hello world\n\nSecond line translated.", "an echoed line falls back to its original text");
+  assert.equal(lt.missing, 1, "an echoed line counts as untranslated");
+  assert.equal(lt.translated, 1, "only the real translation is counted");
+}
+{
+  // Echo detection is whitespace-insensitive: the model re-wrapped the line
+  // (latin continuation joins insert spaces).
+  const p = prepareLineTranslation("A  spaced   line here");
+  const lt = new LineTranslator(p, () => {});
+  lt.push("[1] A spaced\nline here");
+  lt.finish();
+  assert.equal(lt.missing, 1, "a re-wrapped echo still counts as untranslated");
+}
+{
+  // A genuinely translated line is never mistaken for an echo, even when it
+  // quotes the source: content differs -> counted as translated.
+  const p = prepareLineTranslation("Hello world\n\nSecond line here.");
+  const lt = new LineTranslator(p, () => {});
+  lt.push("[1] 你好，世界\n[3] Second line here, with more words.");
+  lt.finish();
+  assert.equal(lt.missing, 0, "real translations are counted");
+}
 
 console.log("OK: translated paragraphs, trailing whitespace, and selection-source precedence are preserved.");
 

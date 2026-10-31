@@ -61,6 +61,9 @@ function restore(text, tokens) {
   return tokens.length ? text.replace(/\{\{\s*U(\d+)\s*\}\}/g, (m, i) => (tokens[Number(i)] ?? m)) : text;
 }
 const HAS_LETTER_RE = /\p{L}/u;
+// Whitespace-insensitive equality: a model that "translates" a line by echoing
+// it back (with its own line wrapping re-joined) has not translated it.
+const collapseWs = (s) => s.replace(/\s+/g, " ").trim();
 // "[3] text" from the model - optionally markdown-escaped as "\[3\] text",
 // exactly like PLACEHOLDER_RE tolerates escaped brackets in pii-filter.js.
 const TAG_RE = /^\s*\\?\[(\d+)\\?\]\s?(.*)$/;
@@ -164,7 +167,12 @@ export class LineTranslator {
     if (this.heldId < 0) return;
     this.fill(this.heldId);
     const l = this.lines[this.heldId];
-    const translatedText = restore(this.heldText.trim(), l.tokens);
+    const restored = restore(this.heldText.trim(), l.tokens);
+    // An echo of the source line is not a translation: keep the original in
+    // the slot (the visible text is identical either way) but count the line
+    // as untranslated, so `missing` stays truthful and the caller's
+    // completeness check (the single-batch replay in background.js) fires.
+    const translatedText = restored && collapseWs(restored) !== collapseWs(l.body) ? restored : "";
     if (translatedText) this.translated++;
     this.write(`${l.prefix}${translatedText || l.body}${l.trailingWhitespace}`);
     this.next = this.heldId + 1;

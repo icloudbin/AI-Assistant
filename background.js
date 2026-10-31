@@ -659,6 +659,7 @@ chrome.runtime.onConnect.addListener((port) => {
       let effectiveQuestion = question;
       let requestPageContextFinal = requestPageContext;
       let translationBatches = [];
+      let translationPrepared = null;
       let translateUsingSelection = false;
       // Set when the source contains nothing translatable (see below): the
       // original text is echoed back and no provider request is made at all.
@@ -681,6 +682,7 @@ chrome.runtime.onConnect.addListener((port) => {
           }
           translateUsingSelection = usingSelection;
           translationBatches = numberedBatches(prepared);
+          translationPrepared = prepared;
           ctx.lineTranslator = new LineTranslator(prepared, (delta) => ctx.sendChunk(delta));
           if (typeof translateSource === "string" && translateSource.trim()) {
             effectiveQuestion = `${question}\n\n${prepared.numbered}`;
@@ -776,6 +778,44 @@ chrome.runtime.onConnect.addListener((port) => {
             break;
           }
           ctx.lineTranslator.endBatch();
+        }
+      } else if (ctx.lineTranslator && translationBatches.length === 1) {
+        // Single-batch translation (a selection, or a page short enough for one
+        // request). Models occasionally violate the numbered-lines protocol:
+        // they skip a tag and shift a translation into a later line's slot -
+        // the skipped line then shows as its raw original text and the line
+        // whose slot was stolen is lost entirely. Streamed output cannot be
+        // retracted, so an incomplete result is replayed once OFF-screen; the
+        // replacement is swapped in only when the replay is complete.
+        // Otherwise (replay failed or incomplete too) the first attempt stands
+        // with its original-text fallback and the missing-lines NOTICE below,
+        // exactly as before this replay existed.
+        await runProvider(effectiveQuestion, requestPageContextFinal);
+        ctx.lineTranslator.endBatch();
+        if (ctx.lineTranslator.missing > 0 && !abortController.signal.aborted) {
+          const firstAttempt = ctx.lineTranslator;
+          let replayText = "";
+          const replay = new LineTranslator(translationPrepared, (delta) => { replayText += delta; });
+          ctx.lineTranslator = replay;
+          try {
+            await runProvider(effectiveQuestion, requestPageContextFinal);
+            replay.endBatch();
+          } catch (err) {
+            // The first attempt was fully delivered; a failed replay (rate
+            // limit, stream cut) must not discard it. A deliberate STOP is
+            // still an abort and must propagate.
+            if (abortController.signal.aborted) throw err;
+          }
+          if (!replay.missing && replayText) {
+            // Complete replay: it becomes THE reply. finish() below runs on
+            // the replay translator (nothing left to fill, no NOTICE); the
+            // first attempt is abandoned without emitting anything more.
+            ctx.flushChunks?.();
+            safePost({ type: "RESET_REPLY", requestId });
+            ctx.sendChunk(replayText);
+          } else {
+            ctx.lineTranslator = firstAttempt;
+          }
         }
       } else {
         await runProvider(effectiveQuestion, requestPageContextFinal);

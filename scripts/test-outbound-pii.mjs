@@ -62,10 +62,13 @@ async function ask(payload, { deadStart = false, deadNotice = false } = {}) {
   let port;
   const handlers = [];
   const notices = [];
+  const resets = [];
   let resolveDone = null;
   const basePost = (m) => {
     if (m.type === "CHUNK") lastOut += m.delta;
     if (m.type === "NOTICE") notices.push(m.text);
+    // Mirror the panel's RESET_REPLY handler: the replay replaces the text.
+    if (m.type === "RESET_REPLY") { resets.push(m); lastOut = ""; }
     if (m.type === "DONE" || m.type === "ERROR") resolveDone(m);
   };
   const done = new Promise((resolve) => { resolveDone = resolve; });
@@ -81,7 +84,7 @@ async function ask(payload, { deadStart = false, deadNotice = false } = {}) {
   await handlers[0]({ type: "ASK", payload: { requestId: 1, modelId: "deepseek-flash", includePageContext: true, history: [], images: [], ...payload } });
   const final = await done;
   const chunks = []; // not tracked; the translation tests read output via `out`
-  return { final, sent: [...bodies], notices, out: lastOut };
+  return { final, sent: [...bodies], notices, resets, out: lastOut };
 }
 
 const pageContext = { tabId: 1, title: "Page", url: "https://example.com/p", text: `Page says: ${piiText}` };
@@ -143,6 +146,57 @@ providerReply = echoTranslate(2);
 r = await ask({ question: "Translate", pageContext: null, includePageContext: false, translateMode: true, translateSource: srcLines.join("\n"), noWebResearch: true });
 check("translation with an incomplete reply warns about untranslated lines", r.notices.some((n) => /4/.test(n) && /6/.test(n)), r.notices.join(" | "));
 check("untranslated lines keep original text", srcLines.slice(2).every((l) => r.out.includes(l)));
+
+// --- Single-batch replay: a skipped tag shifts translations into wrong slots
+// Field corruption shape: the model skipped tag [2] and put line 1's
+// translation under [3] - line 2 shows as its raw original and line 3 is lost
+// (its slot was stolen). The off-screen replay returns all three lines and the
+// reply is replaced; the RESET_REPLY clears the streamed first attempt.
+{
+  const threeLines = ["Alpha line one.", "Beta line two.", "Gamma line three."];
+  let calls = 0;
+  providerReply = () => {
+    calls++;
+    return calls === 1
+      ? chunk("[1] T:Alpha line one.\n[3] T:Alpha line one.", "stop") + "data: [DONE]\n\n"
+      : chunk("[1] T:Alpha line one.\n[2] T:Beta line two.\n[3] T:Gamma line three.", "stop") + "data: [DONE]\n\n";
+  };
+  r = await ask({ question: "Translate", pageContext: null, includePageContext: false, translateMode: true, translateSource: threeLines.join("\n"), noWebResearch: true });
+  check("skipped-tag translation is replayed once off-screen", r.sent.length === 2 && r.resets.length === 1, `${r.sent.length} requests, ${r.resets.length} reset(s)`);
+  check("complete replay replaces the first attempt", r.final.type === "DONE" && r.out === "T:Alpha line one.\nT:Beta line two.\nT:Gamma line three.", JSON.stringify(r.out));
+  check("complete replay raises no missing-lines NOTICE", r.notices.length === 0, r.notices.join(" | "));
+}
+// A replay that is incomplete too must not replace anything: the first attempt
+// (original-text fallback) stands and the missing-lines NOTICE is shown.
+{
+  const threeLines = ["Alpha line one.", "Beta line two.", "Gamma line three."];
+  providerReply = () => chunk("[1] T:Alpha line one.", "stop") + "data: [DONE]\n\n";
+  r = await ask({ question: "Translate", pageContext: null, includePageContext: false, translateMode: true, translateSource: threeLines.join("\n"), noWebResearch: true });
+  check("incomplete replay keeps the first attempt", r.sent.length === 2 && r.resets.length === 0 && r.out.includes("Beta line two.") && r.out.includes("Gamma line three."), `${r.sent.length} requests, resets=${r.resets.length}, out=${JSON.stringify(r.out.slice(0, 60))}`);
+  check("kept first attempt still warns about missing lines", r.notices.some((n) => /2/.test(n) && /3/.test(n)), r.notices.join(" | "));
+}
+// A verbatim echo counts as untranslated (translate-lines.js echo guard), so
+// the corruption is detected even when the model "answered" every tag.
+{
+  const twoLines = ["Just echo me.", "Translate me please."];
+  let calls = 0;
+  providerReply = () => {
+    calls++;
+    return calls === 1
+      ? chunk("[1] Just echo me.\n[2] T:Translate me please.", "stop") + "data: [DONE]\n\n"
+      : chunk("[1] T:Echoed and translated.\n[2] T:Translate me please.", "stop") + "data: [DONE]\n\n";
+  };
+  r = await ask({ question: "Translate", pageContext: null, includePageContext: false, translateMode: true, translateSource: twoLines.join("\n"), noWebResearch: true });
+  check("echoed line triggers the replay and is replaced", r.sent.length === 2 && r.resets.length === 1 && r.out === "T:Echoed and translated.\nT:Translate me please.", `${r.sent.length} requests, resets=${r.resets.length}, out=${JSON.stringify(r.out)}`);
+}
+// A complete single-batch reply must NOT be replayed (one provider request).
+{
+  const twoLines = ["Fine line one.", "Fine line two."];
+  providerReply = echoTranslate(Infinity);
+  r = await ask({ question: "Translate", pageContext: null, includePageContext: false, translateMode: true, translateSource: twoLines.join("\n"), noWebResearch: true });
+  check("complete single-batch translation is not replayed", r.sent.length === 1 && r.resets.length === 0 && r.notices.length === 0, `${r.sent.length} requests`);
+}
+providerReply = () => 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
 
 // Long source: must be split into several requests, and every line translated.
 const longLines = Array.from({ length: 400 }, (_, i) => `Line ${i + 1}: ${"lorem ipsum dolor sit amet ".repeat(4)}`);

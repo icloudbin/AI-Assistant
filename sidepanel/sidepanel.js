@@ -1518,6 +1518,15 @@ function handlePortMessage(msg) {
       scheduleStreamingRender();
       break;
     }
+    case "RESET_REPLY": {
+      // The worker replayed an incomplete single-batch translation off-screen
+      // (the model had skipped a numbered line, which corrupts the line
+      // mapping) and is replacing the first attempt with the complete result:
+      // drop the streamed text and render the replay in the same bubble.
+      currentAssistantText = "";
+      scheduleStreamingRender();
+      break;
+    }
     case "DONE": {
       flushStreamingRender();
       const textToSave = (currentAssistantText || currentThinkingText).trim();

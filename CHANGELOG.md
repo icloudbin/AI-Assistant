@@ -4,6 +4,19 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Fix: translation self-repair - a model that skips a numbered line no longer corrupts the whole reply (v1.10.124)
+
+A field report showed a translated post with one paragraph still in English in the middle of the reply, its Chinese translation right after it, and the LAST paragraph missing entirely. Investigation (the saved conversation plus a reproduction against the real pipeline) pinned the cause: the model had violated the numbered-lines protocol by skipping a tag and attaching that line's translation to a LATER tag - the skipped line was shown as its raw original text (the intended fallback), the stolen slot swallowed the last paragraph whole, and the end-of-run NOTICE misdescribed the damage.
+
+- **Problem 1 (P2).** A single-batch translation trusted the model's tags blindly: a skipped tag shifted every later translation into the wrong slot, the untranslated line appeared as raw original text mid-reply, and the line whose slot was stolen was lost entirely (not translated AND not preserved as original), while the NOTICE claimed "preserved in the original language". The streamed output could not be corrected once sent.
+- **Fix 1.** A single-batch translation (any selection, or a page short enough for one request) that ends with untranslated lines is now replayed once OFF-screen into a buffer. Only a COMPLETE replay replaces the first attempt: the panel receives a `RESET_REPLY` message that clears the streamed text and renders the replay in the same bubble. A replay that fails (rate limit, stream cut, STOP) or is incomplete too changes nothing: the first attempt stands with its original-text fallback and the NOTICE, exactly as before. A complete single-batch reply is never replayed (no extra request, no flicker).
+- **Problem 2 (P3).** A model that "translates" a line by echoing it back verbatim was counted as translated, so an echo-corrupted reply reported zero missing lines and no repair could trigger.
+- **Fix 2.** `LineTranslator` now treats a translation that equals its source line (whitespace-insensitive, so re-wrapped echoes are caught too) as untranslated: the slot keeps the original text and the line counts toward `missing`. A genuinely translated line is never mistaken for an echo.
+- **Problem 3 (P3).** The missing-lines NOTICE said the untranslated lines "are shown in the original language" - with a shifted reply that was false (a later line may be missing entirely).
+- **Fix 3.** The NOTICE now says the truth in all 6 languages: lines may be missing or out of place; translate again for a complete result.
+- **Checked.** New regression tests: the exact field corruption shape (skip tag [2], mislabel [3]) is replayed and replaced with the complete translation, no NOTICE; an incomplete replay keeps the first attempt with its NOTICE; a verbatim echo triggers the replay; a complete single-batch reply is not replayed; echo-guard unit cases (echo falls back to the original and counts as missing, re-wrapped echo caught, real translations never miscounted). All existing suites unchanged and green.
+- Build bumped to 1.10.124.
+
 ## Fix: round-10 review part 2 - URL secret over-capture, duplicated attachment turns, epoch uniqueness, surrogate-safe cut, deferred final render (v1.10.123)
 
 Second batch of the round-10 review fixes (findings verified by execution before fixing, then re-verified end to end in real Chrome).
