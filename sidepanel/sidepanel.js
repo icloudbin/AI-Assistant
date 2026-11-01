@@ -2375,6 +2375,116 @@ fileInput.addEventListener("change", async () => {
   for (const file of files.slice(0, room)) await processFile(file);
 });
 
+// ---------- Drag & drop attachments ----------
+// Dropping onto the composer attaches what was dragged:
+//   - files from the OS (images, text, ZIP) go through the same processFile()
+//     pipeline as the Upload button;
+//   - an image dragged FROM THE PAGE carries no bytes, only its URL (text/html
+//     or text/uri-list): the URL is fetched through the worker's FETCH_IMAGE
+//     channel (host rules, 10 MB cap, private-host rules with the page URL,
+//     http->https fallback) and attached as a regular image;
+//   - plain text drags (selections) keep the native textarea behavior.
+
+const COMPOSER_DROP_CLASS = "drop-target";
+let composerDragDepth = 0;
+
+function composerDropPayloadTypes(dataTransfer) {
+  const types = [...(dataTransfer?.types || [])];
+  return types.includes("Files") || types.includes("text/html") || types.includes("text/uri-list");
+}
+
+// First image URL carried by a page drag: text/html <img src> first (the
+// browser serializes dragged images with absolute src), then the first
+// non-comment http(s) line of the uri-list, then a text/plain value that is
+// itself a single http(s) URL. Anything else is not an image drop.
+function firstImageUrlFromDrop(dataTransfer) {
+  const html = dataTransfer.getData("text/html");
+  if (html) {
+    try {
+      const img = new DOMParser().parseFromString(html, "text/html").querySelector("img[src]");
+      const src = img?.getAttribute("src") || "";
+      if (src) return src;
+    } catch { /* malformed fragment: try the other flavors */ }
+  }
+  const list = (dataTransfer.getData("text/uri-list") || dataTransfer.getData("text/plain") || "").trim();
+  for (const line of list.split("\n")) {
+    const url = line.trim();
+    if (url && !url.startsWith("#") && /^https?:\/\//i.test(url)) return url;
+  }
+  return "";
+}
+
+// Fetches a page image through the worker (same channel as reply-image
+// loading, including the http->https fallback) and attaches it via the
+// regular processFile() pipeline under a name derived from the URL.
+async function attachImageFromUrl(rawUrl) {
+  let url = String(rawUrl || "").trim();
+  const activeTab = await getCurrentActiveTab().catch(() => null);
+  const pageUrl = String(activeTab?.url || "");
+  if (!/^https?:\/\//i.test(url)) {
+    // Relative src from a page fragment: resolve against the page.
+    try { url = new URL(url, pageUrl || location.href).href; } catch { /* FETCH_IMAGE reports it */ }
+  }
+  let result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url, pageUrl }).catch(() => null);
+  if ((!result?.ok || !result.dataUrl) && /^http:/i.test(url)) {
+    result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: url.replace(/^http:/i, "https:"), pageUrl }).catch(() => null);
+  }
+  const dataUrl = result?.ok ? String(result.dataUrl || "") : "";
+  if (!/^data:image\/(png|jpeg|jpg|gif|webp|bmp);/i.test(dataUrl)) {
+    addBubble("error", t(currentLang, "attachment_error_unableToReadImage"));
+    return;
+  }
+  const mime = (/^data:([^;,]+)/.exec(dataUrl) || [])[1] || "image/png";
+  const ext = (mime.split("/")[1] || "png").replace(/^jpeg$/i, "jpg");
+  let name = "";
+  try { name = new URL(url, pageUrl || undefined).pathname.split("/").pop() || ""; } catch { /* keep the fallback */ }
+  name = (name.replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "image") + (/\.[A-Za-z0-9]{1,5}$/.test(name) ? "" : "." + ext);
+  const bytes = Uint8Array.from(atob(dataUrl.split(",")[1] || ""), (ch) => ch.charCodeAt(0));
+  await processFile(new File([bytes], name, { type: mime }));
+}
+
+composer.addEventListener("dragenter", (event) => {
+  if (!composerDropPayloadTypes(event.dataTransfer)) return;
+  composerDragDepth++;
+  composer.classList.add(COMPOSER_DROP_CLASS);
+});
+composer.addEventListener("dragover", (event) => {
+  if (!composerDropPayloadTypes(event.dataTransfer)) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+  composer.classList.add(COMPOSER_DROP_CLASS);
+});
+composer.addEventListener("dragleave", (event) => {
+  if (event.target && composer.contains(event.target)) return;
+  composerDragDepth = Math.max(0, composerDragDepth - 1);
+  if (composerDragDepth === 0) composer.classList.remove(COMPOSER_DROP_CLASS);
+});
+composer.addEventListener("dragend", () => {
+  composerDragDepth = 0;
+  composer.classList.remove(COMPOSER_DROP_CLASS);
+});
+composer.addEventListener("drop", async (event) => {
+  const dt = event.dataTransfer;
+  const droppable = composerDropPayloadTypes(dt);
+  composerDragDepth = 0;
+  composer.classList.remove(COMPOSER_DROP_CLASS);
+  if (!droppable) return; // plain text: keep the native textarea behavior
+  event.preventDefault();
+
+  if (dt.files && dt.files.length) {
+    const files = [...dt.files];
+    const room = Math.max(0, MAX_ATTACHMENTS - attachments.length);
+    if (files.length > room) {
+      addBubble("notice", t(currentLang, "attachment_error_tooMany_template", { max: String(MAX_ATTACHMENTS) }));
+    }
+    for (const file of files.slice(0, room)) await processFile(file);
+    return;
+  }
+
+  const imageUrl = firstImageUrlFromDrop(dt);
+  if (imageUrl) await attachImageFromUrl(imageUrl);
+});
+
 // ---------- Voice input (speech-to-text) ----------
 // Browser note: this uses the standard Web Speech API (SpeechRecognition).
 // Chrome supports it out of the box. Brave has a long-standing, documented

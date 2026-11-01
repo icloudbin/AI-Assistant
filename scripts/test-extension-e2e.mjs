@@ -232,7 +232,9 @@ async function main() {
       const { markdownToHtml } = await import(chrome.runtime.getURL('sidepanel/rendering/markdown.js'));
       return markdownToHtml("| A | B |\\n| :--- | ---: |\\n| 1 | 2 | 3 | 4 |");
     })()`);
-    check("table keeps extra cells", table.includes("<td>3</td>") && table.includes("<td>4</td>"), table.slice(0, 200));
+    check("composer layout intact (row is flex)", await page.eval("getComputedStyle(document.querySelector('.composer-row')).display") === "flex");
+check("drop-target highlight style applies", await page.eval("(() => { const f = document.getElementById('chatForm'); f.classList.add('drop-target'); const o = getComputedStyle(f).outlineStyle; f.classList.remove('drop-target'); return o; })()") === "dashed");
+check("table keeps extra cells", table.includes("<td>3</td>") && table.includes("<td>4</td>"), table.slice(0, 200));
     check("table preserves alignment", table.includes('align="left"') && table.includes('align="right"'), table.slice(0, 200));
 
     // P3-8 user bubble newlines + real submit path (no key => ERROR bubble).

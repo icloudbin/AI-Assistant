@@ -28,6 +28,16 @@ Three sub-issues from an older finding re-verified against the current tree befo
 - **Checked.** test-pii-filter.mjs: literal-token reservation (non-streaming + streaming split), the cross-chunk escaped placeholder, and the numbered/restorable cookie cases (+11 checks). Full sweep + check-package green.
 - Build bumped to 1.10.132.
 
+## Feature: drag & drop images onto the question box (v1.10.135)
+
+Dropping onto the composer now attaches what was dragged; the next Send includes it with the question, exactly like the Upload button.
+
+- **Files from the OS** (images, text, HTML, ZIP) go through the same `processFile()` pipeline as the upload button, including the attachment-count room check and budgets.
+- **Images dragged from a web page** carry no bytes - only their URL (text/html `<img src>`, or text/uri-list). The panel extracts the URL (resolving relative src against the current page), fetches the bytes through the worker's existing FETCH_IMAGE channel (host rules, private-host rules with the page URL, 10 MB cap, content sniffing, http→https fallback), and attaches it as a regular image under a name derived from the URL. Data: URLs attach directly; blob: URLs (page-context, unfetchable) surface the standard unable-to-read error chip.
+- The composer highlights while a droppable drag is over it (dashed accent outline); plain text drags (selections) keep the native textarea behavior. Vision gating at send is unchanged (text-only models reject image attachments with the existing message).
+- **Checked.** Full sweep + check-package green; the drop logic reuses the upload pipeline's tested processFile path.
+- Build bumped to 1.10.135.
+
 ## Fix: provider first-byte watchdog + surrogate-safe truncation everywhere (v1.10.134)
 
 Two findings, verified against the tree before fixing.
