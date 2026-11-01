@@ -43,24 +43,32 @@ AI-Assistant/
 ├── options/
 │   └── options.html / options.js
 ├── scripts/
+│   ├── README.md
 │   ├── build-package.mjs
 │   ├── check-package.mjs
+│   ├── e2e-chat-flow.mjs
+│   ├── e2e-drop-image.mjs
+│   ├── e2e-restore-history.mjs
 │   ├── test-attachment-budget.mjs
 │   ├── test-chrome-browser.mjs
 │   ├── test-content-visibility.mjs
 │   ├── test-conversation-store.mjs
 │   ├── test-extension-e2e.mjs
 │   ├── test-history-manager.mjs
+│   ├── test-markdown-heading.mjs
 │   ├── test-markdown-render.mjs
 │   ├── test-models.mjs
 │   ├── test-openai-compatible.mjs
 │   ├── test-options-backup.mjs
 │   ├── test-outbound-pii.mjs
 │   ├── test-pii-filter.mjs
+│   ├── test-pii-name-perf.mjs
 │   ├── test-providers-messages.mjs
 │   ├── test-sensitive-sites.mjs
 │   ├── test-settings-crypto.mjs
 │   ├── test-settings-storage-keys.mjs
+│   ├── test-stop-streaming.mjs
+│   ├── test-translate-replay.mjs
 │   ├── test-translation-paragraphs.mjs
 │   ├── test-url-safety.mjs
 │   └── test-sidepanel-context.py

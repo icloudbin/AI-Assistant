@@ -379,7 +379,11 @@ async function main() {
     }
 
     // ----------------------------------------------------
-    // TEST #5: Reasoning / Thinking display in sidepanel.js
+    // TEST #5: No thought process is displayed in sidepanel.js
+    // (reasoning deltas have been dropped for every request since
+    // v1.10.126; the THINKING message itself was removed end to end in
+    // v1.10.139. The panel must ignore the message and render only the
+    // reply content - never a "Thought process" block.)
     // ----------------------------------------------------
     try {
       const thinkingResult = await session.eval(`
@@ -403,7 +407,9 @@ async function main() {
           form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
           await new Promise(r => setTimeout(r, 300));
 
-          // Simulate streaming THINKING and CHUNK events via port listener
+          // Simulate streaming THINKING and CHUNK events via port listener.
+          // The THINKING delta's text ("superposition ...") appears NOWHERE
+          // else, so a panel that renders it fails the hasThinking check.
           const listener = window.__portListener;
           if (listener && capturedRequestId) {
             listener({
@@ -448,11 +454,11 @@ async function main() {
       `);
 
       assert.equal(thinkingResult.hasLastBubble, true, "Assistant bubble created");
-      assert.equal(thinkingResult.hasThinking, true, "Thinking process rendered in assistant bubble");
+      assert.equal(thinkingResult.hasThinking, false, "Thinking deltas are dropped and never rendered");
       assert.equal(thinkingResult.hasResponseText, true, "Final response content rendered successfully");
-      recordPass("Fix #5 (Reasoning / Thinking Display)", "Thinking/reasoning stream accurately rendered in Chrome DOM without triggering empty-response errors");
+      recordPass("Fix #5 (No Thought Process Display)", "Reasoning deltas are ignored by the panel; only the reply content is rendered");
     } catch (err) {
-      recordFail("Fix #5 Thinking Display", err);
+      recordFail("Fix #5 No-Thought-Process Display", err);
     }
 
     // ----------------------------------------------------
