@@ -41,27 +41,42 @@ async function providerHttpError(resp) {
 // keeping the connection and the service-worker keep-alive alive until
 // the user clicked Clear. The user's own STOP still propagates as
 // AbortError; the timeout surfaces as a plain, reported error.
+//
+// ONE AbortController covers the whole request lifecycle - headers AND body.
+// Only the first-byte TIMER is torn down when the headers arrive; the link from
+// ctx.signal (the user's STOP) to this controller is deliberately kept, so a
+// STOP that lands mid-stream still aborts the underlying fetch and its body
+// stream. (The link used to be removed in a `finally` as soon as fetch()
+// resolved, i.e. at the response headers, so STOP could no longer reach the
+// body: the provider kept streaming to completion, burning tokens/quota and
+// holding the connection and keep-alive until the stream ended.) The link is
+// only dropped when the request fails before a response exists; otherwise it
+// lives as long as ctx.signal, which is per request.
 export const FIRST_BYTE_TIMEOUT_MS = 60 * 1000;
 
 export async function fetchWithHeadersTimeout(url, init, ctx, timeoutMs = FIRST_BYTE_TIMEOUT_MS) {
-  const timeout = new AbortController();
-  const onStop = () => timeout.abort(ctx.signal?.reason);
-  if (ctx.signal) {
-    if (ctx.signal.aborted) throw new DOMException("Aborted", "AbortError");
-    ctx.signal.addEventListener("abort", onStop, { once: true });
+  const controller = new AbortController();
+  const stop = ctx.signal;
+  let onStop = null;
+  if (stop) {
+    if (stop.aborted) throw new DOMException("Aborted", "AbortError");
+    onStop = () => controller.abort(stop.reason);
+    stop.addEventListener("abort", onStop, { once: true });
   }
-  const timer = setTimeout(() => timeout.abort(new DOMException("headers timeout", "TimeoutError")), timeoutMs);
+  const timer = setTimeout(() => controller.abort(new DOMException("headers timeout", "TimeoutError")), timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: timeout.signal });
+    return await fetch(url, { ...init, signal: controller.signal });
   } catch (err) {
-    if (ctx.signal?.aborted) throw err; // deliberate STOP: keep the AbortError
+    // No response exists, so there is no body left to stop: drop the link.
+    if (onStop) stop.removeEventListener("abort", onStop);
+    if (stop?.aborted) throw err; // deliberate STOP: keep the AbortError
     if (err?.name === "TimeoutError") {
       throw new Error(t(ctx.lang, "bg_error_noResponse", { seconds: String(Math.round(timeoutMs / 1000)) }));
     }
     throw err; // ordinary network failure (DNS, refused, TLS ...)
   } finally {
+    // Only the first-byte timer ends here - NOT the link to ctx.signal (above).
     clearTimeout(timer);
-    ctx.signal?.removeEventListener("abort", onStop);
   }
 }
 
@@ -171,9 +186,14 @@ export function extractOpenAIDelta(json) {
 // mechanism) carries the port to post CHUNKs to and the requestId to tag
 // them with, so sidepanel.js can tell a chunk belonging to a since-aborted
 // request apart from the current one if any are still in flight when a STOP
-// lands (see stopActiveRequest() in sidepanel.js) - reader.read() itself
-// also naturally rejects once ctx.signal aborts, ending this loop via the
-// same AbortError path the initial fetch() would take.
+// lands (see stopActiveRequest() in sidepanel.js).
+//
+// STOP handling is explicit and does not rely on the fetch plumbing alone:
+// this reader listens to ctx.signal and cancels the stream the moment it
+// aborts (releasing the connection), and it re-checks ctx.signal after every
+// read() and for every line. A cancelled reader resolves a pending read() as
+// `done` rather than rejecting, so without the explicit check an aborted stream
+// would look like a clean (or cut) end instead of an AbortError.
 // A stream that stops producing bytes must not hold the request (and the side
 // panel's composer) open forever. The idle timer resets on every chunk; the
 // total deadline bounds a provider that keeps dribbling bytes but never ends.
@@ -182,6 +202,16 @@ const STREAM_TOTAL_TIMEOUT_MS = 15 * 60 * 1000;
 
 async function readSse(resp, extractDelta, ctx, extractError = null) {
   const reader = resp.body.getReader();
+  const signal = ctx.signal;
+  const abortError = () => new DOMException("Aborted", "AbortError");
+  // The user's STOP: no further chunk may be processed or emitted.
+  const throwIfStopped = () => {
+    if (signal?.aborted) throw abortError();
+  };
+  if (signal?.aborted) {
+    reader.cancel().catch(() => {});
+    throw abortError();
+  }
   const decoder = new TextDecoder();
   const isJsonResponse = /application\/json/i.test(resp.headers?.get?.("content-type") || "");
   let jsonText = isJsonResponse ? "" : null;
@@ -264,14 +294,24 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
     }
   };
 
+  // STOP: cancel the stream right away so the connection to the provider is
+  // released instead of being drained to the end. The checks below turn the
+  // resulting `done` (or a rejected read) into an AbortError.
+  const onAbort = () => {
+    try { reader.cancel(signal.reason).catch(() => {}); } catch {}
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+
   // A provider-reported error thrown by handleLine below (or a transport
   // failure in read()) must release the response body: the reader keeps the
   // connection to the provider open until the service worker is recycled
-  // otherwise. read() rejecting on abort makes cancel() a harmless no-op.
+  // otherwise. After an abort or a failed read() the stream is already
+  // cancelled/errored, which makes this cancel() a harmless no-op.
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (timedOut) throw timeoutError();
+      throwIfStopped();
       if (done) break;
       armIdleTimer();
       const decoded = decoder.decode(value, { stream: true });
@@ -279,9 +319,13 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
       buffer += decoded;
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
-      for (const line of lines) handleLine(line);
+      for (const line of lines) {
+        throwIfStopped();
+        handleLine(line);
+      }
     }
     if (timedOut) throw timeoutError();
+    throwIfStopped();
     // Flush whatever is left: a final "data:" line that is not newline-terminated
     // used to be dropped, silently truncating the end of the answer.
     const tail = decoder.decode();
@@ -295,6 +339,7 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
     if (totalTimer) clearTimeout(totalTimer);
+    signal?.removeEventListener("abort", onAbort);
   }
 
   // A provider can return HTTP 200 with a JSON error body instead of an SSE

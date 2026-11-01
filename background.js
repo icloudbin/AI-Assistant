@@ -1,6 +1,6 @@
 // background.js (root directory)
 import { findKnownModel, DEFAULT_MAX_PAGE_CHARS, MAX_PAGE_CONTEXT_CHARS, cutAtCodePointBoundary } from "./models.js";
-import { AUTO_WEB_RESEARCH_KEY, CURRENT_CONVERSATION_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY } from "./storage-keys.js";
+import { AUTO_WEB_RESEARCH_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY } from "./storage-keys.js";
 import { getStoredLanguage, t } from "./i18n.js";
 import { restoreSettingsFromBackupOnce } from "./settings-storage.js";
 import { withNamedLock, CONTEXT_ACTION_LOCK } from "./conversation-store.js";
@@ -398,11 +398,6 @@ function startRequestKeepAlive() {
   };
 }
 
-// Side-panel ports currently connected to this worker: one per open panel,
-// i.e. one per browser window that has the panel open. Ports and this set both
-// live and die with the service worker instance, so it always matches reality.
-const connectedPanelPorts = new Set();
-
 // Long translations are sent as several requests in a row. Free tiers (Groq
 // especially) answer a later batch with HTTP 429 or a transient 5xx, which used
 // to end the whole translation at that batch. Such a batch is retried up to
@@ -460,7 +455,6 @@ chrome.runtime.onConnect.addListener((port) => {
     port.disconnect();
     return;
   }
-  connectedPanelPorts.add(port);
 
   // Posts to this port, ignoring the throw of a port that is already
   // disconnected. The panel can close (or its document can be torn down)
@@ -499,29 +493,10 @@ chrome.runtime.onConnect.addListener((port) => {
   // and the related community pattern at
   // https://github.com/GoogleChrome/chrome-extensions-samples/issues/998),
   // or this service worker itself restarted (normal MV3 behavior after ~30s
-  // idle) and dropped every port it held. Either way, clearing the
-  // "current conversation" pointer here is safe: if the panel is still
-  // genuinely open with an active conversation, sidepanel.js's own
-  // saveConversations() rewrites this same key on the very next message
-  // send, so a spurious clear from a service-worker restart self-heals
-  // without losing anything. This is a second, independent layer behind
-  // sidepanel.js's own init() (which already resets to a blank New Topic on
-  // every fresh load) - if the panel's document is somehow reused instead
-  // of freshly reloaded on close/reopen, this still guarantees the pointer
-  // it would restore from is already empty. Also abort whatever request is
-  // still in flight, so a closed/reloaded panel doesn't leave a fetch
+  // idle) and dropped every port it held. Either way, abort whatever request
+  // is still in flight, so a closed/reloaded panel doesn't leave a fetch
   // running for no listener.
-  //
-  // The pointer is one global storage key shared by every window, so it is
-  // cleared only when the LAST panel disconnects. With two windows open,
-  // closing window A's panel must not reset the pointer for window B, which
-  // is still showing its conversation. (Aborting this port's own in-flight
-  // request is always right, so that part is unconditional.)
   port.onDisconnect.addListener(() => {
-    connectedPanelPorts.delete(port);
-    if (connectedPanelPorts.size === 0) {
-      chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: "" }).catch(() => {});
-    }
     activeAbortController?.abort();
   });
 
@@ -563,7 +538,6 @@ chrome.runtime.onConnect.addListener((port) => {
     // was still holding back when the request failed mid-stream (ctx is
     // declared inside the try block and is invisible to the catch).
     let chunkRestorer = null;
-    let thinkingRestorer = null;
     try {
       // Recover user settings before reading provider keys or language. This
       // makes the background service worker resilient if extension local
@@ -644,9 +618,6 @@ chrome.runtime.onConnect.addListener((port) => {
       chunkRestorer = new PlaceholderRestorer(piiSession, (delta) => safePost({ type: "CHUNK", delta, requestId }));
       ctx.sendChunk = (delta) => chunkRestorer.push(delta);
       ctx.flushChunks = () => chunkRestorer.flush();
-      thinkingRestorer = new PlaceholderRestorer(piiSession, (delta) => safePost({ type: "THINKING", delta, requestId }));
-      ctx.sendThinking = (delta) => thinkingRestorer.push(delta);
-      ctx.flushThinking = () => thinkingRestorer.flush();
       const normalizedImages = Array.isArray(images) ? images.filter((img) => img && typeof img.dataUrl === "string" && /^data:image\/(jpeg|png|gif|webp);base64,/i.test(img.dataUrl)) : [];
       if (normalizedImages.length !== (Array.isArray(images) ? images.length : 0)) throw new Error(t(lang, "bg_error_imagesEncoding"));
 
@@ -820,9 +791,19 @@ chrome.runtime.onConnect.addListener((port) => {
             if (abortController.signal.aborted) throw err;
           }
           if (!replay.missing && replayText) {
-            // Complete replay: it becomes THE reply. finish() below runs on
-            // the replay translator (nothing left to fill, no NOTICE); the
-            // first attempt is abandoned without emitting anything more.
+            // Complete replay: it becomes THE reply; the first attempt is
+            // abandoned without emitting anything more.
+            //
+            // finish() must run on the replay translator BEFORE replayText is
+            // sent: it is what emits the document's trailing static lines (a
+            // closing code fence, a separator, blank lines - everything after
+            // the last translatable line). Its emit appends to the local
+            // replayText, which is sent exactly once, here; the finish() call
+            // after this block only reaches ctx.sendChunk for a translator
+            // wired to it, so with finish() deferred to that point the tail was
+            // appended to a string that had already been sent and was never
+            // delivered. (finish() is idempotent: the later call is a no-op.)
+            replay.finish();
             ctx.flushChunks?.();
             safePost({ type: "RESET_REPLY", requestId });
             ctx.sendChunk(replayText);
@@ -835,7 +816,6 @@ chrome.runtime.onConnect.addListener((port) => {
       }
 
       ctx.lineTranslator?.finish();
-      ctx.flushThinking?.();
       ctx.flushChunks?.();
       // Never let a cut-off reply pass silently.
       if (ctx.lineTranslator) {
@@ -872,7 +852,6 @@ chrome.runtime.onConnect.addListener((port) => {
       // arrives): the ERROR path keeps the partial reply as a finished
       // assistant turn, and without this flush its last characters were
       // permanently lost.
-      try { thinkingRestorer?.flush(); } catch {}
       try { chunkRestorer?.flush(); } catch {}
       safePost({ type: "ERROR", error: errorText, requestId });
     } finally {

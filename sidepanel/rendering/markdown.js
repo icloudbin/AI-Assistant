@@ -235,6 +235,48 @@ function isTableSeparator(line) {
   return cells.length >= 2 && cells.every((cell) => /^\s*:?-+:?\s*$/.test(cell));
 }
 
+// A heading line longer than this is not treated as a heading; it renders as an
+// ordinary paragraph. No real title comes close, and it bounds the work done on
+// one line (the panel re-renders the whole reply every ~100 ms while
+// streaming, and the text can be page content the model repeated).
+const MAX_HEADING_LINE_CHARS = 2000;
+const WHITESPACE_CHAR_RE = /\s/;
+const LINE_TERMINATOR_RE = /[\n\r\u2028\u2029]/;
+
+// ATX heading: 1-6 "#", whitespace, the text, then an optional closing run of
+// "#" that is separated from the text by whitespace. `trimmed` must already be
+// trimmed (the caller's `line.trim()`). Returns { level, text } or null.
+//
+// Hand-written single pass, equivalent to the pattern it replaces,
+//   /^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/
+// which was O(n²) on a heading containing a long run of whitespace: for every
+// length the lazy `.+?` tried, `(?:\s+#+)?\s*$` rescanned the rest of the run
+// (20k spaces took 1.5 s, 40k took 6 s - while the paragraph of the same
+// length took 0 ms). Every index below is visited a constant number of times.
+function parseAtxHeading(trimmed) {
+  const n = trimmed.length;
+  if (n < 3 || n > MAX_HEADING_LINE_CHARS || trimmed.charCodeAt(0) !== 35 /* # */) return null;
+  let level = 1;
+  while (level < n && trimmed.charCodeAt(level) === 35) level++;
+  if (level > 6) return null; // seven "#" are text, not a heading
+  let start = level;
+  while (start < n && WHITESPACE_CHAR_RE.test(trimmed[start])) start++;
+  if (start === level || start === n) return null; // "#text", or nothing after the marker
+  let end = n;
+  // Closing run: strip it only when it is the tail of the line, made of "#"
+  // alone, and preceded by whitespace ("# Title ##", but not "# C#" or "# ###").
+  let hashes = n;
+  while (hashes > start && trimmed.charCodeAt(hashes - 1) === 35) hashes--;
+  if (hashes < n && hashes > start && WHITESPACE_CHAR_RE.test(trimmed[hashes - 1])) {
+    end = hashes - 1;
+    while (end > start && WHITESPACE_CHAR_RE.test(trimmed[end - 1])) end--;
+  }
+  const text = trimmed.slice(start, end);
+  // The old pattern's `.` never matched a line terminator.
+  if (LINE_TERMINATOR_RE.test(text)) return null;
+  return { level, text };
+}
+
 function markdownToHtml(markdown) {
   const lines = String(markdown ?? "").replace(/\r\n?/g, "\n").split("\n");
   const out = [];
@@ -337,12 +379,11 @@ function markdownToHtml(markdown) {
       continue;
     }
 
-    const heading = trimmed.match(/^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/);
+    const heading = parseAtxHeading(trimmed);
     if (heading) {
       flushParagraph();
       flushList();
-      const level = heading[1].length;
-      out.push(`<h${level}>${inlineMarkdownToHtml(heading[2])}</h${level}>`);
+      out.push(`<h${heading.level}>${inlineMarkdownToHtml(heading.text)}</h${heading.level}>`);
       i++;
       continue;
     }
@@ -438,4 +479,4 @@ function markdownToHtml(markdown) {
   return out.join("");
 }
 
-export { escapeHtml, inlineMarkdownToHtml, markdownToHtml, isTableSeparator, splitTableRow };
+export { escapeHtml, inlineMarkdownToHtml, markdownToHtml, isTableSeparator, splitTableRow, parseAtxHeading, MAX_HEADING_LINE_CHARS };

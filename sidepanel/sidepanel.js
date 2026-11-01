@@ -2,7 +2,6 @@
 import { MODELS, MAX_PAGE_CONTEXT_CHARS, findModelById, findKnownModel, resolveModelId, findModelIdByLabel, modelSupportsVision, cutAtCodePointBoundary } from "../models.js";
 import {
   HISTORY_STORAGE_KEY,
-  CURRENT_CONVERSATION_KEY,
   PENDING_CONTEXT_ACTION_KEY,
   PREFERRED_TRANSLATION_LANGUAGE_KEY,
   MAX_SAVED_CONVERSATIONS,
@@ -389,7 +388,6 @@ let currentAssistantBubble = null;
 // plain text (see setBubbleContent) and stored with plain: true.
 let pendingPlainReply = false;
 let currentAssistantText = "";
-let currentThinkingText = "";
 let isStreaming = false;
 let pendingModelLabel = "";
 let pendingModelId = "";
@@ -449,18 +447,17 @@ function connectPort() {
     // Show the whole received tail before the bubble is finalized: a
     // coalesced render may still be pending (see scheduleStreamingRender).
     flushStreamingRender();
-    const textToKeep = (currentAssistantText || currentThinkingText).trim();
+    const textToKeep = currentAssistantText.trim();
     if (currentAssistantBubble) {
       if (textToKeep) currentAssistantBubble.classList.remove("pending");
       else currentAssistantBubble.remove();
       currentAssistantBubble = null;
     }
     if (textToKeep) {
-      const displayContent = assistantDisplayText(currentAssistantText, currentThinkingText);
       history.push({
         role: "assistant",
         content: textToKeep,
-        displayContent: displayContent || textToKeep,
+        displayContent: currentAssistantText,
         modelLabel: pendingModelLabel,
         modelId: pendingModelId,
         plain: pendingPlainReply,
@@ -468,7 +465,6 @@ function connectPort() {
       saveConversations().catch(notifyHistorySaveFailure);
     }
     currentAssistantText = "";
-    currentThinkingText = "";
     autoScrollEnabled = false;
     setStreaming(false);
     addBubble("error", t(currentLang, "error_connectionLost"));
@@ -1068,7 +1064,6 @@ function stopActiveRequest() {
     clearDeferredFinalRender();
   }
   currentAssistantText = "";
-  currentThinkingText = "";
   autoScrollEnabled = false;
   setStreaming(false);
 }
@@ -1414,20 +1409,6 @@ function applyDeferredFinalRender() {
 
 document.addEventListener("selectionchange", applyDeferredFinalRender);
 
-// The thought-process block rendered above an assistant reply. ONE definition
-// for every producer of that display text - the streaming renderer, the
-// deferred final repaint, the DONE/ERROR display copies and the
-// worker-recycle recovery - so the wording can never drift apart.
-function assistantDisplayText(assistantText, thinkingText) {
-  const reply = String(assistantText || "");
-  const thinking = String(thinkingText || "").trim();
-  if (!thinking) return reply;
-  const thinkingLines = thinking.split("\n").map((l) => `> ${l}`).join("\n");
-  return !reply.trim()
-    ? `> 💭 *Thinking...*\n>\n${thinkingLines}`
-    : `> 💭 *Thought process:*\n>\n${thinkingLines}\n\n${reply}`;
-}
-
 // Repaint the streaming bubble from currentAssistantText right now, dropping
 // any pending coalesced render. Also a clean no-op once the bubble is gone
 // (STOP, or a superseded request): the queued flags are cleared first, so a
@@ -1445,10 +1426,9 @@ function renderStreamingBubble(force = false) {
     if (force) {
       // Keep the final text for the selectionchange handler instead of
       // destroying the user's selection with the terminal rewrite.
-      const deferredText = assistantDisplayText(currentAssistantText, currentThinkingText);
       deferredFinalRender = {
         bubble: currentAssistantBubble,
-        text: deferredText,
+        text: currentAssistantText,
         plain: pendingPlainReply,
       };
       return;
@@ -1456,8 +1436,7 @@ function renderStreamingBubble(force = false) {
     scheduleStreamingRender();
     return;
   }
-  const textToRender = assistantDisplayText(currentAssistantText, currentThinkingText);
-  setBubbleContent(currentAssistantBubble, textToRender, "assistant", pendingPlainReply);
+  setBubbleContent(currentAssistantBubble, currentAssistantText, "assistant", pendingPlainReply);
   scrollToBottom();
 }
 function scheduleStreamingRender() {
@@ -1503,14 +1482,8 @@ function handlePortMessage(msg) {
       // that is no longer connected is dropped there.
       applyDeferredFinalRender();
       currentAssistantText = "";
-      currentThinkingText = "";
       currentAssistantBubble = addBubble("assistant", "", pendingModelLabel, pendingPlainReply);
       currentAssistantBubble.classList.add("pending");
-      break;
-    }
-    case "THINKING": {
-      currentThinkingText += msg.delta;
-      scheduleStreamingRender();
       break;
     }
     case "CHUNK": {
@@ -1529,7 +1502,7 @@ function handlePortMessage(msg) {
     }
     case "DONE": {
       flushStreamingRender();
-      const textToSave = (currentAssistantText || currentThinkingText).trim();
+      const textToSave = currentAssistantText.trim();
       if (!textToSave) {
         // Defensive: background.js reports an empty reply as an ERROR, but never
         // store an empty assistant turn - providers reject empty assistant
@@ -1537,7 +1510,6 @@ function handlePortMessage(msg) {
         currentAssistantBubble?.remove();
         currentAssistantBubble = null;
         currentAssistantText = "";
-        currentThinkingText = "";
         autoScrollEnabled = false;
         setStreaming(false);
         break;
@@ -1545,18 +1517,16 @@ function handlePortMessage(msg) {
       if (currentAssistantBubble) {
         currentAssistantBubble.classList.remove("pending");
       }
-      const displayContent = assistantDisplayText(currentAssistantText, currentThinkingText);
       history.push({
         role: "assistant",
-        content: currentAssistantText || currentThinkingText,
-        displayContent: displayContent || textToSave,
+        content: currentAssistantText,
+        displayContent: currentAssistantText,
         modelLabel: pendingModelLabel,
         modelId: pendingModelId,
         plain: pendingPlainReply,
       });
       currentAssistantBubble = null;
       currentAssistantText = "";
-      currentThinkingText = "";
       autoScrollEnabled = false;
       setStreaming(false);
       saveConversations().catch(notifyHistorySaveFailure);
@@ -1579,18 +1549,17 @@ function handlePortMessage(msg) {
       // text the user was watching arrive. (The user turn is already in
       // history; background.js folds an unanswered user turn into the next
       // request, so this shape is expected there.)
-      const textToKeep = (currentAssistantText || currentThinkingText).trim();
+      const textToKeep = currentAssistantText.trim();
       if (currentAssistantBubble) {
         if (textToKeep) currentAssistantBubble.classList.remove("pending");
         else currentAssistantBubble.remove();
         currentAssistantBubble = null;
       }
       if (textToKeep) {
-        const displayContent = assistantDisplayText(currentAssistantText, currentThinkingText);
         history.push({
           role: "assistant",
           content: textToKeep,
-          displayContent: displayContent || textToKeep,
+          displayContent: currentAssistantText,
           modelLabel: pendingModelLabel,
           modelId: pendingModelId,
           plain: pendingPlainReply,
@@ -1598,7 +1567,6 @@ function handlePortMessage(msg) {
         saveConversations().catch(notifyHistorySaveFailure);
       }
       currentAssistantText = "";
-      currentThinkingText = "";
       autoScrollEnabled = false;
       addBubble("error", t(currentLang, "error_withMessage_template", { message: msg.error }));
       setStreaming(false);
@@ -1695,15 +1663,11 @@ async function saveConversationsWithLock() {
         if (recheck[HISTORY_STORAGE_KEY] === undefined) {
           // History was deleted while this save was in flight. Discard it:
           // the onChanged delete branch has already reset this panel's
-          // in-memory state, and both the list and the current-conversation
-          // pointer must stay deleted.
+          // in-memory state, and the list must stay deleted.
           return;
         }
       }
-      await chrome.storage.local.set({
-        [HISTORY_STORAGE_KEY]: merged,
-        [CURRENT_CONVERSATION_KEY]: currentConversationId || "",
-      });
+      await chrome.storage.local.set({ [HISTORY_STORAGE_KEY]: merged });
       break;
     } catch (err) {
       if (attempt === 0) {
@@ -1808,7 +1772,6 @@ function startNewTopic() {
   renderConversation([]);
   questionInput.value = "";
   historySelect.value = NEW_TOPIC_VALUE;
-  chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: "" }).catch(() => {});
   refreshContextBarAfterConversationSwitch();
 }
 
@@ -1857,11 +1820,6 @@ async function selectConversation(id) {
   questionInput.value = "";
   renderConversation(history);
   applyModelSelection(findConversationModelId(history));
-  try {
-    await chrome.storage.local.set({ [CURRENT_CONVERSATION_KEY]: currentConversationId });
-  } catch (err) {
-    console.warn("[AI Assistant] Unable to persist the current conversation pointer:", err);
-  }
   renderHistorySelect();
   refreshContextBarAfterConversationSwitch();
 }
@@ -2283,10 +2241,13 @@ function renderAttachments() {
   }
 }
 
+// Resolves to true when the file became a READY attachment, false when it was
+// refused or failed (the reason is already shown: an error bubble or an error
+// chip). Callers that do not care simply ignore the value.
 async function processFile(file) {
   if (attachments.length >= MAX_ATTACHMENTS) {
     addBubble("error", t(currentLang, "attachment_error_tooMany_template", { max: String(MAX_ATTACHMENTS) }));
-    return;
+    return false;
   }
   const item = { id: `${Date.now()}-${Math.random()}`, name: file.name, status: "reading", kind: "file", text: "" };
   attachments.push(item);
@@ -2319,7 +2280,7 @@ async function processFile(file) {
       item.text = "";
       item.dataUrl = dataUrl;
       setAttachmentStatus(item, "ready", t(currentLang, "attachment_ready"));
-      return;
+      return true;
     }
     if (isTextFile(file)) {
       const remaining = remainingTextChars(others());
@@ -2338,7 +2299,7 @@ async function processFile(file) {
       item.kind = "text";
       setAttachmentStatus(item, "ready", t(currentLang, "attachment_ready"));
       setAttachmentNote(item, cutFrom ? { totalChars: cutFrom, keptChars } : null);
-      return;
+      return true;
     }
     if (isZipFile(file)) {
       const remaining = remainingTextChars(others());
@@ -2356,11 +2317,12 @@ async function processFile(file) {
       item.kind = "zip";
       setAttachmentStatus(item, "ready", t(currentLang, "attachment_ready"));
       setAttachmentNote(item, note ? { report } : null);
-      return;
+      return true;
     }
     throw new Error(t(currentLang, "attachment_error_unsupportedType"));
   } catch (err) {
     setAttachmentStatus(item, "error", err?.message || t(currentLang, "attachment_error_unableToRead"));
+    return false;
   }
 }
 
@@ -2464,6 +2426,10 @@ function nameFromImageUrl(url, pageUrl) {
 //     fallback) under a REAL "reading" chip reserved up front: the fetch can
 //     take ~20 s with the retry, Send must not silently skip or duplicate
 //     it, and a New Topic during the fetch simply discards the chip.
+// Resolves to true when the image was attached (its chip is ready), false when
+// it was not (an error bubble or an error chip already says why). The drop
+// handler relies on this: the URL of an image that WAS attached must not also
+// be inserted into the question box as text.
 async function attachImageFromUrl(rawUrl) {
   let url = String(rawUrl || "").trim();
   const activeTab = await getCurrentActiveTab().catch(() => null);
@@ -2474,17 +2440,17 @@ async function attachImageFromUrl(rawUrl) {
     // an unfetchable address would.
     if (!/^data:image\/[a-z0-9.+-]+;base64,/i.test(url)) {
       addBubble("error", t(currentLang, "attachment_error_unableToReadImage"));
-      return;
+      return false;
     }
     try {
       const mime = (/^data:([^;,]+)/.exec(url) || [])[1] || "image/png";
       const ext = (mime.split("/")[1] || "png").replace(/^jpeg$/i, "jpg").replace(/[^a-z0-9]/gi, "") || "png";
       const bytes = Uint8Array.from(atob(url.split(",")[1] || ""), (ch) => ch.charCodeAt(0));
-      await processFile(new File([bytes], `image.${ext}`, { type: mime }));
+      return await processFile(new File([bytes], `image.${ext}`, { type: mime }));
     } catch {
       addBubble("error", t(currentLang, "attachment_error_unableToReadImage"));
+      return false;
     }
-    return;
   }
 
   if (!/^https?:\/\//i.test(url)) {
@@ -2493,7 +2459,7 @@ async function attachImageFromUrl(rawUrl) {
   }
   if (attachments.length >= MAX_ATTACHMENTS) {
     addBubble("error", t(currentLang, "attachment_error_tooMany_template", { max: String(MAX_ATTACHMENTS) }));
-    return;
+    return false;
   }
   const { base, ext } = nameFromImageUrl(url, pageUrl);
   const item = { id: `${Date.now()}-${Math.random()}`, name: base + ext, status: "reading", kind: "file", text: "", dataUrl: "" };
@@ -2525,8 +2491,10 @@ async function attachImageFromUrl(rawUrl) {
       if (nameEl) nameEl.textContent = item.name;
     }
     setAttachmentStatus(item, "ready", t(currentLang, "attachment_ready"));
+    return true;
   } catch (err) {
     setAttachmentStatus(item, "error", err?.message || t(currentLang, "attachment_error_unableToRead"));
+    return false;
   }
 }
 
@@ -2581,11 +2549,15 @@ composer.addEventListener("drop", async (event) => {
   }
 
   const imageUrl = firstImageUrlFromDrop(dt);
-  if (imageUrl) await attachImageFromUrl(imageUrl);
+  // An image that was attached is the whole drop. Chrome puts the image's URL
+  // into text/plain as well, so without this return the same URL was ALSO
+  // inserted into the question box below.
+  if (imageUrl && (await attachImageFromUrl(imageUrl))) return;
 
-  // Not an image drop (a page text selection, or a payload without image
-  // data): insert the carried text at the caret, replacing the selection,
-  // like a native textarea drop would. Inserted manually because the drop is
+  // Not an image drop (a page text selection, a payload without image data) or
+  // an image that could not be attached (the error is already shown): insert
+  // the carried text at the caret, replacing the selection, like a native
+  // textarea drop would. Inserted manually because the drop is
   // already cancelled above: the browser default here would navigate the
   // panel for uri-list payloads, and only drops landing on the textarea
   // itself would insert anything.
@@ -3271,42 +3243,27 @@ async function processContextAction(pending) {
   if (!pending?.action || !pending?.text) return;
   if (isStreaming) stopActiveRequest();
 
+  // The context menu has exactly one item ("Translate selected text", see
+  // background.js), so "translate" is the only action that is ever queued.
+  if (pending.action !== "translate") return;
+
   const lang = currentLang || await getStoredLanguage();
-  let instruction;
-  switch (pending.action) {
-    case "summarize":
-      instruction = t(lang, "contextAction_summarize_prefix");
-      break;
-    case "translate": {
-      const target = await getPreferredTranslationLanguage();
-      instruction = t(lang, "contextAction_translate_prefix", { language: t(lang, target.nameKey) });
-      break;
-    }
-    case "explain":
-      instruction = t(lang, "contextAction_explain_prefix");
-      break;
-    case "fact-check":
-      instruction = t(lang, "contextAction_factCheck_prefix");
-      break;
-    default:
-      return;
-  }
+  const target = await getPreferredTranslationLanguage();
+  const instruction = t(lang, "contextAction_translate_prefix", { language: t(lang, target.nameKey) });
 
   // A context-menu operation is scoped to the highlighted text. Do not add
   // the whole webpage as hidden context, even if "Read current page" is on.
   // The visible instruction prefix follows the language selected in Settings.
-  const isTranslation = pending.action === "translate";
-  const prompt = isTranslation
-    ? instruction.replace(/[:：]\s*$/, "")
-    : `${instruction}\n\n${t(lang, "contextAction_highlightedText_label")}:\n${pending.text}`;
+  const prompt = instruction.replace(/[:：]\s*$/, "");
   // Show a compact preview in the user bubble (the instruction plus the start
   // of the selection) instead of the entire raw prompt, matching how quick
   // actions display a short prompt rather than their full API wording.
   const preview = pending.text.length > 120 ? `${pending.text.slice(0, 120).trimEnd()}…` : pending.text;
-  const displayQuestion = isTranslation
-    ? `${instruction}\n\n${preview}`
-    : `${instruction}\n${t(lang, "contextAction_highlightedText_label")}:\n${preview}`;
-  await handleSubmit(null, prompt, false, displayQuestion, pending.action === "fact-check", pending.action === "fact-check" ? pending.text : "", pending.action !== "fact-check", false, false, isTranslation, isTranslation ? pending.text : null, pending.format === "markdown" ? "markdown" : "text", pending.truncated === true);
+  const displayQuestion = `${instruction}\n\n${preview}`;
+  // Arguments after the display text: no fact-check, no selected claim, web
+  // research off (translation never needs it), no page images, no forced web
+  // research, translateMode on with the selection itself as the source.
+  await handleSubmit(null, prompt, false, displayQuestion, false, "", true, false, false, true, pending.text, pending.format === "markdown" ? "markdown" : "text", pending.truncated === true);
 }
 
 // The createdAt timestamp of the context-menu action most recently claimed by
@@ -3598,9 +3555,7 @@ async function init() {
   // Load the saved conversation list (so the history dropdown is populated
   // and past conversations stay one click away). This only refreshes the list;
   // startNewTopic() below deliberately starts every fresh panel on a blank
-  // New Topic instead of silently resuming the previous session. It also
-  // clears the persisted "current conversation" pointer so it cannot linger
-  // and get picked up by a later reactive refresh.
+  // New Topic instead of silently resuming the previous session.
   await loadConversations();
   startNewTopic();
   renderHistorySelect();

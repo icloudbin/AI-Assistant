@@ -60,10 +60,6 @@ function factCheckLanguageInstruction(lang) {
   return `OUTPUT LANGUAGE REQUIREMENT: By default, respond entirely in ${factCheckOutputLanguage(lang)}. This applies to the claim text, verdict labels, explanations, overall assessment, and source descriptions. Do not switch to the language used by the webpage, selected text, search results, or sources merely because they use another language. An explicit request in the user's current message to answer in a specific language overrides this default. Keep source URLs unchanged.`;
 }
 
-function cleanResearchText(value, max = 800) {
-  return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
-}
-
 // Shared base prompt, kept provider-agnostic and toggle-agnostic. Previously
 // this string (plus the whole CURRENT PAGE CONTEXT template below) was
 // duplicated in more than one place, which risked the copies drifting apart on

@@ -768,7 +768,11 @@ async function restoreHistory() {
     // Hold the same cross-context lock the side panels use, so a panel save
     // running at the same time cannot merge from an old list and overwrite the
     // restored conversations (or vice versa).
-    await withHistoryLock(async () => {
+    // The callback RETURNS what the success message needs: `condensed` and
+    // `dropped` are declared inside it, so reading them after the lock (as this
+    // used to) threw a ReferenceError that the catch below reported as
+    // "Restore failed" even though the data had already been written.
+    const { condensed, dropped } = await withHistoryLock(async () => {
       const stored = await chrome.storage.local.get(HISTORY_STORAGE_KEY);
       const existing = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
 
@@ -816,6 +820,7 @@ async function restoreHistory() {
           list = list.slice(0, kept);
         }
       }
+      return { condensed, dropped };
     });
 
     msgEl.style.color = "#4ade80";
@@ -1012,9 +1017,8 @@ loadTheme().catch((err) => {
 // "selectedModelId", MIC_LANG_STORAGE_KEY ("micRecognitionLang"), and
 // COMPOSER_HEIGHT_STORAGE_KEY ("composerHeight") constants, which are not
 // exported from that file. Conversation history is deliberately excluded -
-// it has its own ZIP backup above - and so are the transient pointers
-// (currentConversationId, pendingContextAction), which are worthless on a
-// fresh install.
+// it has its own ZIP backup above - and so is the transient context-menu
+// queue (pendingContextAction), which is worthless on a fresh install.
 // API keys are exported only when the user opts in, and then only encrypted
 // with a passphrase (settings-crypto.js). Import still understands the older
 // plaintext files (format version 1) that carry them in `settings`.

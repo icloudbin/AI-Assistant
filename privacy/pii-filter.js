@@ -161,6 +161,14 @@ function splitNameSeq(seq) {
 // these words sits directly before the cue, the value stays. Person-plausible
 // qualifiers ("Customer Name:", "User Name:") still redact.
 const NON_PERSON_LABEL_RE = /(?:\b(?:product|brand|file|company|project|domain|host|server|variable|function|package|module|database|table|column|font|channel|sheet|workbook|app|application|bot|repo|repository|image|container|bucket|class|type|param|parameter|field|pet|network|printer|device|album|playlist|store|shop|item|article|post|page|site|website|blog|newsletter|dataset|schema|template|theme|folder|directory|archive|enum|struct|component|extension|plugin|script|service|endpoint|report|chart|graph|metric|event|session|build|release|version)\s+)$/i;
+// The test above is anchored at the END of what it is given, and the longest
+// qualifier word is 11 characters, so only the text right before the cue
+// matters. It is therefore run on a short window, never on the whole prefix
+// of the document: slicing and re-testing the full prefix for every "Name:"
+// match made the rule quadratic in the number of matches (480k characters of
+// "Name:" lines took ~6 s of synchronous time in the service worker). Same
+// idea as the 14-character window of the IPv4 "Version 1.2.3.4" check.
+const NON_PERSON_LABEL_WINDOW = 40;
 
 // Is `value` (right after a key such as "password:" or "SECRET_KEY=") a secret,
 // as opposed to ordinary text ("required", "4096", "<your key>")?
@@ -414,7 +422,7 @@ const RULES = [
   // dropped altogether (far too common in ordinary prose).
   [new RegExp(`((?:\\b[Mm]y name is|\\bI am called|\\bI'm called|\\bI’m called)\\s+)${NAME_SEQ}`, "g"), "$1[NAME]"],
   [new RegExp(`(\\b(?:[Ff][Uu][Ll][Ll][ _-]?[Nn][Aa][Mm][Ee]|[Ff][Ii][Rr][Ss][Tt][ _-]?[Nn][Aa][Mm][Ee]|[Ll][Aa][Ss][Tt][ _-]?[Nn][Aa][Mm][Ee]|[Ss][Uu][Rr][Nn][Aa][Mm][Ee]|[Nn][Aa][Mm][Ee]|[Cc][Oo][Nn][Tt][Aa][Cc][Tt]|[Cc][Uu][Ss][Tt][Oo][Mm][Ee][Rr]|[Cc][Ll][Ii][Ee][Nn][Tt]|[Pp][Aa][Tt][Ii][Ee][Nn][Tt]|[Cc][Aa][Rr][Dd][Hh][Oo][Ll][Dd][Ee][Rr]|[Rr][Ee][Cc][Ii][Pp][Ii][Ee][Nn][Tt]|[Ss][Ee][Nn][Dd][Ee][Rr]|[Aa][Uu][Tt][Hh][Oo][Rr]|[Aa][Pp][Pp][Ll][Ii][Cc][Aa][Nn][Tt]|[Ee][Mm][Pp][Ll][Oo][Yy][Ee][Ee])\\s*[:=]\\s*)(${NAME_SEQ})`, "g"), (m, head, seq, offset, whole) => (
-    splitNameSeq(seq) && !NON_PERSON_LABEL_RE.test(whole.slice(0, offset)) ? `${head}[NAME]` : m
+    splitNameSeq(seq) && !NON_PERSON_LABEL_RE.test(whole.slice(Math.max(0, offset - NON_PERSON_LABEL_WINDOW), offset)) ? `${head}[NAME]` : m
   )],
   [new RegExp(`(\\b(?:Dear|Hi|Hello|Hey|Regards,|Sincerely,|Best,|Thanks,|Cheers,)\\s+)(${NAME_SEQ_SHORT})`, "g"), (m, cue, name) => (isGenericTarget(name.split(/\s+/)[0]) ? m : `${cue}[NAME]`)],
   [new RegExp(`(\\b(?:Mr|Mrs|Ms|Miss|Dr|Prof)\\.?\\s+)${NAME_SEQ}`, "g"), "$1[NAME]"],
