@@ -176,12 +176,17 @@ function buildZip(entries) {
 }
 
 // ---------- zip verification (byte-level, on the file that was written) ----------
-// Re-parses the central directory and every local header, inflates every entry
-// and compares it byte-for-byte with the source file. This is what the old
-// Expand-Archive round-trip could not catch: it accepted backslash entry names.
-function verifyZip(zipBuffer, entries) {
+// Re-parses the central directory and every local header (the local header's
+// method, CRC-32 and both sizes must agree with the central directory, so a
+// one-sided edit cannot pass), inflates every entry and compares it
+// byte-for-byte with the source file. This is what the old Expand-Archive
+// round-trip could not catch: it accepted backslash entry names. A failed
+// verification removes the archive so it cannot be mistaken for an
+// uploadable package.
+function verifyZip(zipBuffer, entries, zipFilePath) {
   const fail = (message) => {
     console.error(`VERIFICATION ERROR: ${message}`);
+    try { fs.rmSync(zipFilePath, { force: true }); } catch { /* best effort */ }
     process.exit(1);
   };
   const eocdSig = 0x06054b50;
@@ -220,6 +225,16 @@ function verifyZip(zipBuffer, entries) {
     if (zipBuffer.toString("utf8", localOffset + 30, localOffset + 30 + localNameLen) !== name) {
       fail(`entry ${name}: local header name does not match the central directory`);
     }
+    // The writer stores real values in both headers; any disagreement means a
+    // one-sided edit slipped in (the classic future-bug blind spot).
+    const localMethod = zipBuffer.readUInt16LE(localOffset + 8);
+    const localCrc = zipBuffer.readUInt32LE(localOffset + 14);
+    const localCompressedSize = zipBuffer.readUInt32LE(localOffset + 18);
+    const localUncompressedSize = zipBuffer.readUInt32LE(localOffset + 22);
+    if (localMethod !== method) fail(`entry ${name}: local header method ${localMethod} != central directory ${method}`);
+    if (localCrc !== crc) fail(`entry ${name}: local header CRC-32 != central directory`);
+    if (localCompressedSize !== compressedSize) fail(`entry ${name}: local header compressed size != central directory`);
+    if (localUncompressedSize !== uncompressedSize) fail(`entry ${name}: local header uncompressed size != central directory`);
     const dataStart = localOffset + 30 + localNameLen + localExtraLen;
     const stored = zipBuffer.subarray(dataStart, dataStart + compressedSize);
     if (stored.length !== compressedSize) fail(`entry ${name}: data truncated`);
@@ -262,7 +277,7 @@ fs.writeFileSync(zipFilePath, buildZip(entries));
 // 5. Verify the archive byte-by-byte
 console.log(`\n[4/4] Verifying archive integrity (entry names, CRC-32, source bytes)...`);
 const zipBuffer = fs.readFileSync(zipFilePath);
-verifyZip(zipBuffer, entries);
+verifyZip(zipBuffer, entries, zipFilePath);
 
 const zipStats = fs.statSync(zipFilePath);
 const sha256 = crypto.createHash("sha256").update(zipBuffer).digest("hex");

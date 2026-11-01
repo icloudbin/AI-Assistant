@@ -4,6 +4,78 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Fix: documentation accuracy sweep, zip verifier cross-checks local headers, CJK punctuation ends a bare secret (v1.10.138)
+
+Three documentation defects, the round-10 commit review's two Minor build-script findings, and the round-11 PII observation.
+
+- **Problem 1.** The README's scripts tree listed 13 of the 21 tracked files - among the missing ones `build-package.mjs`, the very script docs/packaging.md tells users to run.
+- **Fix 1.** Tree completed and sorted (verified against `git ls-files scripts/`).
+- **Problem 2.** docs/features.md said only "the two GPT-OSS models on Groq" lack vision, but the catalog marks FOUR models `vision: false` (both GPT-OSS models, Qwen 3.8 27B, the OpenRouter free model) - users of the default/free models had image attachments rejected with no explanation. The same stale claim sat in a `modelSupportsVision` comment.
+- **Fix 2.** Both now describe the full `vision: false` set as marked in the catalog.
+- **Problem 3.** The CHANGELOG header promises "newest first", but the v1.10.134/135 sections sat below v1.10.132/133, and the v1.10.122 entry said "+8" conversation-store assertions where the commit diff added 9.
+- **Fix 3.** Sections reordered to true descending order (pure positional move, character stream preserved) and the count corrected to +9.
+- **Problem 4.** docs/packaging.md's authoritative file list omitted `translation-selection.js` (imported by background.js, present in check-package's and build-package's lists).
+- **Fix 4.** Added to the root list.
+- **Problem 5.** build-package.mjs's self-verification checked each local header only for signature and file name: a future one-sided edit could write method/CRC/sizes into the central directory that disagree with the local headers and still pass. And its fail() exited without removing the broken archive, leaving a corrupt zip in dist/ that could be uploaded by mistake.
+- **Fix 5.** The verifier now cross-checks every local header's method, CRC-32 and both sizes against the central directory, and fail() removes the archive before exiting.
+- **Problem 6.** The PII secret key/value rule's bare-value class did not stop at full-width CJK punctuation, so "密码：X，Y" redacted Y into the numbered secret as well (it round-tripped, but the model never saw Y).
+- **Fix 6.** The bare-value class now also stops at ，；、。：（）？！; quoted values are unaffected and real ASCII secrets still redact through ASCII punctuation as before.
+- **Checked.** test-pii-filter.mjs +5 checks (both CJK separators, two-placeholder count, round-trip, ASCII behaviour unchanged); build-package.mjs run end-to-end (new verifier passes on the real archive) plus a corruption probe: flipped local-header method/CRC/sizes are each rejected and the corrupted file is removed from disk. README tree matches `git ls-files scripts/`. Full sweep (18 suites) + check-package green.
+- Build bumped to 1.10.138.
+
+## Fix: drag & drop polish - data: images attach directly, links insert as text, visible URL-fetch chip, streaming lock (v1.10.137)
+
+Six P3 findings from the round-12 review, all in the drag & drop paths.
+
+- **Problem 1.** Dragging an inline data: image showed the unable-to-read error chip although the bytes were right there in the payload (the worker's FETCH_IMAGE refuses data: by the URL safety rules - a round-trip that could never succeed).
+- **Fix 1.** base64 `data:image/` payloads now decode straight into the regular `processFile()` pipeline (type rules, image budgets, room check), so a dragged inline image attaches exactly like an uploaded one.
+- **Problem 2.** Dropping a link (`<a>` drag or a copied address) whose target is a web page fetched the HTML and only then reported "unable to read image".
+- **Fix 2.** Link and copied-address drops now require the URL to look like an attachable image (png/jpeg/gif/webp extension); anything else is inserted as text - dragging a link into the panel becomes a way to ask about it. Dragged `<img>` elements keep their exemption (their payload is known to be an image).
+- **Problem 3.** The attachment name was derived from the percent-encoded basename with the extension check run on the raw name but the append on the sanitized one, so CJK/percent-encoded names degenerated into a bare ".png".
+- **Fix 3.** Base and extension are split before sanitizing, the basename is percent-decoded first, a base that sanitizes away falls back to "image", and a URL without an extension gets one appended from the fetched bytes' real type.
+- **Problem 4.** A URL serving image/bmp passed the fetch and the panel's data-URL check and only then fell into processFile's "unsupported type" - a 10-20 s doomed fetch.
+- **Fix 4.** The drop path's data-URL check now accepts only the attachment pipeline's set (png/jpeg/gif/webp; FETCH_IMAGE's broader menu exists for reply-image rendering), and Fix 2's rule already keeps extension-bearing non-attachable URLs from fetching at all.
+- **Problem 5.** The drop handlers ignored the streaming lock: files and URLs could be attached while every other input path (the Upload button included) was disabled.
+- **Fix 5.** dragenter/dragover/drop respect the streaming lock: no highlight, no attachment, no text insert - but dragover/drop stay cancelled, so a uri-list drag can still never navigate the panel.
+- **Problem 6.** A URL-image drop gave no feedback during its up-to-20-s fetch; Send during it silently omitted the image; New Topic during it left an orphan chip; the room check ran only after the fetch.
+- **Fix 6.** The fetch now reserves a real "reading" chip up front: Send is blocked by the existing still-reading rule, the room check runs before the fetch, clearing the list mid-fetch simply discards the chip, and the chip's name is finalized with the real MIME type when the URL had none.
+- **Checked.** Real-Chrome CDP drag probe: an inline data: PNG attaches as a ready chip; a page link inserts its URL with zero service-worker fetches (Fetch interception); an image link still fetches and surfaces the chip error under interception; a .bmp link inserts as text with zero fetches; the v1.10.136 cases (selection insert at the caret, highlight cleanup, URL-line-in-selection, padding drops) all still pass. The name/URL helpers are pinned by a Node harness (CJK, percent-encoded, no-extension, multi-dot, overlong names). The streaming gate mirrors the existing Upload-button lock (code-verified; the lock itself is E2E-covered). Full sweep (18 suites) + check-package green.
+- Build bumped to 1.10.137.
+
+## Fix: drag & drop - text selections are no longer swallowed, highlight can no longer stick, doc corrections (v1.10.136)
+
+Three real-Chrome CDP-proven defects in the v1.10.135 drag & drop feature, plus two documentation errors.
+
+- **Problem 1 (P2).** Dropping a web-page text selection onto the composer silently swallowed the text: every drag carrying text/html was treated as droppable and its drop event cancelled, but the handler then found neither files nor an image URL and did nothing - so the native textarea insert never ran. Worse, the URL extractor scanned the selection's text flavors line by line, so a selection containing a URL line triggered a real FETCH_IMAGE network request to that URL plus an unexpected attachment chip.
+- **Fix 1.** `firstImageUrlFromDrop()` now treats a text/html payload without an `<img>` as a text selection (its text flavors are never scanned for URLs), reads text/plain only when the whole payload is a single http(s) URL, and takes uri-list comment lines as empty. When there is nothing to attach, the drop handler inserts the carried plain text at the caret via `setRangeText()` (replacing the selection) and fires the input event. The drop stays cancelled for every droppable drag, so a uri-list payload can never navigate the panel, and text dropped anywhere on the composer - not only on the textarea - lands in the question box.
+- **Problem 2 (P2).** The drop highlight could stick forever after dragging out without dropping: the dragleave handler skipped its decrement whenever the event target was inside the composer, which is always true for a bubbled dragleave (`Node.contains()` includes the element itself), so the depth counter never reached 0.
+- **Fix 2.** Standard pairing: every dragleave decrements the counter, the highlight is removed at 0. dragenter/dragleave bubble in pairs, so enter and leave cancel out exactly.
+- **Problem 3 (P2).** Documentation errors: `docs/packaging.md` claimed background.js imports settings-crypto.js "via settings-storage" and that missing it breaks the service worker (it is imported only by options.js; missing it breaks the settings backup encryption), and `docs/updating-and-backup.md` gave an outdated extension ID.
+- **Fix 3.** Both corrected; the v1.10.135 entry's false "Data: URLs attach directly" claim is corrected too (data: URLs are rejected by the URL safety rules and show the standard error chip).
+- **Checked.** Real-Chrome CDP drag probe: a text-selection drag inserts at the caret (over the textarea and over the composer padding), a URL line inside a selection causes zero service-worker fetch requests (Fetch interception), the highlight clears after dragging out without dropping, plain-text-only drags still insert natively, data: image drags still show the error chip. Full sweep (18 suites) + check-package green; extension E2E 31/31.
+- Build bumped to 1.10.136.
+
+## Feature: drag & drop images onto the question box (v1.10.135)
+
+Dropping onto the composer now attaches what was dragged; the next Send includes it with the question, exactly like the Upload button.
+
+- **Files from the OS** (images, text, HTML, ZIP) go through the same `processFile()` pipeline as the upload button, including the attachment-count room check and budgets.
+- **Images dragged from a web page** carry no bytes - only their URL (text/html `<img src>`, or text/uri-list). The panel extracts the URL (resolving relative src against the current page), fetches the bytes through the worker's existing FETCH_IMAGE channel (host rules, private-host rules with the page URL, 10 MB cap, content sniffing, http→https fallback), and attaches it as a regular image under a name derived from the URL. Data: and blob: URLs (rejected by the URL safety rules / unfetchable from the page context) surface the standard unable-to-read error chip.
+- The composer highlights while a droppable drag is over it (dashed accent outline). Vision gating at send is unchanged (text-only models reject image attachments with the existing message). (Text selections without an image were silently swallowed rather than inserted in this release - fixed in v1.10.136.)
+- **Checked.** Full sweep + check-package green; the drop logic reuses the upload pipeline's tested processFile path.
+- Build bumped to 1.10.135.
+
+## Fix: provider first-byte watchdog + surrogate-safe truncation everywhere (v1.10.134)
+
+Two findings, verified against the tree before fixing.
+
+- **Problem 1 (P2, partially stale).** The round-9 stream watchdogs (90s idle, 15min total) only start once the response HEADERS have arrived: a provider or middlebox that accepted the connection and never answered hung `fetch()` forever - the connection and the service-worker keep-alive were never reclaimed, only manual Clear worked. The report's suggestion (first-byte timeout) targets exactly this pre-headers phase.
+- **Fix 1.** The three provider fetches (DeepSeek, Groq, OpenRouter) go through `fetchWithHeadersTimeout()`: the fetch races a 60s header timer on its own AbortController (the user's STOP is wired in and still propagates as AbortError; a headers timeout surfaces as a new reported error, 6-language key `bg_error_noResponse`). Ordinary network failures pass through unchanged.
+- **Problem 2 (P3).** Four truncation caps still used raw `.slice(0, N)` on user content - a surrogate pair landing across the boundary split into a lone surrogate, which `JSON.stringify` emits as an unpaired `\ud83d` that Python-based backends may reject with 400/500: the page-text cap inside the UNTRUSTED block and the history-attachment preview cap (providers/messages.js), and the stored-copy / quota condensation caps (sidepanel/history-manager.js). (translate-lines.js and content.js were already safe; the report predated round-10.)
+- **Fix 2.** All four caps go through `cutAtCodePointBoundary()`. For `quotaCondenseContent` this is the single shared transform, so `rememberQuotaCondensedContent` cannot drift from it.
+- **Checked.** test-openai-compatible.mjs: headers-timeout rejection with a fetch stub that never settles until aborted, user-STOP propagation, network-error passthrough (+3). test-history-manager.mjs / test-providers-messages.mjs: emoji-heavy attachment blocks and page text condensed/capped with no lone surrogate in the output (+2 blocks). Full sweep + check-package green.
+- Build bumped to 1.10.134.
+
 ## Fix: history restore quota escalation, tolerant settings mirror, session-only context actions (v1.10.133)
 
 Three static findings, verified against the tree before fixing.
@@ -27,27 +99,6 @@ Three sub-issues from an older finding re-verified against the current tree befo
 - **Fix 2.** `numberPlaceholder()` locates the replacement's placeholder token directly (the last "[" at or before the prefix cut, the first "]" after it) and requires the token to sit inside the prefix/suffix window; the original is anchored at the token's "[". The fuzz now produces 0 rule-created unnumbered placeholders, and the degraded cases round-trip ("Set-Cookie: [COOKIE#1]" restores "sid=abc123456]").
 - **Checked.** test-pii-filter.mjs: literal-token reservation (non-streaming + streaming split), the cross-chunk escaped placeholder, and the numbered/restorable cookie cases (+11 checks). Full sweep + check-package green.
 - Build bumped to 1.10.132.
-
-## Feature: drag & drop images onto the question box (v1.10.135)
-
-Dropping onto the composer now attaches what was dragged; the next Send includes it with the question, exactly like the Upload button.
-
-- **Files from the OS** (images, text, HTML, ZIP) go through the same `processFile()` pipeline as the upload button, including the attachment-count room check and budgets.
-- **Images dragged from a web page** carry no bytes - only their URL (text/html `<img src>`, or text/uri-list). The panel extracts the URL (resolving relative src against the current page), fetches the bytes through the worker's existing FETCH_IMAGE channel (host rules, private-host rules with the page URL, 10 MB cap, content sniffing, http→https fallback), and attaches it as a regular image under a name derived from the URL. Data: URLs attach directly; blob: URLs (page-context, unfetchable) surface the standard unable-to-read error chip.
-- The composer highlights while a droppable drag is over it (dashed accent outline); plain text drags (selections) keep the native textarea behavior. Vision gating at send is unchanged (text-only models reject image attachments with the existing message).
-- **Checked.** Full sweep + check-package green; the drop logic reuses the upload pipeline's tested processFile path.
-- Build bumped to 1.10.135.
-
-## Fix: provider first-byte watchdog + surrogate-safe truncation everywhere (v1.10.134)
-
-Two findings, verified against the tree before fixing.
-
-- **Problem 1 (P2, partially stale).** The round-9 stream watchdogs (90s idle, 15min total) only start once the response HEADERS have arrived: a provider or middlebox that accepted the connection and never answered hung `fetch()` forever - the connection and the service-worker keep-alive were never reclaimed, only manual Clear worked. The report's suggestion (first-byte timeout) targets exactly this pre-headers phase.
-- **Fix 1.** The three provider fetches (DeepSeek, Groq, OpenRouter) go through `fetchWithHeadersTimeout()`: the fetch races a 60s header timer on its own AbortController (the user's STOP is wired in and still propagates as AbortError; a headers timeout surfaces as a new reported error, 6-language key `bg_error_noResponse`). Ordinary network failures pass through unchanged.
-- **Problem 2 (P3).** Four truncation caps still used raw `.slice(0, N)` on user content - a surrogate pair landing across the boundary split into a lone surrogate, which `JSON.stringify` emits as an unpaired `\ud83d` that Python-based backends may reject with 400/500: the page-text cap inside the UNTRUSTED block and the history-attachment preview cap (providers/messages.js), and the stored-copy / quota condensation caps (sidepanel/history-manager.js). (translate-lines.js and content.js were already safe; the report predated round-10.)
-- **Fix 2.** All four caps go through `cutAtCodePointBoundary()`. For `quotaCondenseContent` this is the single shared transform, so `rememberQuotaCondensedContent` cannot drift from it.
-- **Checked.** test-openai-compatible.mjs: headers-timeout rejection with a fetch stub that never settles until aborted, user-STOP propagation, network-error passthrough (+3). test-history-manager.mjs / test-providers-messages.mjs: emoji-heavy attachment blocks and page text condensed/capped with no lone surrogate in the output (+2 blocks). Full sweep + check-package green.
-- Build bumped to 1.10.134.
 
 ## Fix: privacy filter worst-case timing + coverage for the six UI languages (v1.10.131)
 
@@ -165,7 +216,7 @@ Round 10 of the full-code review (diff since round 8 read line by line, plus who
 - **Problem 1 (P1).** Every store zip built by `scripts/build-package.mjs` was Chrome-Web-Store-incompatible: on Windows it compressed with PowerShell 5.1's `Compress-Archive`, which stores nested entry names with backslash separators (`providers\messages.js` as one literal name). The store rejects such archives, and the script's own `Expand-Archive` round-trip tolerated them, so the mistake never surfaced.
 - **Fix 1.** The builder now uses a pure-Node zip writer (zlib deflate with a store fallback, table CRC-32, forward-slash entry names, no directory entries) and verifies the finished archive at the byte level: it re-parses the central directory and every local header, inflates each entry, and compares CRC-32 and raw bytes against the source files, rejecting any backslash or directory entry by name. Verified with an independent Python `zipfile` extraction (byte-diff against the repo) and a real-Chrome boot of the extracted package copy.
 - **Problem 2 (P2).** A page change went undetected when the previous turn had no page context. `resolveContextEpoch()` stopped searching for the "previous page" at the most recent epoch-tagged turn, so a turn submitted with page reading off (or after a failed capture) made `previousPage` null: the next request on a different page kept the old page's turns in the model history and never built the "page changed" hint - exactly what the epoch feature exists to prevent, and weaker than the pre-epoch code.
-- **Fix 2.** The backward scan now tracks two independent facts: the newest epoch (sticky) and the most recent page context anywhere before the request, stopping only once both are known. +8 regression assertions in `test-conversation-store.mjs` (masked switch, legacy-masked switch, and the reverse order that must keep working).
+- **Fix 2.** The backward scan now tracks two independent facts: the newest epoch (sticky) and the most recent page context anywhere before the request, stopping only once both are known. +9 regression assertions in `test-conversation-store.mjs` (masked switch, legacy-masked switch, and the reverse order that must keep working).
 - **Problem 3 (P3).** The thought-process display block was constructed from the same string template in five places (worker-recycle recovery, streaming render, deferred final render, DONE and ERROR display copies) - any future wording change would silently diverge them.
 - **Fix 3.** One `assistantDisplayText()` helper now produces the block for all five producers; the template strings appear exactly once.
 - **Problem 4 (P3).** `docs/packaging.md` never mentioned the store-package build script.
@@ -791,6 +842,17 @@ Extraction now only **reads** the live DOM:
 
 **Not changed, worth knowing:** the quick *Translate* button always asks for Chinese (the "Preferred Translation Language" setting only affects the right-click menu); `buildMessages()` sends two `system` messages after the conversation history, which strict chat templates (some Qwen builds) can reject.
 
+## AI model connection update (2026-10-07, v1.10.54) — superseded: Gemini, Claude, OpenAI and Z.AI entries below no longer apply
+
+- DeepSeek: `deepseek-flash` remains the API ID for DeepSeek V4.1 Flash; reasoning effort is pinned to high.
+- Gemini: confirmed on `gemini-3.8-flash` using Google's Interactions API.
+- Gemini transient HTTP 408/429/5xx failures are retried with exponential backoff, jitter, and `Retry-After` support; `Gemini 3.7 Flash` is also available as a manual fallback.
+- Claude: updated to Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 4.5; the Messages API output budget is increased so modern adaptive/extended thinking has room to complete an answer.
+- OpenAI: replaced the stale GPT-5.6 entries with GPT-6 Astra, GPT-6.1 Sol, and GPT-6 Luna on the Responses API, with medium reasoning effort.
+- Z.AI: added `glm-5.3-flash` through the documented OpenAI-compatible PaaS Chat Completions endpoint. A dedicated Z.AI API-key field is included in Settings and Settings Backup.
+- Model selections saved by older builds are migrated through explicit legacy-ID/label aliases instead of silently falling back to the first model.
+- Background requests now resolve provider/model configuration only from the canonical model catalog; UI-supplied provider/API-model overrides are ignored.
+
 ## Provider cleanup and bug-fix pass (2026-10-16)
 
 **Removed:** the Z.AI, Claude (Anthropic) and OpenAI streaming code, their message builders, and every remaining reference in the UI strings and privacy policy. The supported providers are DeepSeek, Groq and OpenRouter (Gemini had already been removed earlier). The model catalog itself (`models.js`) was not changed apart from marking the two text-only GPT-OSS models with `vision: false`. The provider-specific entries further down this file are kept only as history.
@@ -805,17 +867,6 @@ Extraction now only **reads** the live DOM:
 - Automatic web research: attachment text and the page-visuals note are no longer treated as part of the question; Chinese/Japanese questions are matched correctly; ordinary question words no longer count as "not covered by the page"; "explain the current page" no longer counts as a request for fresh information. Without a Tavily key, automatic research is skipped instead of failing the request (explicit requests and Explain still report the missing key).
 - Fact Check now splits and keeps Chinese/Japanese sentences.
 - Page extraction: the MailPlus recipient fallback and the Reddit ad filter no longer match unrelated elements; the content script always replies.
-
-## AI model connection update (2026-10-07, v1.10.54) — superseded: Gemini, Claude, OpenAI and Z.AI entries below no longer apply
-
-- DeepSeek: `deepseek-flash` remains the API ID for DeepSeek V4.1 Flash; reasoning effort is pinned to high.
-- Gemini: confirmed on `gemini-3.8-flash` using Google's Interactions API.
-- Gemini transient HTTP 408/429/5xx failures are retried with exponential backoff, jitter, and `Retry-After` support; `Gemini 3.7 Flash` is also available as a manual fallback.
-- Claude: updated to Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 4.5; the Messages API output budget is increased so modern adaptive/extended thinking has room to complete an answer.
-- OpenAI: replaced the stale GPT-5.6 entries with GPT-6 Astra, GPT-6.1 Sol, and GPT-6 Luna on the Responses API, with medium reasoning effort.
-- Z.AI: added `glm-5.3-flash` through the documented OpenAI-compatible PaaS Chat Completions endpoint. A dedicated Z.AI API-key field is included in Settings and Settings Backup.
-- Model selections saved by older builds are migrated through explicit legacy-ID/label aliases instead of silently falling back to the first model.
-- Background requests now resolve provider/model configuration only from the canonical model catalog; UI-supplied provider/API-model overrides are ignored.
 
 ## Language output fix (2026-09-22)
 

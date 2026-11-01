@@ -6,7 +6,7 @@ How some of the extension's features work. These notes describe standing behavio
 
 The side panel now has an Upload button below the question box. It accepts images, common text/code files, HTML, and ZIP/WinZip archives. Text and HTML files are read locally and included in the selected provider's chat request. ZIP files are parsed locally and supported text/HTML entries are extracted and included.
 
-Image attachments are encoded locally as data URLs and sent with the current request. DeepSeek image requests are handled natively by `deepseek-flash`; Groq and OpenRouter receive multimodal image content when the selected model supports vision. The two GPT-OSS models on Groq are text-only, so automatic page screenshots/images are not attached for them.
+Image attachments are encoded locally as data URLs and sent with the current request. DeepSeek image requests are handled natively by `deepseek-flash`; Groq and OpenRouter receive multimodal image content when the selected model supports vision. The catalog marks four models `vision: false` — both GPT-OSS models and Qwen 3.8 27B on Groq, and the OpenRouter free model — so automatic page screenshots/images are not attached for them and image attachments are rejected with the explanatory error.
 
 
 Version 1.0.9 adds a Settings > Backup History button that exports all locally saved conversations as a standard ZIP file. API keys and custom prompts are not included.

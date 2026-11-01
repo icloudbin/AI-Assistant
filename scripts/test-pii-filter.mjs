@@ -307,4 +307,19 @@ check("without a session plain placeholders are used", R("jane@x.com") === "[EMA
   check("image data is left untouched", out.images[0].dataUrl === "data:image/png;base64,AAAA");
 }
 
+// ---- full-width CJK punctuation ends a bare secret value (round-12 finding) ----
+{
+  const text = "密码：abc12345，Y仍然可见。token：xyz78912。";
+  const out = R(text);
+  check("CJK bare value stops at ，", !out.includes("abc12345") && out.includes("Y仍然可见"), out);
+  check("CJK bare value stops at 。", !out.includes("xyz78912"), out);
+  check("only the two secrets are placeholders", (out.match(/\[[A-Z_]+(?:#\d+)?\]/g) || []).length === 2, out);
+  const s = createRedactionSession();
+  const redacted = R(text, s);
+  check("CJK bare value round-trips", restorePlaceholders(redacted, s) === text, restorePlaceholders(redacted, s));
+  // A value consumed up to ASCII punctuation still works as before.
+  const ascii = R("password = hunter2, next");
+  check("ASCII bare value unchanged", !ascii.includes("hunter2") && ascii.includes(", next"), ascii);
+}
+
 process.exit(failed ? 1 : 0);

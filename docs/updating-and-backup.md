@@ -2,7 +2,7 @@
 
 All user data (API keys, theme, language, custom prompt, saved model choice, conversation history) lives in `chrome.storage.local`, which Chrome persists per **extension ID**. Before v1.10.26, `manifest.json` had no `"key"` field, so for a "Load unpacked" install Chrome derived the extension ID from a hash of the **absolute folder path**. Loading each updated download from a new folder (e.g. `AI-Assistant-main`, then `AI-Assistant-main (2)`, ...) produced a *different* ID, so Chrome treated the update as a brand-new extension with empty storage — which is why every update appeared to reset all settings.
 
-Fix: `manifest.json` now includes a `"key"` field (a base64-encoded RSA public key). With a `key` present, Chrome derives the ID from that key instead of the folder path, so the ID is stable — `jhnjhgicilnghoellcbkiokhlhkpbmjh` — no matter where the folder lives, and loading a new version is a true update: same ID, same storage, settings kept.
+Fix: `manifest.json` now includes a `"key"` field (a base64-encoded RSA public key). With a `key` present, Chrome derives the ID from that key instead of the folder path, so the ID is stable — `kkionkjieiilonjikggmaladjpiijbkm` — no matter where the folder lives, and loading a new version is a true update: same ID, same storage, settings kept.
 
 **Important: never click "Remove" between versions.** Removing an extension deletes its entire `chrome.storage.local` by design — that is Chrome's behavior for every extension, and no manifest field can change it. Removing and then reinstalling always starts from empty settings, even with the pinned ID. The pinned key only preserves data when the old install is updated *in place*.
 

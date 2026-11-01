@@ -199,8 +199,10 @@ const SECRET_KEY_NAME = String.raw`(?<![\w.-])[\w.-]*?(?:secret|token|passw(?:or
 const PASSWORD_LIKE_KEY_RE = /passw|pwd|passphrase|密码|口令/i;
 // The bare-value class excludes & [ ] (like the URL-query rule below): without
 // that, "?token=abc&page=2" swallowed the rest of the query string as one
-// secret, hiding the harmless parameters from the model.
-const SECRET_KV_RE = new RegExp(`(${SECRET_KEY_NAME})(["']?\\s*[:=：]\\s*)(?:"([^"\\r\\n]{1,200})"|'([^'\\r\\n]{1,200})'|([^\\s"',;&\\[\\]]+))`, "gi");
+// secret, hiding the harmless parameters from the model. It also stops at
+// full-width CJK punctuation, so "密码：X，Y" redacts only X and the model
+// still sees Y (real secrets are ASCII tokens; the surrounding prose is not).
+const SECRET_KV_RE = new RegExp(`(${SECRET_KEY_NAME})(["']?\\s*[:=：]\\s*)(?:"([^"\\r\\n]{1,200})"|'([^'\\r\\n]{1,200})'|([^\\s"',;&\\[\\]，；、。：（）？！]+))`, "gi");
 function redactSecretKeyValue(m, key, sep, dq, sq, bare) {
   const value = dq ?? sq ?? bare;
   if (value === undefined || !looksLikeSecret(value, PASSWORD_LIKE_KEY_RE.test(key))) return m;

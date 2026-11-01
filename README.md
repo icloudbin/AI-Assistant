@@ -43,18 +43,26 @@ AI-Assistant/
 ├── options/
 │   └── options.html / options.js
 ├── scripts/
+│   ├── build-package.mjs
 │   ├── check-package.mjs
-│   ├── test-pii-filter.mjs
-│   ├── test-outbound-pii.mjs
-│   ├── test-url-safety.mjs
-│   ├── test-translation-paragraphs.mjs
-│   ├── test-conversation-store.mjs
-│   ├── test-providers-messages.mjs
-│   ├── test-openai-compatible.mjs
-│   ├── test-markdown-render.mjs
-│   ├── test-history-manager.mjs
 │   ├── test-attachment-budget.mjs
+│   ├── test-chrome-browser.mjs
+│   ├── test-content-visibility.mjs
+│   ├── test-conversation-store.mjs
 │   ├── test-extension-e2e.mjs
+│   ├── test-history-manager.mjs
+│   ├── test-markdown-render.mjs
+│   ├── test-models.mjs
+│   ├── test-openai-compatible.mjs
+│   ├── test-options-backup.mjs
+│   ├── test-outbound-pii.mjs
+│   ├── test-pii-filter.mjs
+│   ├── test-providers-messages.mjs
+│   ├── test-sensitive-sites.mjs
+│   ├── test-settings-crypto.mjs
+│   ├── test-settings-storage-keys.mjs
+│   ├── test-translation-paragraphs.mjs
+│   ├── test-url-safety.mjs
 │   └── test-sidepanel-context.py
 └── sidepanel/
     ├── sidepanel.html

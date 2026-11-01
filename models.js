@@ -49,7 +49,8 @@ export function findKnownModel(id) {
 }
 
 // Whether the model accepts image input. Models are assumed to support it
-// unless the catalog says `vision: false` (the GPT-OSS models are text-only).
+// unless the catalog says `vision: false` (both GPT-OSS models and Qwen 3.8
+// 27B on Groq, and the OpenRouter free model, are text-only).
 export function modelSupportsVision(model) {
   return model?.vision !== false;
 }

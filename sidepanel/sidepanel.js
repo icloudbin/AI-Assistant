@@ -2380,10 +2380,17 @@ fileInput.addEventListener("change", async () => {
 //   - files from the OS (images, text, ZIP) go through the same processFile()
 //     pipeline as the Upload button;
 //   - an image dragged FROM THE PAGE carries no bytes, only its URL (text/html
-//     or text/uri-list): the URL is fetched through the worker's FETCH_IMAGE
-//     channel (host rules, 10 MB cap, private-host rules with the page URL,
-//     http->https fallback) and attached as a regular image;
-//   - plain text drags (selections) keep the native textarea behavior.
+//     <img src> or text/uri-list): the URL is fetched through the worker's
+//     FETCH_IMAGE channel (host rules, 10 MB cap, private-host rules with the
+//     page URL, http->https fallback) and attached as a regular image;
+//   - anything else that carries text (a page text selection, a copied URL
+//     or a link that does not look like an attachable image) is inserted
+//     into the question box at the caret;
+//   - while a reply is streaming the composer is locked like every other
+//     input path, drags included.
+// During dragover only the payload TYPES are visible (a cross-document drag
+// hides its content), so a text selection still shows the drop highlight
+// until it is dropped.
 
 const COMPOSER_DROP_CLASS = "drop-target";
 let composerDragDepth = 0;
@@ -2393,10 +2400,27 @@ function composerDropPayloadTypes(dataTransfer) {
   return types.includes("Files") || types.includes("text/html") || types.includes("text/uri-list");
 }
 
-// First image URL carried by a page drag: text/html <img src> first (the
-// browser serializes dragged images with absolute src), then the first
-// non-comment http(s) line of the uri-list, then a text/plain value that is
-// itself a single http(s) URL. Anything else is not an image drop.
+// A URL that merely LOOKS like an image - used for dragged links and copied
+// addresses, whose payload is not known to be an image. The extension must be
+// one the attachment pipeline actually supports, so a dropped page link is
+// inserted as text instead of triggering a fetch that could never attach
+// (BMP, like SVG, is refused by the attachment pipeline). Dragged <img>
+// elements skip this check: their payload is known to be an image.
+const DROPPED_IMAGE_URL_RE = /\.(png|jpe?g|gif|webp)$/i;
+function looksLikeImageUrl(url) {
+  try { return DROPPED_IMAGE_URL_RE.test(new URL(url).pathname); } catch { return false; }
+}
+
+// First image URL carried by a page drag, or "" when the drag is not an
+// image drop:
+//   - the <img src> of a text/html payload (the browser serializes dragged
+//     images with absolute src). A text/html payload WITHOUT an image is a
+//     rich text selection - its text flavors are never scanned for URLs;
+//   - the first non-comment http(s) line of the uri-list (dragged links),
+//     when it looks like an attachable image;
+//   - text/plain only when the WHOLE payload is a single http(s) URL (a
+//     copied address) that looks like an attachable image: a selection that
+//     merely contains a URL line is text and stays text.
 function firstImageUrlFromDrop(dataTransfer) {
   const html = dataTransfer.getData("text/html");
   if (html) {
@@ -2405,57 +2429,129 @@ function firstImageUrlFromDrop(dataTransfer) {
       const src = img?.getAttribute("src") || "";
       if (src) return src;
     } catch { /* malformed fragment: try the other flavors */ }
+    return ""; // a selection without an image is never a URL drop
   }
-  const list = (dataTransfer.getData("text/uri-list") || dataTransfer.getData("text/plain") || "").trim();
+  const list = (dataTransfer.getData("text/uri-list") || "").trim();
   for (const line of list.split("\n")) {
     const url = line.trim();
-    if (url && !url.startsWith("#") && /^https?:\/\//i.test(url)) return url;
+    if (url && !url.startsWith("#") && /^https?:\/\//i.test(url) && looksLikeImageUrl(url)) return url;
   }
+  const plain = (dataTransfer.getData("text/plain") || "").trim();
+  if (plain && !plain.includes("\n") && /^https?:\/\/\S+$/i.test(plain) && looksLikeImageUrl(plain)) return plain;
   return "";
 }
 
-// Fetches a page image through the worker (same channel as reply-image
-// loading, including the http->https fallback) and attaches it via the
-// regular processFile() pipeline under a name derived from the URL.
+// Attachment file name for a fetched image URL: the percent-decoded basename,
+// with base and extension split BEFORE sanitizing (sanitizing the whole name
+// first turned CJK/percent-encoded names into a bare ".png"). A base that
+// sanitizes away falls back to "image"; a URL without an extension gets one
+// appended from the fetched bytes' real type. `pageUrl` resolves relative src.
+function nameFromImageUrl(url, pageUrl) {
+  let raw = "";
+  try { raw = decodeURIComponent(new URL(url, pageUrl || undefined).pathname.split("/").pop() || ""); } catch { /* keep the fallback */ }
+  const dotAt = raw.lastIndexOf(".");
+  const rawExt = dotAt > 0 ? raw.slice(dotAt) : "";
+  const base = (dotAt > 0 ? raw.slice(0, dotAt) : raw).replace(/[^\w.-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 60);
+  return { base: base || "image", ext: /\.[A-Za-z0-9]{1,5}$/.test(rawExt) ? rawExt.toLowerCase() : "" };
+}
+
+// Attaches a page image:
+//   - a data: URL carries its own bytes and decodes straight into the regular
+//     processFile() pipeline (type rules, budgets, room check) - no worker
+//     round-trip, which the URL safety rules would refuse for data: anyway;
+//   - an http(s) URL is fetched through the worker's FETCH_IMAGE channel
+//     (same channel as reply-image loading, including the http->https
+//     fallback) under a REAL "reading" chip reserved up front: the fetch can
+//     take ~20 s with the retry, Send must not silently skip or duplicate
+//     it, and a New Topic during the fetch simply discards the chip.
 async function attachImageFromUrl(rawUrl) {
   let url = String(rawUrl || "").trim();
   const activeTab = await getCurrentActiveTab().catch(() => null);
   const pageUrl = String(activeTab?.url || "");
+
+  if (/^data:image\//i.test(url)) {
+    // Only base64 payloads decode; URL-encoded data URLs fail below, same as
+    // an unfetchable address would.
+    if (!/^data:image\/[a-z0-9.+-]+;base64,/i.test(url)) {
+      addBubble("error", t(currentLang, "attachment_error_unableToReadImage"));
+      return;
+    }
+    try {
+      const mime = (/^data:([^;,]+)/.exec(url) || [])[1] || "image/png";
+      const ext = (mime.split("/")[1] || "png").replace(/^jpeg$/i, "jpg").replace(/[^a-z0-9]/gi, "") || "png";
+      const bytes = Uint8Array.from(atob(url.split(",")[1] || ""), (ch) => ch.charCodeAt(0));
+      await processFile(new File([bytes], `image.${ext}`, { type: mime }));
+    } catch {
+      addBubble("error", t(currentLang, "attachment_error_unableToReadImage"));
+    }
+    return;
+  }
+
   if (!/^https?:\/\//i.test(url)) {
     // Relative src from a page fragment: resolve against the page.
     try { url = new URL(url, pageUrl || location.href).href; } catch { /* FETCH_IMAGE reports it */ }
   }
-  let result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url, pageUrl }).catch(() => null);
-  if ((!result?.ok || !result.dataUrl) && /^http:/i.test(url)) {
-    result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: url.replace(/^http:/i, "https:"), pageUrl }).catch(() => null);
-  }
-  const dataUrl = result?.ok ? String(result.dataUrl || "") : "";
-  if (!/^data:image\/(png|jpeg|jpg|gif|webp|bmp);/i.test(dataUrl)) {
-    addBubble("error", t(currentLang, "attachment_error_unableToReadImage"));
+  if (attachments.length >= MAX_ATTACHMENTS) {
+    addBubble("error", t(currentLang, "attachment_error_tooMany_template", { max: String(MAX_ATTACHMENTS) }));
     return;
   }
-  const mime = (/^data:([^;,]+)/.exec(dataUrl) || [])[1] || "image/png";
-  const ext = (mime.split("/")[1] || "png").replace(/^jpeg$/i, "jpg");
-  let name = "";
-  try { name = new URL(url, pageUrl || undefined).pathname.split("/").pop() || ""; } catch { /* keep the fallback */ }
-  name = (name.replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "image") + (/\.[A-Za-z0-9]{1,5}$/.test(name) ? "" : "." + ext);
-  const bytes = Uint8Array.from(atob(dataUrl.split(",")[1] || ""), (ch) => ch.charCodeAt(0));
-  await processFile(new File([bytes], name, { type: mime }));
+  const { base, ext } = nameFromImageUrl(url, pageUrl);
+  const item = { id: `${Date.now()}-${Math.random()}`, name: base + ext, status: "reading", kind: "file", text: "", dataUrl: "" };
+  attachments.push(item);
+  renderAttachments();
+  try {
+    let result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url, pageUrl }).catch(() => null);
+    if ((!result?.ok || !result.dataUrl) && /^http:/i.test(url)) {
+      result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: url.replace(/^http:/i, "https:"), pageUrl }).catch(() => null);
+    }
+    const dataUrl = result?.ok ? String(result.dataUrl || "") : "";
+    // The attachment pipeline and the providers take png/jpeg/gif/webp;
+    // FETCH_IMAGE's broader menu (bmp) exists for reply-image rendering.
+    if (!/^data:image\/(png|jpeg|gif|webp);/i.test(dataUrl)) {
+      throw new Error(t(currentLang, "attachment_error_unableToReadImage"));
+    }
+    const others = () => attachments.filter((attachment) => attachment !== item && attachment.status !== "error");
+    if (!fitsImageBudget(others(), dataUrlByteLength(dataUrl))) {
+      throw new Error(t(currentLang, "attachment_error_totalImageLimit_template", {
+        mb: String(Math.round(MAX_TOTAL_ATTACHMENT_IMAGE_BYTES / (1024 * 1024))),
+      }));
+    }
+    item.kind = "image";
+    item.dataUrl = dataUrl;
+    if (!ext) {
+      const mime = (/^data:([^;,]+)/.exec(dataUrl) || [])[1] || "image/png";
+      item.name = `${base}.${(mime.split("/")[1] || "png").replace(/^jpeg$/i, "jpg")}`;
+      const nameEl = item.el?.querySelector(".attachment-name");
+      if (nameEl) nameEl.textContent = item.name;
+    }
+    setAttachmentStatus(item, "ready", t(currentLang, "attachment_ready"));
+  } catch (err) {
+    setAttachmentStatus(item, "error", err?.message || t(currentLang, "attachment_error_unableToRead"));
+  }
 }
 
 composer.addEventListener("dragenter", (event) => {
-  if (!composerDropPayloadTypes(event.dataTransfer)) return;
+  if (!composerDropPayloadTypes(event.dataTransfer) || isStreaming) return;
   composerDragDepth++;
   composer.classList.add(COMPOSER_DROP_CLASS);
 });
 composer.addEventListener("dragover", (event) => {
   if (!composerDropPayloadTypes(event.dataTransfer)) return;
   event.preventDefault();
+  if (isStreaming) {
+    // Locked like every other input path - but keep cancelling the event:
+    // an uncancelled dragover would let a uri-list drop navigate the panel.
+    event.dataTransfer.dropEffect = "none";
+    return;
+  }
   event.dataTransfer.dropEffect = "copy";
   composer.classList.add(COMPOSER_DROP_CLASS);
 });
-composer.addEventListener("dragleave", (event) => {
-  if (event.target && composer.contains(event.target)) return;
+composer.addEventListener("dragleave", () => {
+  // dragenter/dragleave bubble in pairs, so decrementing on every leave (no
+  // target check - Node.contains() includes the element itself, so a guard
+  // like composer.contains(event.target) would never decrement) pairs the
+  // counter back to 0 when the drag leaves the composer.
   composerDragDepth = Math.max(0, composerDragDepth - 1);
   if (composerDragDepth === 0) composer.classList.remove(COMPOSER_DROP_CLASS);
 });
@@ -2469,7 +2565,10 @@ composer.addEventListener("drop", async (event) => {
   composerDragDepth = 0;
   composer.classList.remove(COMPOSER_DROP_CLASS);
   if (!droppable) return; // plain text: keep the native textarea behavior
+  // Cancelled even while streaming: the browser default for a uri-list drag
+  // would navigate the panel away.
   event.preventDefault();
+  if (isStreaming) return;
 
   if (dt.files && dt.files.length) {
     const files = [...dt.files];
@@ -2483,6 +2582,21 @@ composer.addEventListener("drop", async (event) => {
 
   const imageUrl = firstImageUrlFromDrop(dt);
   if (imageUrl) await attachImageFromUrl(imageUrl);
+
+  // Not an image drop (a page text selection, or a payload without image
+  // data): insert the carried text at the caret, replacing the selection,
+  // like a native textarea drop would. Inserted manually because the drop is
+  // already cancelled above: the browser default here would navigate the
+  // panel for uri-list payloads, and only drops landing on the textarea
+  // itself would insert anything.
+  const text = dt.getData("text/plain") || "";
+  if (text) {
+    questionInput.focus();
+    const start = questionInput.selectionStart ?? questionInput.value.length;
+    const end = questionInput.selectionEnd ?? start;
+    questionInput.setRangeText(text, start, end, "end");
+    questionInput.dispatchEvent(new Event("input", { bubbles: true }));
+  }
 });
 
 // ---------- Voice input (speech-to-text) ----------
