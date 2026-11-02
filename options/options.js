@@ -23,8 +23,11 @@ import {
 import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-storage.js";
 import { encryptSecrets, decryptSecrets, MIN_PASSPHRASE_LENGTH } from "../settings-crypto.js";
 import { withHistoryLock } from "../conversation-store.js";
-import { compressForQuota } from "../sidepanel/history-manager.js";
-import { cutAtCodePointBoundary } from "../models.js";
+import { compressForQuota, cleanForTopic } from "../sidepanel/history-manager.js";
+import { migrateLegacyMessage, normalizeAttachments } from "../attachments.js";
+import { sanitizePiiMap } from "../privacy/pii-filter.js";
+import { cutAtCodePointBoundary, MAX_CUSTOM_PROMPT_CHARS } from "../models.js";
+import { PROVIDER_NAMES, dropOverlongPrompt, planSettingsImport, approvedSettings } from "./settings-import.js";
 
 const apiKeyInput = document.getElementById("apiKey");
 const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
@@ -642,9 +645,16 @@ function normalizeRestoredConversation(conversation, index) {
   const messages = Array.isArray(conversation.messages)
     ? conversation.messages
         .filter((m) => m && (m.role === "user" || m.role === "assistant"))
+        // A backup made before attachments became structured holds them inline
+        // in `content`: convert such a message (a no-op for a current one).
+        .map((m) => migrateLegacyMessage({ ...m, content: String(m.content || "") }))
         .map((m) => ({
           role: m.role,
           content: String(m.content || ""),
+          // Attached files (user turns), validated like data from any other source.
+          ...(m.role === "user" && normalizeAttachments(m.attachments).length ? { attachments: normalizeAttachments(m.attachments) } : {}),
+          // Placeholder -> value map of an assistant reply (see toStoredMessage()).
+          ...(m.role === "assistant" && sanitizePiiMap(m.piiMap) ? { piiMap: sanitizePiiMap(m.piiMap) } : {}),
           // Same display-only-copy dedupe as toStoredMessage() in
           // sidepanel.js: keep displayContent only when it differs.
           ...(m.displayContent !== undefined && m.displayContent !== m.content
@@ -679,16 +689,6 @@ function normalizeRestoredConversation(conversation, index) {
       ? Number(conversation.updatedAt)
       : Date.now(),
   };
-}
-
-// Mirrors cleanForTopic() in sidepanel.js. Duplicated rather than imported
-// because sidepanel.js touches the DOM at module load, so importing it here
-// would break the options page.
-function cleanForTopic(text) {
-  return String(text || "")
-    .replace(/\[ATTACHMENTS\][\s\S]*?\[\/ATTACHMENTS\]/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 function makeRestoredTopicTitle(messages) {
@@ -1151,6 +1151,105 @@ async function exportSettings() {
   }
 }
 
+// Switch name shown for each protection setting (existing translated labels).
+const IMPORT_SWITCH_LABEL_KEYS = {
+  [PII_FILTER_STORAGE_KEY]: "piiFilter_label",
+  [INCLUDE_CONTEXT_STORAGE_KEY]: "readCurrentPage_label",
+  [PAGE_VISUALS_STORAGE_KEY]: "pageVisuals_label",
+  [AUTO_WEB_RESEARCH_KEY]: "autoWebResearch_toggle",
+};
+
+function excerpt(text, max = 600) {
+  const chars = Array.from(String(text || ""));
+  return chars.length > max ? `${chars.slice(0, max).join("")}… (${chars.length})` : chars.join("");
+}
+
+// Shows every difference a settings file would make. Items that need the
+// user's say-so get an UNCHECKED box; the rest are listed as information.
+// Resolves with the Set of ticked keys on "Import", or null on Cancel / Esc.
+// Everything from the file is put in with textContent, never as markup.
+function confirmSettingsImport(items, restored) {
+  return new Promise((resolve) => {
+    const dialog = document.createElement("dialog");
+    dialog.className = "import-review";
+    const add = (parent, tag, text, className) => {
+      const el = document.createElement(tag);
+      if (className) el.className = className;
+      if (text !== undefined) el.textContent = text;
+      parent.appendChild(el);
+      return el;
+    };
+    add(dialog, "h3", t(currentLang, "settingsImport_title"));
+    add(dialog, "p", t(currentLang, "settingsImport_intro"), "hint");
+
+    const boxes = new Map();
+    const others = [];
+    const onOff = (v) => t(currentLang, v ? "settingsImport_on" : "settingsImport_off");
+    for (const item of items) {
+      if (item.kind === "plain" || (item.kind === "secret" && !item.needsConfirm)) {
+        others.push(item.kind === "secret" ? `${PROVIDER_NAMES[item.key]} API key` : item.key);
+        continue;
+      }
+      const row = add(dialog, "label", undefined, `import-row${item.needsConfirm ? " risky" : ""}`);
+      if (item.needsConfirm) {
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.checked = false;
+        row.appendChild(box);
+        boxes.set(item.key, box);
+      }
+      const body = add(row, "span", undefined, "import-row-body");
+      if (item.kind === "protection") {
+        add(body, "strong", t(currentLang, IMPORT_SWITCH_LABEL_KEYS[item.key]));
+        add(body, "span", `${onOff(item.from)} → ${onOff(item.to)}`, "import-change");
+        if (item.weakens) add(body, "span", `⚠️ ${t(currentLang, "settingsImport_weakens")}`, "import-badge");
+      } else if (item.kind === "prompt") {
+        add(body, "strong", t(currentLang, "settingsImport_promptChange"));
+        add(body, "span", t(currentLang, "settingsImport_current"), "import-change");
+        add(body, "pre", item.from ? excerpt(item.from) : t(currentLang, "settingsImport_empty"));
+        add(body, "span", t(currentLang, "settingsImport_inFile"), "import-change");
+        add(body, "pre", item.to ? excerpt(item.to) : t(currentLang, "settingsImport_empty"));
+      } else if (item.kind === "secret") {
+        add(body, "strong", t(currentLang, "settingsImport_secretReplace_template", { provider: PROVIDER_NAMES[item.key] }));
+        add(body, "span", `⚠️ ${t(currentLang, "settingsImport_weakens")}`, "import-badge");
+      }
+    }
+    if (others.length) add(dialog, "p", t(currentLang, "settingsImport_others_template", { names: others.join(", ") }), "hint");
+
+    const actions = add(dialog, "div", undefined, "actions");
+    const applyBtn = add(actions, "button", t(currentLang, "settingsImport_apply"));
+    applyBtn.type = "button";
+    const cancelBtn = add(actions, "button", t(currentLang, "settingsImport_cancel"));
+    cancelBtn.type = "button";
+    cancelBtn.className = "secondary";
+    // Settle in the click handlers and use the 'close' event only as the
+    // Esc/backdrop path: some embedded or automated environments run
+    // showModal() without ever firing the dialog's close event, and the
+    // import must never hang on the event alone.
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      try { dialog.close(); } catch { /* already closed */ }
+      dialog.remove();
+      resolve(value);
+    };
+    applyBtn.addEventListener("click", () => {
+      finish(new Set([...boxes].filter(([, box]) => box.checked).map(([key]) => key)));
+    });
+    cancelBtn.addEventListener("click", () => finish(null));
+    dialog.addEventListener("close", () => {
+      if (settled) return;
+      settled = true;
+      dialog.remove();
+      resolve(null); // Esc / native cancel: nothing was approved
+    });
+    document.body.appendChild(dialog);
+    dialog.showModal();
+    cancelBtn.focus(); // the safe choice is the default one
+  });
+}
+
 async function importSettings() {
   exportSettingsBtn.disabled = true;
   importSettingsBtn.disabled = true;
@@ -1225,11 +1324,40 @@ async function importSettings() {
     }
     if (!Object.keys(restored).length) throw new Error(t(currentLang, "settingsBackup_error_notSettingsBackup"));
 
-    await chrome.storage.local.set(restored);
+    // A settings file can come from anywhere (S-06): show what it would change
+    // and apply the changes that weaken protection, replace an API key or
+    // rewrite the system prompt only when the user ticks them.
+    const tooLong = dropOverlongPrompt(restored);
+    const items = planSettingsImport(restored, await chrome.storage.local.get(Object.keys(restored)));
+    const tooLongNote = tooLong.length ? ` ${t(currentLang, "settingsImport_promptTooLong_template", { max: String(MAX_CUSTOM_PROMPT_CHARS) })}` : "";
+    if (!items.length) {
+      msgEl.style.color = "#f5c451";
+      msgEl.textContent = `${t(currentLang, "settingsImport_noChanges")}${tooLongNote}`;
+      setTimeout(() => (msgEl.textContent = ""), 6000);
+      return;
+    }
+    const approved = await confirmSettingsImport(items, restored);
+    if (!approved) {
+      msgEl.style.color = "#f5c451";
+      msgEl.textContent = t(currentLang, "settingsImport_cancelled");
+      setTimeout(() => (msgEl.textContent = ""), 4000);
+      return;
+    }
+    const toWrite = approvedSettings(restored, items, approved);
+    const skipped = items.filter((item) => item.needsConfirm && !approved.has(item.key)).length;
+    const skippedNote = skipped ? ` ${t(currentLang, "settingsImport_skipped_template", { count: String(skipped) })}` : "";
+    if (!Object.keys(toWrite).length) {
+      msgEl.style.color = "#f5c451";
+      msgEl.textContent = `${t(currentLang, "settingsImport_cancelled")}${tooLongNote}`;
+      setTimeout(() => (msgEl.textContent = ""), 5000);
+      return;
+    }
+
+    await chrome.storage.local.set(toWrite);
     // Best-effort mirror: a failure here used to abort BEFORE
     // loadSavedApiSettings() refreshed the inputs, so a later Save
     // overwrote the just-imported keys with the stale field values.
-    await saveSettingsBackup(restored).catch((err) => console.warn("[AI Assistant] settings mirror write failed:", err));
+    await saveSettingsBackup(toWrite).catch((err) => console.warn("[AI Assistant] settings mirror write failed:", err));
 
     // The API-key inputs and prompt textarea are loaded once at page load
     // and have no storage.onChanged listener,
@@ -1248,13 +1376,13 @@ async function importSettings() {
       // showing a plain success message, so the user re-exports encrypted and
       // deletes the plaintext file.
       msgEl.style.color = "#f5c451";
-      msgEl.textContent = `${t(currentLang, "settingsBackup_import_success")} ${t(currentLang, "settingsBackup_warn_plainKeys_template", { keys: plainSecretKeys.join(", ") })}`;
+      msgEl.textContent = `${t(currentLang, "settingsBackup_import_success")} ${t(currentLang, "settingsBackup_warn_plainKeys_template", { keys: plainSecretKeys.join(", ") })}${skippedNote}${tooLongNote}`;
       setTimeout(() => (msgEl.textContent = ""), 8000);
       return;
     }
-    msgEl.style.color = "#4ade80";
-    msgEl.textContent = t(currentLang, "settingsBackup_import_success");
-    setTimeout(() => (msgEl.textContent = ""), 3000);
+    msgEl.style.color = skipped || tooLong.length ? "#f5c451" : "#4ade80";
+    msgEl.textContent = `${t(currentLang, "settingsBackup_import_success")}${skippedNote}${tooLongNote}`;
+    setTimeout(() => (msgEl.textContent = ""), skipped || tooLong.length ? 7000 : 3000);
   } catch (err) {
     settingsBackupFail(err);
   } finally {

@@ -100,7 +100,7 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
     },
     body: JSON.stringify({
       model: model.apiModel,
-      messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang, ctx.translateMode),
+      messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang, ctx.translateMode, { boundaryId: ctx.boundaryId, attachments: ctx.attachments }),
       stream: true,
       ...(model.thinking ? { thinking: { type: model.thinking } } : {}),
       ...(model.reasoningEffort ? { reasoning_effort: model.reasoningEffort } : {}),
@@ -129,7 +129,7 @@ async function streamGroq(model, question, pageContext, history, images, ctx) {
     },
     body: JSON.stringify({
       model: model.apiModel,
-      messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang, ctx.translateMode),
+      messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang, ctx.translateMode, { boundaryId: ctx.boundaryId, attachments: ctx.attachments }),
       stream: true,
     }),
   }, ctx);
@@ -160,7 +160,7 @@ async function streamOpenRouter(model, question, pageContext, history, images, c
     },
     body: JSON.stringify({
       model: model.apiModel,
-      messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang, ctx.translateMode),
+      messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang, ctx.translateMode, { boundaryId: ctx.boundaryId, attachments: ctx.attachments }),
       stream: true,
     }),
   }, ctx);

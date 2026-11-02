@@ -203,6 +203,8 @@ body.panel-resizing * { cursor: row-resize !important; user-select: none !import
 .remote-image { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; padding: 4px 8px; margin: 2px 0; border: 1px dashed var(--border, #888); border-radius: 6px; font-size: 0.9em; opacity: 0.9; cursor: pointer; }
 .remote-image:hover, .remote-image:focus-visible { opacity: 1; border-style: solid; }
 .remote-image.failed { cursor: default; opacity: 0.8; }
+.remote-image.has-query { border-color: var(--warning, #c58a00); }
+.remote-image-warning { flex-basis: 100%; font-size: 0.9em; }
 .bubble-text img {
   display: block;
   max-width: 100%;

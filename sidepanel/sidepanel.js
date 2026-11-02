@@ -21,7 +21,9 @@ import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-s
 // in scripts/test-conversation-store.mjs).
 import { mergeConversationLists, sortedByNewest, resolveContextEpoch, withHistoryLock, withNamedLock, CONTEXT_ACTION_LOCK } from "../conversation-store.js";
 import { markdownToHtml } from "./rendering/markdown.js";
-import { makeTopicTitle, toStoredMessage, compressForQuota, rememberQuotaCondensedContent } from "./history-manager.js";
+import { makeTopicTitle, toStoredMessage, compressForQuota, rememberQuotaCondensedAttachments } from "./history-manager.js";
+import { sanitizeAttachmentName, normalizeAttachments, migrateLegacyConversations } from "../attachments.js";
+import { sanitizePiiMap, usedPiiMap, restoreWithMap, restoreInHtmlText } from "../privacy/pii-filter.js";
 import {
   MAX_ATTACHMENTS,
   MAX_TOTAL_ATTACHMENT_TEXT_CHARS,
@@ -388,6 +390,10 @@ let currentAssistantBubble = null;
 // plain text (see setBubbleContent) and stored with plain: true.
 let pendingPlainReply = false;
 let currentAssistantText = "";
+// placeholder -> value map of the in-flight request (sent by the worker as
+// PII_MAP). The reply text itself keeps its placeholders ([EMAIL#1]); values
+// are put back only when it is DISPLAYED, and only in text (setBubbleContent).
+let currentPiiMap = null;
 let isStreaming = false;
 let pendingModelLabel = "";
 let pendingModelId = "";
@@ -458,6 +464,7 @@ function connectPort() {
         role: "assistant",
         content: textToKeep,
         displayContent: currentAssistantText,
+        ...piiMapField(currentAssistantText),
         modelLabel: pendingModelLabel,
         modelId: pendingModelId,
         plain: pendingPlainReply,
@@ -465,6 +472,7 @@ function connectPort() {
       saveConversations().catch(notifyHistorySaveFailure);
     }
     currentAssistantText = "";
+    currentPiiMap = null;
     autoScrollEnabled = false;
     setStreaming(false);
     addBubble("error", t(currentLang, "error_connectionLost"));
@@ -680,8 +688,32 @@ function remoteImageNode(doc, url, alt) {
   box.setAttribute("data-src", url);
   box.setAttribute("data-alt", alt);
   box.setAttribute("title", url);
-  box.textContent = `🖼️ ${t(currentLang, "imageRemote_load")}${alt.trim() ? ` - ${alt.trim()}` : ""}`;
+  fillRemoteImageBox(box, url, alt);
   return box;
+}
+
+// What a remote-image placeholder says BEFORE the user clicks: where the image
+// comes from (the host name, in plain sight) and - when the address carries a
+// query string - that loading it sends those parameters to that host. A model
+// reply steered by a page can put anything it saw into such a query; the
+// panel never loads it by itself, and this tells the user what a click does.
+function fillRemoteImageBox(box, url, alt) {
+  let host = "";
+  let hasQuery = false;
+  try {
+    const u = new URL(url);
+    host = u.hostname;
+    hasQuery = u.search.length > 1;
+  } catch { /* the sanitizer only passes http(s) URLs here; keep the label plain */ }
+  const label = `🖼️ ${t(currentLang, "imageRemote_load")}${host ? ` ${t(currentLang, "imageRemote_host_template", { host })}` : ""}${alt.trim() ? ` - ${alt.trim()}` : ""}`;
+  box.textContent = label;
+  box.classList.toggle("has-query", hasQuery);
+  if (hasQuery) {
+    const warning = document.createElement("span");
+    warning.className = "remote-image-warning";
+    warning.textContent = t(currentLang, "imageRemote_queryWarning_template", { host });
+    box.append(warning);
+  }
 }
 
 // Re-label remote-image placeholders already rendered in the chat when the
@@ -691,8 +723,7 @@ function refreshRemoteImageLabels() {
   if (!chatLog) return;
   for (const box of chatLog.querySelectorAll(".remote-image[data-src]")) {
     if (box.classList.contains("failed")) continue;
-    const alt = box.getAttribute("data-alt") || "";
-    box.textContent = `🖼️ ${t(currentLang, "imageRemote_load")}${alt.trim() ? ` - ${alt.trim()}` : ""}`;
+    fillRemoteImageBox(box, box.getAttribute("data-src") || "", box.getAttribute("data-alt") || "");
   }
 }
 
@@ -846,7 +877,7 @@ function isUserSelectingInBubble(bubbleEl) {
   }
 }
 
-function setBubbleContent(bubbleEl, text, role, plain = false) {
+function setBubbleContent(bubbleEl, text, role, plain = false, piiMap = null) {
   const textEl = getBubbleTextEl(bubbleEl);
   if (!textEl) return;
   if (role === "assistant" && plain) {
@@ -855,9 +886,14 @@ function setBubbleContent(bubbleEl, text, role, plain = false) {
     // consecutive lines, drop indentation and turn *, _, #, > and | in the
     // source into formatting - i.e. change the original layout.
     textEl.classList.add("plain-text");
-    if (textEl.textContent !== text) textEl.textContent = text;
+    // Plain text has no links or images: a full restore cannot reach a URL.
+    const shown = restoreWithMap(text, piiMap);
+    if (textEl.textContent !== shown) textEl.textContent = shown;
   } else if (role === "assistant") {
-    const nextHtml = sanitizeRenderedHtml(markdownToHtml(text));
+    // Real values are restored AFTER Markdown is parsed and only in text
+    // nodes: a link target or image URL that holds a placeholder keeps it, so a
+    // reply steered by a page cannot make a URL carry the user's real e-mail.
+    const nextHtml = sanitizeRenderedHtml(restoreInHtmlText(markdownToHtml(text), piiMap));
     if (textEl.innerHTML !== nextHtml) {
       textEl.innerHTML = nextHtml;
       enhanceCodeBlocks(textEl);
@@ -867,7 +903,7 @@ function setBubbleContent(bubbleEl, text, role, plain = false) {
   }
 }
 
-function addBubble(role, text, modelLabel, plain = false, beforeEl = null) {
+function addBubble(role, text, modelLabel, plain = false, beforeEl = null, piiMap = null) {
   emptyState.hidden = true;
   const wrap = document.createElement("div");
   wrap.className = `bubble ${role}`;
@@ -909,7 +945,7 @@ function addBubble(role, text, modelLabel, plain = false, beforeEl = null) {
   }
 
   wrap.appendChild(textEl);
-  setBubbleContent(wrap, text, role, plain);
+  setBubbleContent(wrap, text, role, plain, piiMap);
 
   if (beforeEl && beforeEl.parentNode === chatLog) chatLog.insertBefore(wrap, beforeEl);
   else chatLog.appendChild(wrap);
@@ -1064,6 +1100,7 @@ function stopActiveRequest() {
     clearDeferredFinalRender();
   }
   currentAssistantText = "";
+  currentPiiMap = null;
   autoScrollEnabled = false;
   setStreaming(false);
 }
@@ -1404,7 +1441,7 @@ function applyDeferredFinalRender() {
   }
   if (isUserSelectingInBubble(pending.bubble)) return;
   deferredFinalRender = null;
-  setBubbleContent(pending.bubble, pending.text, "assistant", pending.plain);
+  setBubbleContent(pending.bubble, pending.text, "assistant", pending.plain, pending.piiMap);
 }
 
 document.addEventListener("selectionchange", applyDeferredFinalRender);
@@ -1430,13 +1467,14 @@ function renderStreamingBubble(force = false) {
         bubble: currentAssistantBubble,
         text: currentAssistantText,
         plain: pendingPlainReply,
+        piiMap: currentPiiMap,
       };
       return;
     }
     scheduleStreamingRender();
     return;
   }
-  setBubbleContent(currentAssistantBubble, currentAssistantText, "assistant", pendingPlainReply);
+  setBubbleContent(currentAssistantBubble, currentAssistantText, "assistant", pendingPlainReply, currentPiiMap);
   scrollToBottom();
 }
 function scheduleStreamingRender() {
@@ -1467,6 +1505,14 @@ function flushStreamingRender() {
   renderStreamingBubble(true);
 }
 
+// `piiMap` field for an assistant history entry: only the placeholders the reply
+// uses. The entry keeps the reply in placeholder form (what the model wrote);
+// the values are put back when it is displayed.
+function piiMapField(replyText) {
+  const used = usedPiiMap(replyText, currentPiiMap);
+  return used ? { piiMap: used } : {};
+}
+
 function handlePortMessage(msg) {
   // Ignore anything that isn't for the request this side is currently
   // tracking - either a stray message for a request already stopped via
@@ -1475,6 +1521,11 @@ function handlePortMessage(msg) {
   // sent on the same port.
   if (msg.requestId !== currentRequestId) return;
   switch (msg.type) {
+    case "PII_MAP": {
+      // Arrives before START; valid for this request only.
+      currentPiiMap = sanitizePiiMap(msg.map);
+      break;
+    }
     case "START": {
       // Apply (not drop) a pending final render so the previous bubble keeps
       // the tail that arrived while the user was selecting in it. A still
@@ -1521,12 +1572,14 @@ function handlePortMessage(msg) {
         role: "assistant",
         content: currentAssistantText,
         displayContent: currentAssistantText,
+        ...piiMapField(currentAssistantText),
         modelLabel: pendingModelLabel,
         modelId: pendingModelId,
         plain: pendingPlainReply,
       });
       currentAssistantBubble = null;
       currentAssistantText = "";
+      currentPiiMap = null;
       autoScrollEnabled = false;
       setStreaming(false);
       saveConversations().catch(notifyHistorySaveFailure);
@@ -1560,6 +1613,7 @@ function handlePortMessage(msg) {
           role: "assistant",
           content: textToKeep,
           displayContent: currentAssistantText,
+          ...piiMapField(currentAssistantText),
           modelLabel: pendingModelLabel,
           modelId: pendingModelId,
           plain: pendingPlainReply,
@@ -1567,6 +1621,7 @@ function handlePortMessage(msg) {
         saveConversations().catch(notifyHistorySaveFailure);
       }
       currentAssistantText = "";
+      currentPiiMap = null;
       autoScrollEnabled = false;
       addBubble("error", t(currentLang, "error_withMessage_template", { message: msg.error }));
       setStreaming(false);
@@ -1649,7 +1704,7 @@ async function saveConversationsWithLock() {
   // the current conversation is what gets merged and written.
   syncCurrentConversationFromHistory();
   let merged = sortedByNewest(
-    mergeConversationLists(stored[HISTORY_STORAGE_KEY], conversations, currentConversationId)
+    mergeConversationLists(migrateLegacyConversations(stored[HISTORY_STORAGE_KEY]), conversations, currentConversationId)
   ).slice(0, MAX_SAVED_CONVERSATIONS);
   // Storage-quota escalation, most gentle first: (1) write as-is, (2) shrink
   // attachment previews and drop display-only copies (every conversation
@@ -1686,13 +1741,13 @@ async function saveConversationsWithLock() {
       merged = merged.slice(0, kept);
     }
   }
-  // Remember any quota-condensed projection on the live messages: the next
-  // save re-projects the current conversation from `history`, and a fresh
-  // full-text copy would no longer match the stored condensed copy's merge
-  // identity - the union merge would keep both copies of the turn (duplicate
-  // bubble after a reload, same question sent to the model twice).
+  // Remember a quota-shrunken attachment preview on the live messages, so the
+  // next save of this conversation starts from the small preview instead of
+  // trying the large one and failing on quota again. (The merge identity of a
+  // message is role + model + content, and `content` is never condensed, so
+  // this has no effect on duplicate detection.)
   const mergedCurrent = merged.find((c) => c?.id === currentConversationId);
-  if (mergedCurrent) rememberQuotaCondensedContent(history, mergedCurrent.messages);
+  if (mergedCurrent) rememberQuotaCondensedAttachments(history, mergedCurrent.messages);
   conversations = merged;
   renderHistorySelect();
   scheduleHistoryRender();
@@ -1755,7 +1810,7 @@ function renderConversation(messages) {
   emptyState.hidden = true;
   for (const message of messages) {
     if (message.role !== "user" && message.role !== "assistant") continue;
-    addBubble(message.role, message.displayContent || message.content, message.role === "assistant" ? message.modelLabel : undefined, message.role === "assistant" && message.plain === true);
+    addBubble(message.role, message.displayContent || message.content, message.role === "assistant" ? message.modelLabel : undefined, message.role === "assistant" && message.plain === true, null, message.role === "assistant" ? sanitizePiiMap(message.piiMap) : null);
   }
   // Force-scroll: opening a past conversation must show its LATEST messages.
   // autoScrollEnabled is false outside an active stream (it is only set on
@@ -1777,7 +1832,9 @@ function startNewTopic() {
 
 async function loadConversations() {
   const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY]);
-  conversations = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
+  // migrateLegacyConversations: messages saved before attachments became
+  // structured held them inline in `content`; convert them once, here.
+  conversations = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? migrateLegacyConversations(stored[HISTORY_STORAGE_KEY]) : [];
   // Keep at most MAX_SAVED_CONVERSATIONS saved conversations. Conversations are
   // ordered newest-first whenever they are saved, so entries beyond the limit
   // are the oldest ones.
@@ -1837,24 +1894,20 @@ function refreshContextBarAfterConversationSwitch() {
   }
 }
 
-function attachmentContextText() {
-  const usable = attachments.filter((a) => a.status === "ready");
-  if (!usable.length) return "";
-  const textParts = [];
-  const imageParts = [];
-  for (const a of usable) {
-    if (a.kind === "image") {
-      imageParts.push(`- ${a.name} (image attachment; image data is included in the current request)`);
-    } else if (a.text) {
-      textParts.push(`\n===== FILE: ${a.name} =====\n${a.text}`);
-    }
-  }
-  return [
-    "\n\n[ATTACHMENTS]",
-    imageParts.length ? `Images attached (image data sent with this request):\n${imageParts.join("\n")}` : "",
-    textParts.length ? `Text-based attachment contents:${textParts.join("\n")}` : "",
-    "[/ATTACHMENTS]"
-  ].filter(Boolean).join("\n");
+// The ready attachments of THIS request as structured data. They are sent (and
+// stored) as `attachments` on the message and only turned into text by
+// providers/messages.js, inside a random UNTRUSTED boundary - they are never
+// glued onto the user's own words. normalizeAttachments() also cleans the names.
+function attachmentPayload() {
+  return normalizeAttachments(
+    attachments
+      .filter((a) => a.status === "ready")
+      .map((a) => {
+        if (a.kind === "image") return { name: a.name, kind: "image" };
+        if (a.kind === "zip") return { name: a.name, kind: "zip", note: a.modelNote || "", entries: a.entries || [] };
+        return { name: a.name, kind: "text", note: a.modelNote || "", text: a.text };
+      })
+  );
 }
 
 function fileExtension(name) {
@@ -1979,7 +2032,7 @@ function addToZipBucket(bucket, name) {
   bucket.count++;
   // One bounded line: the name ends up in a tooltip and in the model note.
   if (bucket.names.length < ZIP_REPORT_MAX_NAMES) {
-    bucket.names.push(String(name).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").trim().slice(0, 120));
+    bucket.names.push(sanitizeAttachmentName(name));
   }
 }
 
@@ -2029,7 +2082,7 @@ async function extractZipText(file, maxTotalChars = MAX_TOTAL_EXTRACTED_CHARS) {
 
   let offset = centralOffset;
   let totalChars = 0;
-  const parts = [];
+  const entries = []; // { name, text }: structured, never glued into one string
   let entriesRead = 0;
   // Text entries read so far, and whether more may still be read. Once the entry
   // or the character limit is hit the loop keeps walking the directory only to
@@ -2083,7 +2136,7 @@ async function extractZipText(file, maxTotalChars = MAX_TOTAL_EXTRACTED_CHARS) {
     const ignoreReason = zipIgnoreReason(name);
     if (ignoreReason) {
       addToZipBucket(report.ignored, name);
-      report.ignoredReasons.add(ignoreReason);
+      report.ignoredReasons.add(sanitizeAttachmentName(ignoreReason));
       continue;
     }
     // From here on the entry is a text file the user may want, so whenever it is
@@ -2127,12 +2180,12 @@ async function extractZipText(file, maxTotalChars = MAX_TOTAL_EXTRACTED_CHARS) {
     const remain = maxChars - totalChars;
     const kept = text.length > remain ? text.slice(0, remain) : text;
     if (kept.length < text.length) addToZipBucket(report.truncated, name);
-    parts.push(`\n===== ZIP ENTRY: ${name} =====\n${kept}`);
+    entries.push({ name: sanitizeAttachmentName(name), text: kept });
     totalChars += kept.length;
     if (totalChars >= maxChars) limitReached = true;
   }
 
-  return { text: parts.join("\n"), report };
+  return { entries, report };
 }
 
 // Describes what extractZipText() left out, as `items` (one line for the
@@ -2162,7 +2215,7 @@ function describeZipReport(report) {
       "",
       t(currentLang, "attachment_note_limits_template", { entries: MAX_ZIP_ENTRIES, chars: report.maxChars || MAX_TOTAL_EXTRACTED_CHARS, kb })
     ].join("\n"),
-    forModel: `\n===== ZIP NOTE =====\nNot every file of this ZIP is included below. Left out - ${rows.map((row) => `${row.model}: ${row.count} (${listed(row)})`).join("; ")}.`
+    forModel: `Not every file of this ZIP is included below. Left out - ${rows.map((row) => `${row.model}: ${row.count} (${listed(row)})`).join("; ")}.`
   };
 }
 
@@ -2172,7 +2225,7 @@ function describeTextTruncation(totalChars, keptChars = MAX_TOTAL_EXTRACTED_CHAR
   return {
     items: t(currentLang, "attachment_note_truncatedChars_template", { kept, total: totalChars }),
     detail: "",
-    forModel: `[NOTE: this file is cut after the first ${kept} of ${totalChars} characters.]`
+    forModel: `This file is cut after the first ${kept} of ${totalChars} characters.`
   };
 }
 
@@ -2291,10 +2344,13 @@ async function processFile(file) {
       if (!item.text.trim()) throw new Error(t(currentLang, "attachment_error_emptyFile"));
       let cutFrom = 0;
       let keptChars = MAX_TOTAL_EXTRACTED_CHARS;
+      item.modelNote = "";
       if (item.text.length > remaining) {
         cutFrom = item.text.length;
         keptChars = remaining;
-        item.text = `${describeTextTruncation(cutFrom, keptChars).forModel}\n${cutAtCodePointBoundary(item.text, keptChars)}`;
+        // The remark for the model is a separate field, not text mixed into the file's own.
+        item.modelNote = describeTextTruncation(cutFrom, keptChars).forModel;
+        item.text = cutAtCodePointBoundary(item.text, keptChars);
       }
       item.kind = "text";
       setAttachmentStatus(item, "ready", t(currentLang, "attachment_ready"));
@@ -2306,14 +2362,16 @@ async function processFile(file) {
       if (remaining <= 0) {
         throw new Error(t(currentLang, "attachment_error_totalTextLimit_template", { chars: String(MAX_TOTAL_EXTRACTED_CHARS) }));
       }
-      const { text, report } = await extractZipText(file, remaining);
+      const { entries, report } = await extractZipText(file, remaining);
       const note = describeZipReport(report);
-      if (!text.trim()) {
+      if (!entries.length) {
         // Nothing was read. If text files were left out (ignored, too large ...) say so: "no text files" alone would be wrong.
         const reason = t(currentLang, "attachment_error_noZipText");
         throw new Error(note ? `${reason} — ${note.items}` : reason);
       }
-      item.text = note ? `${note.forModel}\n${text}` : text;
+      item.text = "";
+      item.entries = entries;
+      item.modelNote = note ? note.forModel : "";
       item.kind = "zip";
       setAttachmentStatus(item, "ready", t(currentLang, "attachment_ready"));
       setAttachmentNote(item, note ? { report } : null);
@@ -2916,8 +2974,8 @@ if (!SpeechRecognitionCtor) {
 async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "", noWebResearch = false, includePageImages = false, forceWebResearch = false, translateMode = false, translateSource = null, translateSourceFormat = "text", translateSourceTruncated = false) {
   e?.preventDefault?.();
   const question = forcedQuestion !== null ? String(forcedQuestion).trim() : questionInput.value.trim();
-  const attachmentText = attachmentContextText();
-  if ((!question && !attachmentText) || isStreaming) return;
+  const attachmentList = attachmentPayload();
+  if ((!question && !attachmentList.length) || isStreaming) return;
   // A still-reading attachment (a multi-MB ZIP can take a while) is NOT part
   // of this request - only ready ones are - and the submit used to send
   // without it AND delete its chip, hiding that the file never went out.
@@ -2932,7 +2990,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   // the provider payload bounded if a future code path adds attachments.
   const readyForBudget = attachments.filter((a) => a.status === "ready");
   // The note/header text prepended to an attachment (and the per-file headers
-  // added by attachmentContextText) is small but real. A ZIP with the maximum
+  // added when the request is built) is small but real. A ZIP with the maximum
   // 80 entries can add roughly 12k characters of entry headers and notes, so
   // allow a bounded metadata overhead beyond the raw-text budget.
   if (attachmentTextChars(readyForBudget) > MAX_TOTAL_EXTRACTED_CHARS + 20000) {
@@ -2958,6 +3016,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   pendingModelId = selectedModel.id;
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   currentRequestId = requestId;
+  currentPiiMap = null;
   // Lock the composer right away. Setting this only after the awaited storage
   // write below left a window in which a second submit passed the isStreaming
   // guard above.
@@ -3000,12 +3059,13 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       ? String(forcedDisplayQuestion).trim()
       : (question || t(currentLang, "attachedFilesFallback"));
     const readyAttachments = attachments.filter((a) => a.status === "ready");
-    const displayContent = attachmentText
+    const displayContent = attachmentList.length
       ? `${displayQuestion}\n\n📎 ${readyAttachments.map((a) => a.name).join(", ")}`
       : displayQuestion;
     userBubble = addBubble("user", displayContent);
-    const baseQuestionForApi = `${question || "Please analyze the attached files."}${attachmentText}`;
-    history.push({ role: "user", content: baseQuestionForApi, displayContent, modelLabel: "" });
+    // `content` is only what the user typed; the files ride along as structured data.
+    const baseQuestionForApi = question || "Please analyze the attached files.";
+    history.push({ role: "user", content: baseQuestionForApi, ...(attachmentList.length ? { attachments: attachmentList } : {}), displayContent, modelLabel: "" });
     userTurnPushed = true;
     if (!currentConversationId) {
       currentConversationId = createConversation().id;
@@ -3125,9 +3185,18 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     if (epochInfo.changed && epochInfo.previousPage) {
       pageContext = { ...pageContext, previousPage: epochInfo.previousPage };
     }
+    // Earlier replies are kept with placeholders; the worker redacts the whole
+    // history again, so it gets the real values back (it numbers them afresh,
+    // consistently with the user turns).
     const historyForApi = history
       .slice(epochInfo.start, -1)
-      .slice(-(MAX_HISTORY_TURNS * 2));
+      .slice(-(MAX_HISTORY_TURNS * 2))
+      .map((m) => {
+        if (m.role !== "assistant" || !m.piiMap) return m;
+        const { piiMap, ...rest } = m;
+        const map = sanitizePiiMap(piiMap);
+        return { ...rest, content: restoreWithMap(m.content, map), displayContent: restoreWithMap(m.displayContent ?? m.content, map) };
+      });
     if (epochInfo.changed) {
       // Persist the new epoch boundary now, not only on DONE: a failed request
       // with no assistant text may never reach the normal save, and the next
@@ -3143,6 +3212,9 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       payload: {
         requestId,
         question: questionForApi,
+        // Attached files, structured (see attachments.js); background.js builds
+        // the untrusted ATTACHMENT blocks from them.
+        attachments: attachmentList,
         // Defense in depth: the background worker also receives an explicit
         // flag so an unchecked "Read current page" can never be interpreted as
         // a request to use/send page content, even if pageContext were ever
@@ -3196,11 +3268,11 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     }
 
     // Attachments are one-shot. Everything this request needed was captured
-    // above (readyAttachments / attachmentText), the user bubble already lists
+    // above (readyAttachments / attachmentList), the user bubble already lists
     // the file names, and the assistant reply will be appended to the same
     // conversation - so the chips are removed now. Previously they stayed,
     // silently re-uploading every attached image with each follow-up message
-    // (and re-inlining the attachment text block) until the user removed every
+    // (and re-sending the attachment text) until the user removed every
     // chip by hand. Chips that are STILL READING are kept: their files were
     // not part of this request, and removing the chip would hide that.
     attachments = attachments.filter((a) => a.status === "reading");

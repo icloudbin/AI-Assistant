@@ -31,6 +31,10 @@ export function attachmentTextChars(attachments) {
   for (const attachment of Array.isArray(attachments) ? attachments : []) {
     if (!attachment || attachment.kind === "image") continue;
     if (typeof attachment.text === "string") total += attachment.text.length;
+    // A ZIP keeps its text as entries ({ name, text }).
+    if (Array.isArray(attachment.entries)) {
+      for (const entry of attachment.entries) total += String(entry?.text || "").length;
+    }
   }
   return total;
 }

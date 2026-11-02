@@ -2,7 +2,7 @@
 // Unit tests for pii-filter.js: what must be redacted, what must be left alone,
 // numbered placeholders and restoring the real values in a reply.
 // Run:  node scripts/test-pii-filter.mjs
-import { redactSensitive as R, createRedactionSession, restorePlaceholders, restoreNamePlaceholders, PlaceholderRestorer, redactOutbound } from "../privacy/pii-filter.js";
+import { redactSensitive as R, createRedactionSession, restorePlaceholders, restoreNamePlaceholders, placeholderMapFromSession, sanitizePiiMap, usedPiiMap, restoreWithMap, restoreInHtmlText, redactOutbound } from "../privacy/pii-filter.js";
 
 let failed = 0;
 const check = (name, ok, extra = "") => {
@@ -98,22 +98,25 @@ check('"Customer Name: John Smith" still redacts (person-plausible qualifier)', 
   check("literal token reserves its number", red.includes("[EMAIL#1]") && red.includes("[EMAIL#2]"), red);
   check("literal token survives restore", restorePlaceholders("Here: [EMAIL#1] and [EMAIL#2].", s) === "Here: [EMAIL#1] and jane@example.com.");
   let acc = "";
-  const stream = new PlaceholderRestorer(s, (d) => { acc += d; });
-  for (const piece of ["Here: [EMA", "IL#1] and [EMAIL", "#2]."]) stream.push(piece);
-  stream.flush();
-  check("literal token survives the streaming restorer", acc === "Here: [EMAIL#1] and jane@example.com.", JSON.stringify(acc));
+  // v1.10.140: the worker streams the placeholders as they are; the panel
+  // accumulates the raw chunks and restores values from the PII map when it
+  // renders. A placeholder split across chunks restores once the pieces join.
+  const map = placeholderMapFromSession(s);
+  acc = restoreWithMap("Here: [EMA" + "IL#1] and [EMAIL" + "#2].", map);
+  check("literal token survives map-based restore (split across chunks)", acc === "Here: [EMAIL#1] and jane@example.com.", JSON.stringify(acc));
 }
 {
-  // A backslash at a CHUNK boundary escaping the next chunk's placeholder:
-  // emitting it immediately left a stray "\" before the restored value.
+  // v1.10.140: restored values can never become markup. restoreInHtmlText
+  // HTML-escapes every value it inserts into text nodes, and never touches
+  // an address (href / src keep their placeholders).
   const s = createRedactionSession();
-  R("call 415-555-0132 or 650-555-0134 now", s); // [PHONE#1], [PHONE#2]
-  let out = "";
-  const r = new PlaceholderRestorer(s, (d) => { out += d; });
-  r.push("see \\");
-  r.push("[PHONE#2\] ok");
-  r.flush();
-  check("cross-chunk escaped placeholder has no stray backslash", out === "see 650-555-0134 ok", JSON.stringify(out));
+  const red = R("call 415-555-0132 now", s); // [PHONE#1]
+  const map = placeholderMapFromSession(s);
+  check("setup: phone redacted to a numbered placeholder", red.includes("[PHONE#1]"), red);
+  const html = `<p>call [PHONE#1] &lt;tag&gt; and <a href="x?q=[PHONE#1]">link</a></p>`;
+  const restored = restoreInHtmlText(html, map);
+  check("restored value appears in the text node", restored.includes("call 415-555-0132 &lt;tag&gt;"), restored);
+  check("a link target keeps its placeholder", /href="x\?q=\[PHONE#1\]"/.test(restored), restored);
 }
 {
   // numberPlaceholder: a rule whose matched value ends with "]" (or starts at
@@ -183,20 +186,28 @@ check('"Customer Name: John Smith" still redacts (person-plausible qualifier)', 
   check("restore: exact round trip", restorePlaceholders(red, s) === text, restorePlaceholders(red, s));
   check("restore: escaped brackets from markdown", restorePlaceholders("Write to \\[EMAIL#1\\] now", s) === "Write to jane@x.com now");
   check("restore: unknown placeholder untouched", restorePlaceholders("[EMAIL#9] [FOO#1]", s) === "[EMAIL#9] [FOO#1]");
-  // streamed in tiny pieces, including splits inside a placeholder
-  for (const size of [1, 2, 3, 5, 7]) {
-    const out = [];
-    const pr = new PlaceholderRestorer(s, (x) => out.push(x));
-    for (let i = 0; i < red.length; i += size) pr.push(red.slice(i, i + size));
-    pr.flush();
-    check(`restore: streamed in ${size}-char pieces`, out.join("") === text, out.join(""));
-  }
-  const out = [];
-  const pr = new PlaceholderRestorer(s, (x) => out.push(x));
-  pr.push("Brackets [like this and more text that is long enough to be released");
-  pr.push(" and [EMAIL#2]");
-  pr.flush();
-  check("restore: a stray '[' does not stall the stream", out.join("") === "Brackets [like this and more text that is long enough to be released and bob@y.org", out.join(""));
+  // v1.10.140: the map is what the panel uses. Full-text restore round-trips;
+  // the map is sanitized (bad keys / oversized values dropped); usedPiiMap
+  // keeps only the placeholders a stored reply actually uses - and restoring
+  // with THAT subset still round-trips (the storage projection property).
+  const map = placeholderMapFromSession(s);
+  check("map: restore round trip", restoreWithMap(red, map) === text, restoreWithMap(red, map));
+  check("map: escaped-bracket form restores", restoreWithMap("Write to \\[EMAIL#1\\] now", map) === "Write to jane@x.com now");
+  check("map: unknown placeholder untouched", restoreWithMap("[EMAIL#9] [FOO#1]", map) === "[EMAIL#9] [FOO#1]");
+  check("map: no map is a no-op", restoreWithMap(red, null) === red);
+  const bad = sanitizePiiMap({ ...map, "not a placeholder": "x", "[BAD]": "y", "[EMAIL#3]": "z".repeat(3000) });
+  check("map: sanitizePiiMap drops malformed keys and oversized values", Object.keys(bad).every((k) => /^\[[A-Z_]+#\d+\]$/.test(k)) && !("[EMAIL#3]" in bad), JSON.stringify(Object.keys(bad)));
+  const used = usedPiiMap("mail [EMAIL#1] only", map);
+  check("map: usedPiiMap keeps only what the text uses", used && "[EMAIL#1]" in used && !("[PHONE#1]" in used) && !("[EMAIL#2]" in used), JSON.stringify(used || {}));
+  check("map: the used subset restores that text", restoreWithMap("mail [EMAIL#1] only", used) === "mail jane@x.com only", restoreWithMap("mail [EMAIL#1] only", used));
+  // restoreInHtmlText: text nodes restore, addresses never do.
+  const html = `<p>mail [EMAIL#1] and <a href="https://x/?a=[EMAIL#1]">write</a> <img src="https://x/?b=[EMAIL#2]" alt="to [EMAIL#1]"></p>`;
+  const inHtml = restoreInHtmlText(html, map);
+  check("html: text node restored", inHtml.includes("<p>mail jane@x.com and"), inHtml);
+  check("html: href keeps the placeholder", inHtml.includes('href="https://x/?a=[EMAIL#1]"'), inHtml);
+  check("html: src keeps the placeholder", inHtml.includes('src="https://x/?b=[EMAIL#2]"'), inHtml);
+  check("html: alt text restored (display text, not an address)", inHtml.includes('alt="to jane@x.com"'), inHtml);
+  check("html: no real value inside any address", !/https:\/\/x\/\?[ab]=jane@/.test(inHtml), inHtml);
 }
 {
   // The same session covers several fields (question + page + history).

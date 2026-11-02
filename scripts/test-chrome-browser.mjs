@@ -97,6 +97,10 @@ class ChromeSession {
       expression,
       returnByValue: true,
       awaitPromise: true,
+      // A transient user gesture: showModal() without one runs in a degraded
+      // mode that never fires the dialog's 'close' event (the import-review
+      // dialog and every dialog-based flow would hang otherwise).
+      userGesture: true,
     });
     if (res.exceptionDetails) {
       const text = res.exceptionDetails.exception?.description || res.exceptionDetails.text;
@@ -493,35 +497,74 @@ async function main() {
 
       const optionsResult = await session.eval(`
         (async () => {
-          // Simulate selecting a backup file via #importSettingsFile
-          const testBackup = {
-            format: "Brave AI Assistant Settings Backup",
-            exportedAt: new Date().toISOString(),
-            settings: {
-              apiKey: "test-gemini-key",
-              customPrompt: "", // Intentionally empty string to test #8
-              composerHeight: 180,
-              includeCurrentPageContext: false,
-              unknownKeyShouldBeIgnored: "malicious"
-            }
+          // v1.10.140 (S-06): an import shows a review dialog; changes that
+          // weaken protection, replace an API key or rewrite the system prompt
+          // start UNCHECKED and apply only when ticked. Cancel changes nothing.
+          await window.chrome.storage.local.set({
+            customPrompt: "existing prompt",
+            apiKey: "old-key",
+            composerHeight: 100,
+          });
+
+          const makeFile = () => {
+            const testBackup = {
+              format: "Brave AI Assistant Settings Backup",
+              exportedAt: new Date().toISOString(),
+              settings: {
+                apiKey: "new-key",          // replaces a stored key -> must be confirmed
+                customPrompt: "",           // clears the system prompt -> must be confirmed
+                composerHeight: 180,        // plain change -> applied without asking
+                includeCurrentPageContext: false, // protective direction -> applied
+                unknownKeyShouldBeIgnored: "malicious"
+              }
+            };
+            const dt = new DataTransfer();
+            dt.items.add(new File([JSON.stringify(testBackup)], "settings-backup.json", { type: "application/json" }));
+            return dt.files;
+          };
+          const importInput = document.getElementById("importSettingsFile");
+
+          // 1st import: CANCEL in the review dialog -> nothing may change.
+          importInput.files = makeFile();
+          importInput.dispatchEvent(new Event("change", { bubbles: true }));
+          await new Promise(r => setTimeout(r, 400));
+          const dialog = document.querySelector("dialog.import-review");
+          const dialogShown = !!dialog && dialog.open;
+          const riskyRows = dialog ? dialog.querySelectorAll(".import-row.risky").length : 0;
+          const unknownListed = dialog ? !dialog.textContent.includes("unknownKeyShouldBeIgnored") : false;
+          const cancelBtn = dialog ? dialog.querySelector("button.secondary") : null;
+          if (cancelBtn) cancelBtn.click();
+          await new Promise(r => setTimeout(r, 300));
+          const afterCancel = {
+            prompt: window.__mockStore?.customPrompt,
+            apiKey: window.__mockStore?.apiKey,
           };
 
-          const dt = new DataTransfer();
-          const file = new File([JSON.stringify(testBackup)], "settings-backup.json", { type: "application/json" });
-          dt.items.add(file);
-
-          const importInput = document.getElementById("importSettingsFile");
-          importInput.files = dt.files;
+          // 2nd import: tick every confirmation box, apply.
+          importInput.files = makeFile();
           importInput.dispatchEvent(new Event("change", { bubbles: true }));
-
+          await new Promise(r => setTimeout(r, 400));
+          const dialog2 = document.querySelector("dialog.import-review");
+          let ticked = 0;
+          if (dialog2) {
+            dialog2.querySelectorAll(".import-row input[type=checkbox]").forEach((b) => { b.checked = true; ticked++; });
+            const applyBtn = [...dialog2.querySelectorAll("button")].find((b) => !b.classList.contains("secondary"));
+            applyBtn.click();
+          }
           await new Promise(r => setTimeout(r, 400));
 
           const promptEl = document.getElementById("customPrompt");
           const msgEl = document.getElementById("msg");
 
           return {
+            dialogShown,
+            riskyRows,
+            unknownListed,
+            afterCancel,
+            ticked,
             promptValue: promptEl ? promptEl.value : null,
             storedPrompt: window.__mockStore?.customPrompt,
+            storedApiKey: window.__mockStore?.apiKey,
             storedComposerHeight: window.__mockStore?.composerHeight,
             storedIncludeContext: window.__mockStore?.includeCurrentPageContext,
             unknownKeyStored: "unknownKeyShouldBeIgnored" in (window.__mockStore || {}),
@@ -530,12 +573,19 @@ async function main() {
         })()
       `);
 
-      assert.equal(optionsResult.storedPrompt, "", "Empty string customPrompt preserved in storage");
+      assert.equal(optionsResult.dialogShown, true, "import opens the review dialog");
+      assert.equal(optionsResult.riskyRows, 2, "key replacement and prompt change are the two confirmed (risky) rows");
+      assert.equal(optionsResult.unknownListed, true, "unknown keys are filtered before the dialog");
+      assert.equal(optionsResult.afterCancel.prompt, "existing prompt", "Cancel: stored prompt untouched");
+      assert.equal(optionsResult.afterCancel.apiKey, "old-key", "Cancel: stored key untouched");
+      assert.equal(optionsResult.ticked, 2, "exactly the two confirmation boxes were ticked");
+      assert.equal(optionsResult.storedPrompt, "", "Confirmed empty customPrompt written to storage");
+      assert.equal(optionsResult.storedApiKey, "new-key", "Confirmed key replacement written to storage");
       assert.equal(optionsResult.promptValue, "", "DOM input value updated to empty string");
       assert.equal(optionsResult.storedComposerHeight, 180, "composerHeight validated and saved as number");
       assert.equal(optionsResult.storedIncludeContext, false, "includeCurrentPageContext validated and saved as boolean");
       assert.equal(optionsResult.unknownKeyStored, false, "Unknown settings key filtered out");
-      recordPass("Fix #8 (Options Backup/Restore)", "Empty string values correctly restored, numeric/boolean settings strictly validated in Chrome DOM");
+      recordPass("Fix #8 (Options Backup/Restore)", "Import review dialog: cancel changes nothing, confirmed changes applied, types validated");
     } catch (err) {
       recordFail("Fix #8 Options Backup", err);
     }

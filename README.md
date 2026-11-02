@@ -15,6 +15,7 @@ A Chromium side-panel extension (Manifest V3, Chrome 116 or newer) that answers 
 AI-Assistant/
 ├── manifest.json
 ├── models.js
+├── attachments.js
 ├── background.js
 ├── content.js
 ├── storage-keys.js
@@ -41,14 +42,18 @@ AI-Assistant/
 ├── icons/
 │   └── icon16.png / icon48.png / icon128.png (declared in manifest.json's "icons" and "action.default_icon" fields)
 ├── options/
-│   └── options.html / options.js
+│   └── options.html / options.js / settings-import.js
 ├── scripts/
 │   ├── README.md
 │   ├── build-package.mjs
 │   ├── check-package.mjs
+│   ├── e2e-attachments.mjs
 │   ├── e2e-chat-flow.mjs
 │   ├── e2e-drop-image.mjs
+│   ├── e2e-import-settings.mjs
+│   ├── e2e-pii-render.mjs
 │   ├── e2e-restore-history.mjs
+│   ├── e2e-tabs-permission.mjs
 │   ├── test-attachment-budget.mjs
 │   ├── test-chrome-browser.mjs
 │   ├── test-content-visibility.mjs
@@ -63,13 +68,16 @@ AI-Assistant/
 │   ├── test-outbound-pii.mjs
 │   ├── test-pii-filter.mjs
 │   ├── test-pii-name-perf.mjs
+│   ├── test-pii-restore.mjs
 │   ├── test-providers-messages.mjs
 │   ├── test-sensitive-sites.mjs
 │   ├── test-settings-crypto.mjs
+│   ├── test-settings-import.mjs
 │   ├── test-settings-storage-keys.mjs
 │   ├── test-stop-streaming.mjs
 │   ├── test-translate-replay.mjs
 │   ├── test-translation-paragraphs.mjs
+│   ├── test-untrusted-boundary.mjs
 │   ├── test-url-safety.mjs
 │   └── test-sidepanel-context.py
 └── sidepanel/

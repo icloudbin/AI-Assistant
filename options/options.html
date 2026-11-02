@@ -57,6 +57,18 @@
   .backup-passphrase { margin-top: 8px; }
   .backup-passphrase[hidden] { display: none; }
   .language-section select { margin-top: 6px; }
+  dialog.import-review { width: min(560px, calc(100vw - 32px)); max-height: 80vh; overflow: auto; background: var(--panel); color: var(--text);
+                         border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+  dialog.import-review::backdrop { background: rgba(0, 0, 0, 0.55); }
+  dialog.import-review h3 { margin: 0 0 6px; font-size: 15px; }
+  .import-row { display: flex; gap: 10px; align-items: flex-start; margin: 10px 0 0; padding: 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 13px; }
+  .import-row.risky { border-color: #c58a00; }
+  .import-row input[type="checkbox"] { width: auto; margin-top: 2px; }
+  .import-row-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .import-change { color: var(--muted); font-size: 12px; }
+  .import-badge { color: #c58a00; font-size: 12px; font-weight: 600; }
+  .import-row pre { margin: 0; padding: 6px 8px; max-height: 120px; overflow: auto; white-space: pre-wrap; word-break: break-word; background: var(--bg); border-radius: 6px; font: inherit; font-size: 12px; }
+  dialog.import-review button.secondary { background: var(--button-bg); color: var(--text); border: 1px solid var(--border); }
   .language-section label { margin-top: 14px; }
   .version-number { margin-top: 6px; font-size: 13px; color: var(--muted); }
 
@@ -192,7 +204,7 @@
     <div class="history-management custom-prompt-section">
       <div class="history-management-title" data-i18n="customPrompt_label">Custom Prompt</div>
       <div class="field custom-prompt-field">
-        <textarea id="customPrompt" placeholder="Example: You are a concise technical assistant. Always answer in English, use bullet points when helpful, and clearly distinguish facts from assumptions." data-i18n-placeholder="customPrompt_placeholder"></textarea>
+        <textarea id="customPrompt" maxlength="8000" placeholder="Example: You are a concise technical assistant. Always answer in English, use bullet points when helpful, and clearly distinguish facts from assumptions." data-i18n-placeholder="customPrompt_placeholder"></textarea>
         <div class="hint backup-hint" data-i18n="customPrompt_hint">This prompt is sent to the selected model (DeepSeek, OpenRouter, or Groq) as a system instruction and can customize how the assistant interprets requests and formats its responses.</div>
       </div>
     </div>

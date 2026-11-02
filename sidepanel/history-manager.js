@@ -10,16 +10,22 @@
 // panel's DOM.
 
 import { cutAtCodePointBoundary } from "../models.js";
+import {
+  HISTORY_ATTACHMENT_PREVIEW_CHARS,
+  attachmentCharCount,
+  condenseAttachments,
+  normalizeAttachments,
+} from "../attachments.js";
+import { sanitizePiiMap } from "../privacy/pii-filter.js";
 //
 // makeTopicTitle() takes the empty-input fallback title as an argument:
 // sidepanel.js passes the localized "New topic" string; the default keeps
 // the function pure ("" - callers show their own placeholder).
 
 function cleanForTopic(text) {
-  return String(text || "")
-    .replace(/\[ATTACHMENTS\][\s\S]*?\[\/ATTACHMENTS\]/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  // Attachments are a separate field of the message now (see attachments.js),
+  // so `content` / `displayContent` hold only what the user typed.
+  return String(text || "").replace(/\s+/g, " ").trim();
 }
 
 function makeTopicTitle(messages, fallbackTitle = "") {
@@ -38,29 +44,23 @@ function makeTopicTitle(messages, fallbackTitle = "") {
 
 // Attachment text can be up to 180,000 characters per message. Stored in full
 // across up to 100 conversations it exceeds chrome.storage.local's 10 MB quota,
-// after which every save fails and no history is kept. background.js condenses
-// attachment blocks in history turns to this same preview size before sending
-// them anyway, so only the stored copy is shortened (the live session keeps the
-// full text for the current request).
-const STORED_ATTACHMENT_PREVIEW_CHARS = 4000;
-function condenseStoredContent(text) {
-  return String(text || "").replace(/\[ATTACHMENTS\][\s\S]*?\[\/ATTACHMENTS\]/gi, (block) => {
-    if (block.length <= STORED_ATTACHMENT_PREVIEW_CHARS) return block;
-    return `${cutAtCodePointBoundary(block, STORED_ATTACHMENT_PREVIEW_CHARS).trimEnd()}\n...[attachment contents truncated]\n[/ATTACHMENTS]`;
-  });
-}
+// after which every save fails and no history is kept. providers/messages.js
+// condenses attachments in history turns to this same preview size before
+// sending them anyway, so only the stored copy is shortened (the live session
+// keeps the full text for the current request). The preview is cut on the
+// structured `attachments` field - `content` is never touched, which also keeps
+// a message's merge identity (role + model + content) stable across saves.
+const STORED_ATTACHMENT_PREVIEW_CHARS = HISTORY_ATTACHMENT_PREVIEW_CHARS;
 
 function toStoredMessage(message) {
-  // Once a quota-escalated save condensed this message for storage
-  // (rememberQuotaCondensedContent), the condensed form IS the storage
-  // projection: re-projecting the full text would give the stored condensed
-  // copy a different merge identity and duplicate the turn. A reload never
-  // sees the flag - it reads the condensed copy back as content.
-  const content = message.role === "user"
-    ? (typeof message.quotaCondensedContent === "string" && message.quotaCondensedContent
-        ? message.quotaCondensedContent
-        : condenseStoredContent(message.content))
-    : message.content;
+  const content = message.content;
+  // Only user turns carry attachments. A message that an earlier quota-pressed
+  // save already shrank further (see rememberQuotaCondensedAttachments) keeps
+  // the smaller preview, so every later save does not have to fail on quota
+  // again before it is shrunk.
+  const attachments = message.role === "user"
+    ? condenseAttachments(message.attachments, message.quotaCondensed === true ? QUOTA_ATTACHMENT_PREVIEW_CHARS : STORED_ATTACHMENT_PREVIEW_CHARS)
+    : [];
   // displayContent is a display-only copy; store it ONLY when it differs
   // from content - every reader falls back to `content`. Identical copies
   // (every assistant turn, plain user turns) used to double the stored size
@@ -69,6 +69,11 @@ function toStoredMessage(message) {
   return {
     role: message.role,
     content,
+    ...(attachments.length ? { attachments } : {}),
+    // An assistant reply is stored with its placeholders ([EMAIL#1]) plus the
+    // values it uses; they are put back only when it is displayed, and never
+    // inside a link target or image URL (see restoreInHtmlText).
+    ...(message.role === "assistant" && sanitizePiiMap(message.piiMap) ? { piiMap: sanitizePiiMap(message.piiMap) } : {}),
     ...(displayContent !== content ? { displayContent } : {}),
     modelLabel: message.modelLabel || "",
     modelId: message.modelId || "",
@@ -93,16 +98,6 @@ function toStoredMessage(message) {
 // display-only copy of every message (readers fall back to `content`).
 // Lossy for display, but every conversation and every turn is kept.
 const QUOTA_ATTACHMENT_PREVIEW_CHARS = 800;
-// The exact per-content transform of the quota pass. Shared with
-// rememberQuotaCondensedContent(), which must recognize the condensed form it
-// produced - the two must never drift apart.
-function quotaCondenseContent(text) {
-  return String(text || "").replace(/\[ATTACHMENTS\][\s\S]*?\[\/ATTACHMENTS\]/gi, (block) =>
-    block.length <= QUOTA_ATTACHMENT_PREVIEW_CHARS
-      ? block
-      : `${cutAtCodePointBoundary(block, QUOTA_ATTACHMENT_PREVIEW_CHARS).trimEnd()}\n...[/ATTACHMENTS]`
-  );
-}
 function compressForQuota(list) {
   return list.map((c) => ({
     ...c,
@@ -110,49 +105,42 @@ function compressForQuota(list) {
       if (!m || typeof m !== "object") return m;
       const compressed = { ...m };
       delete compressed.displayContent;
-      if (typeof compressed.content === "string") {
-        compressed.content = quotaCondenseContent(compressed.content);
+      if (Array.isArray(compressed.attachments)) {
+        compressed.attachments = condenseAttachments(compressed.attachments, QUOTA_ATTACHMENT_PREVIEW_CHARS);
+        if (!compressed.attachments.length) delete compressed.attachments;
       }
       return compressed;
     }),
   }));
 }
 
-// After a quota-escalated save persisted condensed copies, remember the
-// condensed text on the LIVE messages (index-aligned with the stored current
-// conversation - syncCurrentConversationFromHistory projects history 1:1).
-// Without this, the next save re-projects the full text, the stored condensed
-// copy gets a different merge identity (role+modelId+content), and the union
-// merge keeps BOTH copies: a duplicate bubble after a reload and the same
-// question sent to the model twice. Only a genuine condensed form of the live
-// content is remembered - a diverged stored turn (another panel appended its
-// own turn at this index) must never overwrite this panel's message. A reload
-// needs no flag: it reads the condensed copy back as content, so its
-// re-projection is already identical.
-function rememberQuotaCondensedContent(history, storedMessages) {
+// After a quota-escalated save persisted shrunken previews, remember that on the
+// LIVE messages (index-aligned with the stored current conversation -
+// syncCurrentConversationFromHistory projects history 1:1): their next stored
+// projection then starts from the small preview instead of re-trying the large
+// one and failing on quota again. Only a message that really matches the stored
+// turn (same role and content) is marked - a diverged stored turn (another panel
+// appended its own turn at this index) must never affect this panel's message.
+function rememberQuotaCondensedAttachments(history, storedMessages) {
   if (!Array.isArray(history) || !Array.isArray(storedMessages)) return;
   const length = Math.min(history.length, storedMessages.length);
   for (let i = 0; i < length; i++) {
     const live = history[i];
     const stored = storedMessages[i];
-    if (!live || !stored || live.role !== stored.role || typeof stored.content !== "string") break;
-    const fresh = toStoredMessage(live).content;
-    if (fresh === stored.content) continue;
-    if (quotaCondenseContent(fresh) === stored.content) {
-      live.quotaCondensedContent = stored.content;
-    } else {
-      break;
-    }
+    if (!live || !stored || live.role !== stored.role || live.content !== stored.content) break;
+    if (live.role !== "user" || !live.attachments?.length) continue;
+    const storedChars = attachmentCharCount(normalizeAttachments(stored.attachments));
+    const freshChars = attachmentCharCount(condenseAttachments(live.attachments, STORED_ATTACHMENT_PREVIEW_CHARS));
+    if (storedChars < freshChars) live.quotaCondensed = true;
   }
 }
 
 export {
   cleanForTopic,
   makeTopicTitle,
-  condenseStoredContent,
   toStoredMessage,
   compressForQuota,
-  rememberQuotaCondensedContent,
+  rememberQuotaCondensedAttachments,
   STORED_ATTACHMENT_PREVIEW_CHARS,
   QUOTA_ATTACHMENT_PREVIEW_CHARS,
 };
