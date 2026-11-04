@@ -19,6 +19,8 @@ import {
   PAGE_VISUALS_STORAGE_KEY,
   AUTO_WEB_RESEARCH_KEY,
   INCLUDE_CONTEXT_STORAGE_KEY,
+  PAGE_NEVER_HOSTS_STORAGE_KEY,
+  PAGE_ALLOW_HOSTS_STORAGE_KEY,
   MIC_LANG_STORAGE_KEY,
   COMPOSER_HEIGHT_STORAGE_KEY,
 } from "./storage-keys.js";
@@ -48,13 +50,17 @@ export const PERSISTED_SETTING_KEYS = [
   // Settings first introduced after the mirror was written, found missing when
   // importSettings() started passing its whole restored object to
   // saveSettingsBackup(): the key loop silently dropped them, so after an
-  // unexpected storage reset the privacy toggles reverted to their defaults -
-  // worst of all "Read current page" back to ON (its default), silently
-  // re-enabling page sending. Never include credentials here (see above).
+  // unexpected storage reset the privacy toggles reverted to their defaults.
+  // "Read current page" has no default any more (a missing value means "the
+  // user has not chosen yet"), but the user's choice - and their never-send /
+  // always-allow site lists - must still survive a reset. Never include
+  // credentials here (see above).
   PII_FILTER_STORAGE_KEY,
   PAGE_VISUALS_STORAGE_KEY,
   AUTO_WEB_RESEARCH_KEY,
   INCLUDE_CONTEXT_STORAGE_KEY,
+  PAGE_NEVER_HOSTS_STORAGE_KEY,
+  PAGE_ALLOW_HOSTS_STORAGE_KEY,
   "selectedModelId",
   MIC_LANG_STORAGE_KEY,
   COMPOSER_HEIGHT_STORAGE_KEY,

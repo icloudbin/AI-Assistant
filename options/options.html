@@ -71,6 +71,11 @@
   dialog.import-review button.secondary { background: var(--button-bg); color: var(--text); border: 1px solid var(--border); }
   .language-section label { margin-top: 14px; }
   .version-number { margin-top: 6px; font-size: 13px; color: var(--muted); }
+  /* Site lists: short boxes, one site per line. */
+  .host-list-field { margin: 12px 0 0; }
+  .host-list-field textarea { min-height: 84px; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; }
+  #hostListsMsg { font-size: 12px; color: #4ade80; }
+  .import-row-body .import-sites { font-size: 12px; word-break: break-word; }
 
   /* Web Research / Fact Check */
   .web-research-section {
@@ -192,6 +197,24 @@
       <div class="history-management-title" data-i18n="piiFilter_label">Privacy filter</div>
       <label class="toggle"><input type="checkbox" id="piiFilterToggle" checked /> <span data-i18n="piiFilter_toggle">Redact personal and sensitive information before sending to AI</span></label>
       <div class="hint backup-hint" data-i18n="piiFilter_hint">Phone numbers, emails, credit cards, ID/SSN numbers, IP addresses, API keys, tokens, passwords and clearly labelled names ("Name:", "My name is", ...) are replaced with placeholders such as [EMAIL] locally, before the question, page text, attachments or history are sent to the AI provider. Two deliberate exceptions: a fact-check request goes out unfiltered (the claim must stay searchable), and web-search queries carry names. Your local history keeps the originals. Pattern-based, so it is a safety net, not a guarantee.</div>
+      <div class="hint backup-hint" data-i18n="piiFilter_scopeHint">Not covered by the filter: images you attach (they are sent as they are) and voice input (in Chrome the audio is sent to Google's servers for recognition).</div>
+    </div>
+
+    <div class="history-management">
+      <div class="history-management-title" data-i18n="pageSites_title">Sites: never send / always allow</div>
+      <div class="host-list-field">
+        <label for="neverHostsInput" data-i18n="pageSites_never_label">Never send these sites</label>
+        <textarea id="neverHostsInput" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="mail.example.com&#10;intranet.example.org" data-i18n-placeholder="pageSites_placeholder"></textarea>
+      </div>
+      <div class="host-list-field">
+        <label for="allowHostsInput" data-i18n="pageSites_allow_label">Always allow these sites</label>
+        <textarea id="allowHostsInput" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="mail.example.com&#10;intranet.example.org" data-i18n-placeholder="pageSites_placeholder"></textarea>
+      </div>
+      <div class="hint backup-hint" data-i18n="pageSites_hint">One site per line. A site covers all of its subdomains. "Never send": the page of these sites is never sent, not even by the quick actions. "Always allow": these sites skip the sensitive-site protection and the "Ask each time" question. A site on both lists is never sent.</div>
+      <div class="actions">
+        <button id="saveHostLists" type="button" data-i18n="pageSites_save">Save site lists</button>
+        <span id="hostListsMsg" role="status" aria-live="polite"></span>
+      </div>
     </div>
 
     <div class="history-management">

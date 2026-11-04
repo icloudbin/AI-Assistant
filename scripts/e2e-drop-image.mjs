@@ -37,6 +37,7 @@ const context = await chromium.launchPersistentContext(userDataDir, {
   args: [`--disable-extensions-except=${extDir}`, `--load-extension=${extDir}`],
 });
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 async function test(name, fn) {
   try {
@@ -53,6 +54,10 @@ try {
   let worker = context.serviceWorkers()[0];
   worker ??= await context.waitForEvent("serviceworker", { timeout: 20000 });
   const extId = new URL(worker.url()).host;
+  // The panel asks once before it reads pages (S-05) and once before the first image
+  // is attached (S-08). This test is about neither, so both are already settled -
+  // except in the last test, which is about the second.
+  await worker.evaluate(() => chrome.storage.local.set({ includeCurrentPageContext: false, imageNoticeAcknowledged: true }));
 
   const page = await context.newPage();
   const pageErrors = [];
@@ -62,7 +67,7 @@ try {
   await page.waitForTimeout(500); // let init() finish
 
   // Stub the worker's image fetch: ok for IMG_URL, failure for anything containing "broken".
-  await page.evaluate(({ png }) => {
+  const stubFetch = (target) => target.evaluate(({ png }) => {
     const real = chrome.runtime.sendMessage.bind(chrome.runtime);
     chrome.runtime.sendMessage = (msg, ...rest) => {
       if (msg?.type === "FETCH_IMAGE") {
@@ -71,10 +76,11 @@ try {
       return real(msg, ...rest);
     };
   }, { png: PNG_DATA_URL });
+  await stubFetch(page);
 
   // Fire one drop at the composer; resolve with what the panel ended up with.
-  async function drop(payload) {
-    return page.evaluate(async (payload) => {
+  async function drop(payload, target = page) {
+    return target.evaluate(async (payload) => {
       // Start clean: remove earlier attachments through the panel's own remove
       // buttons (they update its state, unlike clearing the DOM) and the text.
       for (const b of [...document.querySelectorAll(".remove-attachment")]) b.click();
@@ -146,6 +152,47 @@ try {
     const r = await drop({ "text/uri-list": "https://example.test/article", "text/plain": "https://example.test/article" });
     assert.equal(r.chips.length, 0, JSON.stringify(r));
     assert.equal(r.text, "https://example.test/article");
+  });
+
+  await test("S-08: the first dropped image asks first; declining attaches nothing and does not paste its address either", async () => {
+    await worker.evaluate(() => chrome.storage.local.remove("imageNoticeAcknowledged"));
+    const fresh = await context.newPage(); // a new panel: it has not been told about the notice
+    fresh.on("pageerror", (e) => pageErrors.push(String(e)));
+    try {
+      await fresh.goto(`chrome-extension://${extId}/sidepanel/sidepanel.html`);
+      await fresh.waitForSelector("#chatForm");
+      await fresh.waitForFunction(() => !document.getElementById("sendBtn").disabled, null, { timeout: 15000 });
+      await stubFetch(fresh);
+      const state = () => fresh.evaluate(() => ({
+        dialog: Boolean(document.getElementById("imageNoticeDialog")?.open),
+        chips: document.querySelectorAll(".attachment").length,
+        text: document.getElementById("questionInput").value,
+      }));
+      const waitState = async (pred, what) => {
+        for (let i = 0; i < 100; i++) { if (pred(await state())) return; await sleep(50); }
+        throw new Error(`timed out waiting for ${what}: ${JSON.stringify(await state())}`);
+      };
+      const payload = { "text/html": `<img src="${IMG_URL}">`, "text/uri-list": IMG_URL, "text/plain": IMG_URL };
+
+      await drop(payload, fresh); // returns while the question is open
+      await waitState((st) => st.dialog, "the image notice");
+      assert.equal((await state()).chips, 0, "the image was attached before the user answered");
+      await fresh.click("#imageNoticeDialogCancel");
+      await waitState((st) => !st.dialog, "the notice to close");
+      await sleep(400);
+      const declined = await state();
+      assert.equal(declined.chips, 0, "an image was attached although the user declined");
+      assert.equal(declined.text, "", `declining pasted the address as text: ${JSON.stringify(declined.text)}`);
+
+      await drop(payload, fresh);
+      await waitState((st) => st.dialog, "the notice again");
+      await fresh.click("#imageNoticeDialogConfirm");
+      await waitState((st) => !st.dialog && st.chips === 1, "the image to be attached");
+      assert.equal((await state()).text, "");
+      assert.equal((await worker.evaluate(() => chrome.storage.local.get("imageNoticeAcknowledged"))).imageNoticeAcknowledged, true);
+    } finally {
+      await fresh.close();
+    }
   });
 
   assert.deepEqual(pageErrors, [], `uncaught errors in the panel: ${pageErrors.join(" | ")}`);

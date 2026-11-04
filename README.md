@@ -31,6 +31,7 @@ AI-Assistant/
 ├── translation-selection.js
 ├── url-safety.js
 ├── sensitive-sites.js
+├── page-context-policy.js
 ├── i18n.js
 ├── README.md
 ├── CHANGELOG.md
@@ -51,9 +52,11 @@ AI-Assistant/
 │   ├── e2e-chat-flow.mjs
 │   ├── e2e-drop-image.mjs
 │   ├── e2e-import-settings.mjs
+│   ├── e2e-page-privacy.mjs
 │   ├── e2e-pii-render.mjs
 │   ├── e2e-restore-history.mjs
 │   ├── e2e-tabs-permission.mjs
+│   ├── e2e-two-windows.mjs
 │   ├── test-attachment-budget.mjs
 │   ├── test-chrome-browser.mjs
 │   ├── test-content-visibility.mjs
@@ -66,6 +69,7 @@ AI-Assistant/
 │   ├── test-openai-compatible.mjs
 │   ├── test-options-backup.mjs
 │   ├── test-outbound-pii.mjs
+│   ├── test-page-context-policy.mjs
 │   ├── test-pii-filter.mjs
 │   ├── test-pii-name-perf.mjs
 │   ├── test-pii-restore.mjs
@@ -84,6 +88,7 @@ AI-Assistant/
     ├── sidepanel.html
     ├── sidepanel.css
     ├── sidepanel.js
+    ├── dialogs.js
     ├── mic-permission.html  ← opened as its own tab for the mic permission grant, see "Voice input" in docs/features.md
     ├── mic-permission.css
     ├── mic-permission.js

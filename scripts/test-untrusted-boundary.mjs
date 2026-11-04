@@ -323,11 +323,9 @@ await test("S-02: history-manager condenses the STRUCTURE (stored 4000 / quota 8
   assert.equal(quota.displayContent, undefined);
   const again = hm.compressForQuota([{ id: "c", messages: [quota] }])[0].messages[0];
   assert.deepEqual(again.attachments, quota.attachments);
-  // The live message is marked after a quota-pressed save, so the next projection starts small.
-  const live = [{ ...msg }];
-  hm.rememberQuotaCondensedAttachments(live, [quota]);
-  assert.equal(live[0].quotaCondensed, true);
-  assert.ok(hm.toStoredMessage(live[0]).attachments[0].text.length <= 800);
+  // The quota-shortened preview sticks through the merge by message id (B-04); no flag on the live
+  // message is needed any more - see scripts/test-conversation-store.mjs.
+  assert.equal(hm.rememberQuotaCondensedAttachments, undefined, "the quotaCondensed bookkeeping is gone");
   // Topic titles come from what the user typed.
   assert.equal(hm.makeTopicTitle([{ role: "user", content: "Summarize the report", attachments: msg.attachments }]), "Summarize the report");
 });

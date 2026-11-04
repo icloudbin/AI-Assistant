@@ -146,6 +146,77 @@ try {
     assert.equal(await page.$eval("#customPrompt", (el) => el.maxLength), 8000);
   });
 
+  // ---- S-05: what a file may do to "Read current page" and to the site lists ----
+  const PRIV_MINE = { includeCurrentPageContext: "ask", pageNeverSendHosts: ["bank.example"], pageAlwaysAllowHosts: [] };
+  const resetPriv = () => worker.evaluate((v) => chrome.storage.local.set(v), PRIV_MINE);
+  const storedPriv = () => worker.evaluate((keys) => chrome.storage.local.get(keys), Object.keys(PRIV_MINE));
+  const settingsFile = (name, settings) => {
+    const file = path.join(tmp, name);
+    fs.writeFileSync(file, JSON.stringify({ ...hostile, settings }));
+    return file;
+  };
+  const weakeningFile = settingsFile("weakening.json", {
+    includeCurrentPageContext: true, // ask each time -> always read
+    pageNeverSendHosts: [], // drops bank.example from the never-send list
+    pageAlwaysAllowHosts: ["evil.example"], // adds a site that skips every protection
+  });
+
+  await test("S-05: a file that weakens page reading and the site lists needs three explicit ticks", async () => {
+    await resetPriv();
+    await page.setInputFiles("#importSettingsFile", weakeningFile);
+    await waitUntil(dialogOpen, "the review dialog");
+    const rows = await page.$$eval("dialog.import-review .import-row.risky", (els) => els.map((e) => ({ text: e.textContent, checked: e.querySelector("input")?.checked })));
+    assert.equal(rows.length, 3, `expected 3 risky rows, got ${rows.length}: ${JSON.stringify(rows.map((r) => r.text))}`);
+    assert.ok(rows.every((r) => r.checked === false), "a risky row is pre-ticked");
+    const text = await page.$eval("dialog.import-review", (d) => d.textContent);
+    assert.ok(text.includes("evil.example") && text.includes("bank.example"), `the sites are not shown: ${text}`);
+    assert.deepEqual(await storedPriv(), PRIV_MINE, "settings changed before the user confirmed");
+    // Import with nothing ticked: nothing of the three is applied.
+    await page.click("dialog.import-review .actions button:not(.secondary)");
+    await waitUntil(async () => !(await dialogOpen()), "the dialog to close");
+    await sleep(300);
+    assert.deepEqual(await storedPriv(), PRIV_MINE, "a risky change was applied without a tick");
+    assert.match(await msg(), /Nothing was changed/);
+  });
+
+  await test("S-05: only the ticked page-reading change is applied", async () => {
+    await resetPriv();
+    await page.setInputFiles("#importSettingsFile", weakeningFile);
+    await waitUntil(dialogOpen, "the review dialog");
+    for (const row of await page.$$("dialog.import-review .import-row.risky")) {
+      if ((await row.textContent()).includes("evil.example")) await (await row.$("input")).check();
+    }
+    await page.click("dialog.import-review .actions button:not(.secondary)");
+    await waitUntil(async () => !(await dialogOpen()), "the dialog to close");
+    await sleep(300);
+    const now = await storedPriv();
+    assert.deepEqual(now.pageAlwaysAllowHosts, ["evil.example"]);
+    assert.equal(now.includeCurrentPageContext, "ask", "the mode was applied without its tick");
+    assert.deepEqual(now.pageNeverSendHosts, ["bank.example"], "the never-send list was changed without its tick");
+  });
+
+  await test("S-05: a file that only tightens the protection needs no tick; a bogus mode or list is ignored", async () => {
+    await resetPriv();
+    await page.setInputFiles("#importSettingsFile", settingsFile("tightening.json", {
+      includeCurrentPageContext: false, // ask each time -> off
+      pageNeverSendHosts: ["bank.example", "intranet.example"],
+    }));
+    await waitUntil(dialogOpen, "the review dialog");
+    assert.equal((await page.$$("dialog.import-review .import-row.risky")).length, 0, "a change that only protects more was treated as risky");
+    await page.click("dialog.import-review .actions button:not(.secondary)");
+    await waitUntil(async () => !(await dialogOpen()), "the dialog to close");
+    await sleep(300);
+    const now = await storedPriv();
+    assert.equal(now.includeCurrentPageContext, false);
+    assert.deepEqual(now.pageNeverSendHosts, ["bank.example", "intranet.example"]);
+
+    await resetPriv();
+    await page.setInputFiles("#importSettingsFile", settingsFile("bogus.json", { includeCurrentPageContext: "maybe", pageNeverSendHosts: "not-a-list" }));
+    await sleep(800);
+    assert.deepEqual(await storedPriv(), PRIV_MINE, "an invalid value was written");
+    assert.equal(await dialogOpen(), false);
+  });
+
   assert.deepEqual(pageErrors, [], `uncaught errors in the page: ${pageErrors.join(" | ")}`);
 } finally {
   await context.close();

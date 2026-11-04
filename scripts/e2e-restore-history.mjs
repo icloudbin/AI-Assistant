@@ -17,7 +17,7 @@ import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -82,7 +82,7 @@ try {
   // Wipe the history, optionally make the first `quotaFailures` writes of it
   // fail with the quota error, restore through the real file input, and return
   // the message the user ends up with.
-  async function restore(quotaFailures) {
+  async function restore(quotaFailures, zip = zipPath) {
     await worker.evaluate(() => chrome.storage.local.remove("conversationHistory"));
     await page.evaluate((n) => {
       globalThis.__realSet ??= chrome.storage.local.set.bind(chrome.storage.local);
@@ -96,7 +96,7 @@ try {
       };
       document.getElementById("msg").textContent = "";
     }, quotaFailures);
-    await page.setInputFiles("#restoreHistoryFile", zipPath);
+    await page.setInputFiles("#restoreHistoryFile", zip);
     // wait for the page to finish: the in-progress text is exactly "Restoring
     // history..." (note the quota notice itself also contains "restoring")
     for (let i = 0; i < 100; i++) {
@@ -129,6 +129,38 @@ try {
     assert.match(m, /attachment previews were condensed/);
     assert.match(m, /the 6 oldest conversation\(s\) could not be saved and were dropped/);
     assert.equal(await storedCount(), 2);
+  });
+
+  // B-04: a restored message keeps the id and creation time it was backed up with (so it still
+  // merges with the live copy by id); a backup from before they existed gets deterministic ids.
+  await test("restore keeps message ids and times; a backup without them gets deterministic ids (B-04)", async () => {
+    const { withMessageIds } = await import(pathToFileURL(path.join(extDir, "conversation-store.js")).href);
+    const stamped = [
+      { id: "11111111-1111-4111-8111-111111111111", createdAt: 1700000000000, role: "user", content: "stamped question", modelLabel: "", modelId: "" },
+      { id: "22222222-2222-4222-8222-222222222222", createdAt: 1700000005000, role: "assistant", content: "stamped answer", modelLabel: "M", modelId: "deepseek-flash" },
+    ];
+    const old = [
+      { role: "user", content: "continue", modelLabel: "", modelId: "" },
+      { role: "assistant", content: "more", modelLabel: "M", modelId: "deepseek-flash" },
+      { role: "user", content: "continue", modelLabel: "", modelId: "" },
+      { role: "assistant", content: "more", modelLabel: "M", modelId: "deepseek-flash" },
+    ];
+    await worker.evaluate(([a, b, t]) => chrome.storage.local.set({ conversationHistory: [
+      { id: "stamped", title: "Stamped", updatedAt: t, messages: a },
+      { id: "old", title: "Old", updatedAt: t - 1, messages: b },
+    ] }), [stamped, old, Date.now()]);
+    const [download] = await Promise.all([page.waitForEvent("download"), page.click("#backupHistory")]);
+    const stampedZip = path.join(tmp, "backup-stamped.zip");
+    await download.saveAs(stampedZip);
+    const m = await restore(0, stampedZip);
+    assert.ok(!/fail/i.test(m), `the user was told: ${JSON.stringify(m)}`);
+    const saved = await worker.evaluate(async () => (await chrome.storage.local.get("conversationHistory")).conversationHistory);
+    const byId = Object.fromEntries(saved.map((c) => [c.id, c.messages]));
+    assert.deepEqual(byId.stamped.map((x) => [x.id, x.createdAt]), stamped.map((x) => [x.id, x.createdAt]), "ids and times must survive a restore");
+    const expected = withMessageIds(old).map((x) => x.id);
+    assert.deepEqual(byId.old.map((x) => x.id), expected, "old messages get the same ids the side panel derives");
+    assert.equal(new Set(expected).size, 4, "the repeated turns stay distinct");
+    assert.ok(byId.old.every((x) => x.createdAt === undefined), "no time is invented for old messages");
   });
 
   assert.deepEqual(pageErrors, [], `uncaught errors in the page: ${pageErrors.join(" | ")}`);

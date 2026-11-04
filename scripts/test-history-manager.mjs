@@ -11,12 +11,11 @@ import {
   makeTopicTitle,
   toStoredMessage,
   compressForQuota,
-  rememberQuotaCondensedAttachments,
   STORED_ATTACHMENT_PREVIEW_CHARS,
   QUOTA_ATTACHMENT_PREVIEW_CHARS,
 } from "../sidepanel/history-manager.js";
 import { attachmentCharCount } from "../attachments.js";
-import { mergeConversationLists } from "../conversation-store.js";
+import { mergeConversationLists, createMessage } from "../conversation-store.js";
 
 // ---------- cleanForTopic: content is only the user's own words ----------
 assert.equal(cleanForTopic("hi   there\t\nagain"), "hi there again");
@@ -96,43 +95,32 @@ const before = JSON.stringify(quotaIn);
 compressForQuota(quotaIn);
 assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
 
-// ---------- quota shrinking does not disturb the merge identity ----------
-// content is never condensed, so a stored quota-shrunk copy and a fresh
-// projection of the same message have the SAME merge identity - the union
-// merge cannot duplicate the turn. The remembered flag only stops the next
-// save from re-trying the large preview and failing on quota again.
+// ---------- quota shrinking sticks through the merge by message id (B-04) ----------
+// The quota pass shrinks only the structured `attachments` field; the message
+// keeps its id, so the merge (reconcileDuplicate in conversation-store.js)
+// keeps the SHORTER stored preview instead of the live full text coming back.
 {
-  const live = {
+  const live = createMessage({
     role: "user",
     content: "Question?",
     attachments: [{ name: "x.txt", kind: "text", text: "x".repeat(9000) }],
     displayContent: "Question?",
     modelLabel: "",
     modelId: "",
-  };
+  });
   const history = [live];
-  const storedConvo = { id: "c", updatedAt: 1, messages: [toStoredMessage(live)] };
+  const storedConvo = { id: "c", updatedAt: 1, messages: history.map(toStoredMessage) };
   const compressed = compressForQuota([storedConvo])[0];
   assert.ok(attachmentCharCount(compressed.messages[0].attachments) < attachmentCharCount(storedConvo.messages[0].attachments), "quota pass shortens this message further");
 
-  // Merge identity survives the quota pass (no duplicate bubble, no double send).
+  // The same message (same id) in both copies merges into ONE, carrying the
+  // shorter stored preview; content is untouched.
   const freshConvo = { id: "c", updatedAt: 2, messages: history.map(toStoredMessage) };
   const merged = mergeConversationLists([compressed], [freshConvo], "c");
-  assert.equal(merged[0].messages.length, 1, "quota-condensed copy merges with the fresh projection (identity is content-based)");
-
-  // The fix: the panel remembers the shrunken preview on the live message, so
-  // the next save starts small instead of failing on quota again.
-  rememberQuotaCondensedAttachments(history, compressed.messages);
-  assert.equal(live.quotaCondensed, true, "quota-shrunken preview remembered on the live message");
-  const reprojected = history.map(toStoredMessage);
-  assert.ok(attachmentCharCount(reprojected[0].attachments) <= QUOTA_ATTACHMENT_PREVIEW_CHARS, "re-projection starts from the small preview");
-}
-{
-  // rememberQuotaCondensedAttachments must never adopt a diverged stored turn
-  // (another panel's different message at this index).
-  const live = { role: "user", content: "my question", attachments: [{ name: "a.txt", kind: "text", text: "t".repeat(9000) }] };
-  rememberQuotaCondensedAttachments([live], [{ role: "user", content: "another panel's different turn" }]);
-  assert.equal(live.quotaCondensed, undefined, "diverged stored turn is not adopted");
+  assert.equal(merged[0].messages.length, 1, "same id merges into one message (no duplicate bubble)");
+  assert.ok(attachmentCharCount(merged[0].messages[0].attachments) <= QUOTA_ATTACHMENT_PREVIEW_CHARS, `the shorter stored preview wins (${attachmentCharCount(merged[0].messages[0].attachments)})`);
+  assert.equal(merged[0].messages[0].content, "Question?", "content identity untouched");
+  assert.equal(merged[0].messages[0].id, live.id, "the merged message keeps the live id");
 }
 
 console.log("OK: history-manager.js — titles, structured-attachment projection, quota compression.");

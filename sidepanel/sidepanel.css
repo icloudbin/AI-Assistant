@@ -74,6 +74,20 @@ body { display: flex; flex-direction: column; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
 .controls { display: flex; align-items: center; gap: 8px; }
 .toggle { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; cursor: pointer; }
+.context-mode { gap: 6px; }
+.context-mode select {
+  max-width: 130px;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 2px 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.context-mode select:hover, .context-mode select:focus { outline: none; border-color: var(--accent); }
+.context-mode select:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .icon-btn {
   background: transparent;
@@ -481,3 +495,41 @@ button#sendBtn {
   font-weight: 600;
 }
 button#sendBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---------- Modal questions (sidepanel/dialogs.js) ---------- */
+dialog.ai-dialog {
+  width: min(340px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+dialog.ai-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+.ai-dialog h3 { margin: 0 0 8px; font-size: 14px; line-height: 1.35; }
+.ai-dialog p { margin: 0 0 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.ai-dialog .ai-dialog-warning { padding: 8px 10px; border: 1px solid #c58a00; border-radius: 8px; background: rgba(197, 138, 0, 0.12); }
+.ai-dialog .ai-dialog-muted { color: var(--muted); font-size: 12px; }
+.ai-dialog .ai-dialog-check { display: flex; align-items: flex-start; gap: 8px; margin: 4px 0 8px; color: var(--muted); font-size: 12px; cursor: pointer; }
+.ai-dialog .ai-dialog-check input { flex: none; margin: 2px 0 0; }
+.ai-dialog .ai-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.ai-dialog button {
+  font: inherit;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.ai-dialog button:hover { border-color: var(--accent); }
+.ai-dialog button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ai-dialog button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ai-dialog .ai-link-btn { border-color: transparent; color: var(--muted); padding-inline: 4px; }
+.ai-dialog .ai-choice { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 0; }
+.ai-dialog .ai-choice-btn { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; padding: 8px 10px; text-align: left; }
+.ai-dialog .ai-choice-btn strong { font-size: 13px; }
+.ai-dialog .ai-choice-btn span { color: var(--muted); font-size: 12px; line-height: 1.4; }

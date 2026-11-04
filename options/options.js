@@ -19,15 +19,19 @@ import {
   MIC_LANG_STORAGE_KEY,
   COMPOSER_HEIGHT_STORAGE_KEY,
   INCLUDE_CONTEXT_STORAGE_KEY,
+  PAGE_NEVER_HOSTS_STORAGE_KEY,
+  PAGE_ALLOW_HOSTS_STORAGE_KEY,
 } from "../storage-keys.js";
 import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-storage.js";
 import { encryptSecrets, decryptSecrets, MIN_PASSPHRASE_LENGTH } from "../settings-crypto.js";
-import { withHistoryLock } from "../conversation-store.js";
+import { withHistoryLock, withMessageIds, isValidMessageId, isValidTimestamp } from "../conversation-store.js";
 import { compressForQuota, cleanForTopic } from "../sidepanel/history-manager.js";
 import { migrateLegacyMessage, normalizeAttachments } from "../attachments.js";
 import { sanitizePiiMap } from "../privacy/pii-filter.js";
 import { cutAtCodePointBoundary, MAX_CUSTOM_PROMPT_CHARS } from "../models.js";
-import { PROVIDER_NAMES, dropOverlongPrompt, planSettingsImport, approvedSettings } from "./settings-import.js";
+import { PROVIDER_NAMES, dropOverlongPrompt, planSettingsImport, approvedSettings, normalizeImportedHostList, HOST_LIST_KEYS } from "./settings-import.js";
+import { pageContextModeOf } from "../page-context-policy.js";
+import { parseHostList, parseHostListDetailed, MAX_HOST_LIST_ENTRIES } from "../sensitive-sites.js";
 
 const apiKeyInput = document.getElementById("apiKey");
 const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
@@ -95,6 +99,67 @@ chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY).then((s) => { autoWebResearchTog
 autoWebResearchToggle.addEventListener("change", () => {
   void persistToggle(AUTO_WEB_RESEARCH_KEY, autoWebResearchToggle);
 });
+
+// ---------- Sites: never send / always allow (S-05) ----------
+// Two lists of host names the user edits here. "Never send": the page of these
+// sites is never sent, even by a quick action. "Always allow": these sites skip
+// the sensitive-site protection and the "ask each time" prompt. A site covers its
+// subdomains. The text is normalized on save (one clean host per line); entries
+// that are not sites are reported, not silently kept.
+const neverHostsInput = document.getElementById("neverHostsInput");
+const allowHostsInput = document.getElementById("allowHostsInput");
+const saveHostListsBtn = document.getElementById("saveHostLists");
+const hostListsMsg = document.getElementById("hostListsMsg");
+let hostListsMsgTimer = null;
+
+function showHostListsMessage(text, color = "#4ade80", ms = 5000) {
+  hostListsMsg.style.color = color;
+  hostListsMsg.textContent = text;
+  clearTimeout(hostListsMsgTimer);
+  hostListsMsgTimer = setTimeout(() => { hostListsMsg.textContent = ""; }, ms);
+}
+
+function renderHostLists(values) {
+  neverHostsInput.value = parseHostList(values[PAGE_NEVER_HOSTS_STORAGE_KEY]).join("\n");
+  allowHostsInput.value = parseHostList(values[PAGE_ALLOW_HOSTS_STORAGE_KEY]).join("\n");
+}
+
+chrome.storage.local.get([PAGE_NEVER_HOSTS_STORAGE_KEY, PAGE_ALLOW_HOSTS_STORAGE_KEY]).then(renderHostLists).catch(() => {});
+
+async function saveHostLists() {
+  const never = parseHostListDetailed(neverHostsInput.value);
+  const allow = parseHostListDetailed(allowHostsInput.value);
+  const values = { [PAGE_NEVER_HOSTS_STORAGE_KEY]: never.hosts, [PAGE_ALLOW_HOSTS_STORAGE_KEY]: allow.hosts };
+  saveHostListsBtn.disabled = true;
+  try {
+    await chrome.storage.local.set(values);
+    // Verify the write: the page must never claim a protection that was not stored.
+    const verified = await chrome.storage.local.get(Object.keys(values));
+    for (const key of Object.keys(values)) {
+      if (JSON.stringify(verified[key]) !== JSON.stringify(values[key])) throw new Error("The value was not persisted.");
+    }
+  } catch (err) {
+    console.error("[AI Assistant] Unable to save the site lists:", err);
+    showHostListsMessage(t(currentLang, "settings_saveFailed_template", { message: err?.message || t(currentLang, "unknownError") }), "#f55b5b", 8000);
+    return;
+  } finally {
+    saveHostListsBtn.disabled = false;
+  }
+  saveSettingsBackup(values).catch((err) => console.warn("[AI Assistant] Unable to mirror the site lists:", err));
+  renderHostLists(values);
+  const rejected = [...never.rejected, ...allow.rejected];
+  const notes = [];
+  if (rejected.length) {
+    notes.push(t(currentLang, "pageSites_ignored_template", { entries: rejected.slice(0, 5).join(", ") + (rejected.length > 5 ? ", …" : "") }));
+  } else {
+    notes.push(t(currentLang, "pageSites_saved"));
+  }
+  if (never.truncated || allow.truncated) notes.push(t(currentLang, "pageSites_truncated_template", { max: String(MAX_HOST_LIST_ENTRIES) }));
+  const warn = rejected.length > 0 || never.truncated || allow.truncated;
+  showHostListsMessage(notes.join(" "), warn ? "#f5c451" : "#4ade80", warn ? 10000 : 4000);
+}
+saveHostListsBtn.addEventListener("click", () => { void saveHostLists(); });
+
 // Keep the switches truthful when a value changes behind the page's back (a
 // settings import writes it straight to storage): a toggle must never show
 // "off" while the feature is actually on, or the reverse. The two privacy
@@ -113,6 +178,14 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
   if (changes.pageVisualsEnabled) {
     pageVisualsToggle.checked = changes.pageVisualsEnabled.newValue === true;
+  }
+  // A settings import changes the site lists behind the boxes' back. Do not
+  // overwrite text the user is typing right now.
+  if (changes[PAGE_NEVER_HOSTS_STORAGE_KEY] && document.activeElement !== neverHostsInput) {
+    neverHostsInput.value = parseHostList(changes[PAGE_NEVER_HOSTS_STORAGE_KEY].newValue).join("\n");
+  }
+  if (changes[PAGE_ALLOW_HOSTS_STORAGE_KEY] && document.activeElement !== allowHostsInput) {
+    allowHostsInput.value = parseHostList(changes[PAGE_ALLOW_HOSTS_STORAGE_KEY].newValue).join("\n");
   }
 });
 const backupHistoryBtn = document.getElementById("backupHistory");
@@ -649,6 +722,12 @@ function normalizeRestoredConversation(conversation, index) {
         // in `content`: convert such a message (a no-op for a current one).
         .map((m) => migrateLegacyMessage({ ...m, content: String(m.content || "") }))
         .map((m) => ({
+          // Message identity and creation time (see conversation-store.js): kept
+          // when the backup has valid ones, so a restored conversation still
+          // merges with the live copy by id. A backup made before they existed
+          // gets deterministic ids below.
+          ...(isValidMessageId(m.id) ? { id: m.id } : {}),
+          ...(isValidTimestamp(m.createdAt) ? { createdAt: m.createdAt } : {}),
           role: m.role,
           content: String(m.content || ""),
           // Attached files (user turns), validated like data from any other source.
@@ -684,7 +763,9 @@ function normalizeRestoredConversation(conversation, index) {
   return {
     id: String(conversation.id || fallbackId),
     title: String(conversation.title || "").trim() || makeRestoredTopicTitle(messages),
-    messages,
+    // Ids last, after the legacy-attachment migration above: they are derived
+    // from the text, exactly as the side panel derives them for old storage.
+    messages: withMessageIds(messages),
     updatedAt: Number.isFinite(Number(conversation.updatedAt))
       ? Number(conversation.updatedAt)
       : Date.now(),
@@ -1033,9 +1114,11 @@ const SETTINGS_BACKUP_PLAIN_KEYS = [
   PAGE_VISUALS_STORAGE_KEY,
   AUTO_WEB_RESEARCH_KEY,
   // sidepanel.js's INCLUDE_CONTEXT_STORAGE_KEY: the "Read current page"
-  // privacy choice must survive export/import - defaulting back to ON after
-  // a restore would silently re-enable page sending.
+  // privacy choice (true / false / "ask") must survive export/import, and so
+  // must the user's never-send / always-allow site lists.
   INCLUDE_CONTEXT_STORAGE_KEY,
+  PAGE_NEVER_HOSTS_STORAGE_KEY,
+  PAGE_ALLOW_HOSTS_STORAGE_KEY,
   "customPrompt",
   THEME_STORAGE_KEY,
   LANGUAGE_STORAGE_KEY,
@@ -1185,6 +1268,7 @@ function confirmSettingsImport(items, restored) {
     const boxes = new Map();
     const others = [];
     const onOff = (v) => t(currentLang, v ? "settingsImport_on" : "settingsImport_off");
+    const modeLabel = (mode) => t(currentLang, `readCurrentPage_${mode}`); // off | ask | on | unset
     for (const item of items) {
       if (item.kind === "plain" || (item.kind === "secret" && !item.needsConfirm)) {
         others.push(item.kind === "secret" ? `${PROVIDER_NAMES[item.key]} API key` : item.key);
@@ -1202,6 +1286,15 @@ function confirmSettingsImport(items, restored) {
       if (item.kind === "protection") {
         add(body, "strong", t(currentLang, IMPORT_SWITCH_LABEL_KEYS[item.key]));
         add(body, "span", `${onOff(item.from)} → ${onOff(item.to)}`, "import-change");
+        if (item.weakens) add(body, "span", `⚠️ ${t(currentLang, "settingsImport_weakens")}`, "import-badge");
+      } else if (item.kind === "mode") {
+        add(body, "strong", t(currentLang, "readCurrentPage_label"));
+        add(body, "span", `${modeLabel(item.from)} → ${modeLabel(item.to)}`, "import-change");
+        if (item.weakens) add(body, "span", `⚠️ ${t(currentLang, "settingsImport_weakens")}`, "import-badge");
+      } else if (item.kind === "hostList") {
+        add(body, "strong", t(currentLang, item.key === PAGE_NEVER_HOSTS_STORAGE_KEY ? "pageSites_never_label" : "pageSites_allow_label"));
+        if (item.added.length) add(body, "span", `+ ${excerpt(item.added.join(", "), 400)}`, "import-sites");
+        if (item.removed.length) add(body, "span", `− ${excerpt(item.removed.join(", "), 400)}`, "import-sites");
         if (item.weakens) add(body, "span", `⚠️ ${t(currentLang, "settingsImport_weakens")}`, "import-badge");
       } else if (item.kind === "prompt") {
         add(body, "strong", t(currentLang, "settingsImport_promptChange"));
@@ -1224,8 +1317,9 @@ function confirmSettingsImport(items, restored) {
     cancelBtn.className = "secondary";
     // Settle in the click handlers and use the 'close' event only as the
     // Esc/backdrop path: some embedded or automated environments run
-    // showModal() without ever firing the dialog's close event, and the
-    // import must never hang on the event alone.
+    // showModal() without ever firing the dialog's close event (found by the
+    // real-Chrome CDP suite in v1.10.140), and the import must never hang on
+    // the event alone.
     let settled = false;
     const finish = (value) => {
       if (settled) return;
@@ -1279,7 +1373,7 @@ async function importSettings() {
     // against models.js), so a bad value can at worst restore a default,
     // not break anything.
     const NUMERIC_SETTINGS_KEYS = new Set([COMPOSER_HEIGHT_STORAGE_KEY]);
-    const BOOLEAN_SETTINGS_KEYS = new Set([PII_FILTER_STORAGE_KEY, PAGE_VISUALS_STORAGE_KEY, AUTO_WEB_RESEARCH_KEY, INCLUDE_CONTEXT_STORAGE_KEY]);
+    const BOOLEAN_SETTINGS_KEYS = new Set([PII_FILTER_STORAGE_KEY, PAGE_VISUALS_STORAGE_KEY, AUTO_WEB_RESEARCH_KEY]);
     const restored = {};
     for (const key of SETTINGS_BACKUP_KEYS) {
       const value = backup.settings[key];
@@ -1287,6 +1381,13 @@ async function importSettings() {
         if (typeof value === "number" && Number.isFinite(value)) restored[key] = value;
       } else if (BOOLEAN_SETTINGS_KEYS.has(key)) {
         if (typeof value === "boolean") restored[key] = value;
+      } else if (key === INCLUDE_CONTEXT_STORAGE_KEY) {
+        // true / false / "ask" only; any other value is not a page-reading mode.
+        if (pageContextModeOf(value) !== null) restored[key] = value;
+      } else if (HOST_LIST_KEYS.includes(key)) {
+        // An array of site names, normalized and capped; never taken as-is.
+        const list = normalizeImportedHostList(value);
+        if (list) restored[key] = list;
       } else if (typeof value === "string" && (value || !SETTINGS_BACKUP_SECRET_KEYS.includes(key))) {
         // v1 plaintext files may carry EMPTY-STRING keys: skipping those keeps
         // an existing stored key alive (the comment below promises exactly

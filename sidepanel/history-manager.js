@@ -10,13 +10,9 @@
 // panel's DOM.
 
 import { cutAtCodePointBoundary } from "../models.js";
-import {
-  HISTORY_ATTACHMENT_PREVIEW_CHARS,
-  attachmentCharCount,
-  condenseAttachments,
-  normalizeAttachments,
-} from "../attachments.js";
+import { HISTORY_ATTACHMENT_PREVIEW_CHARS, condenseAttachments } from "../attachments.js";
 import { sanitizePiiMap } from "../privacy/pii-filter.js";
+import { isValidMessageId, isValidTimestamp } from "../conversation-store.js";
 //
 // makeTopicTitle() takes the empty-input fallback title as an argument:
 // sidepanel.js passes the localized "New topic" string; the default keeps
@@ -48,18 +44,19 @@ function makeTopicTitle(messages, fallbackTitle = "") {
 // condenses attachments in history turns to this same preview size before
 // sending them anyway, so only the stored copy is shortened (the live session
 // keeps the full text for the current request). The preview is cut on the
-// structured `attachments` field - `content` is never touched, which also keeps
-// a message's merge identity (role + model + content) stable across saves.
+// structured `attachments` field - `content` is never touched, and a message is
+// identified by its `id` (see conversation-store.js), so shortening a preview
+// can never make a stored message look like a different one.
 const STORED_ATTACHMENT_PREVIEW_CHARS = HISTORY_ATTACHMENT_PREVIEW_CHARS;
 
 function toStoredMessage(message) {
   const content = message.content;
-  // Only user turns carry attachments. A message that an earlier quota-pressed
-  // save already shrank further (see rememberQuotaCondensedAttachments) keeps
-  // the smaller preview, so every later save does not have to fail on quota
-  // again before it is shrunk.
+  // Only user turns carry attachments. If an earlier quota-pressed save already
+  // shrank this message's preview further, the merge keeps that smaller stored
+  // copy (see reconcileDuplicate in conversation-store.js), so a later save does
+  // not have to fail on quota again before shrinking it.
   const attachments = message.role === "user"
-    ? condenseAttachments(message.attachments, message.quotaCondensed === true ? QUOTA_ATTACHMENT_PREVIEW_CHARS : STORED_ATTACHMENT_PREVIEW_CHARS)
+    ? condenseAttachments(message.attachments, STORED_ATTACHMENT_PREVIEW_CHARS)
     : [];
   // displayContent is a display-only copy; store it ONLY when it differs
   // from content - every reader falls back to `content`. Identical copies
@@ -67,6 +64,11 @@ function toStoredMessage(message) {
   // of the conversation list.
   const displayContent = message.displayContent || message.content;
   return {
+    // Identity and creation time (see conversation-store.js): set once when the
+    // message is created and carried through every save, so two copies of one
+    // conversation can be merged by id and ordered by time.
+    ...(isValidMessageId(message.id) ? { id: message.id } : {}),
+    ...(isValidTimestamp(message.createdAt) ? { createdAt: message.createdAt } : {}),
     role: message.role,
     content,
     ...(attachments.length ? { attachments } : {}),
@@ -96,7 +98,8 @@ function toStoredMessage(message) {
 // Storage-quota pressure valve, applied to the merged list BEFORE any
 // conversation is dropped: shrink attachment previews further and drop the
 // display-only copy of every message (readers fall back to `content`).
-// Lossy for display, but every conversation and every turn is kept.
+// Lossy for display, but every conversation and every turn is kept (ids and
+// timestamps are untouched, so the shortened copy is still the same message).
 const QUOTA_ATTACHMENT_PREVIEW_CHARS = 800;
 function compressForQuota(list) {
   return list.map((c) => ({
@@ -114,33 +117,11 @@ function compressForQuota(list) {
   }));
 }
 
-// After a quota-escalated save persisted shrunken previews, remember that on the
-// LIVE messages (index-aligned with the stored current conversation -
-// syncCurrentConversationFromHistory projects history 1:1): their next stored
-// projection then starts from the small preview instead of re-trying the large
-// one and failing on quota again. Only a message that really matches the stored
-// turn (same role and content) is marked - a diverged stored turn (another panel
-// appended its own turn at this index) must never affect this panel's message.
-function rememberQuotaCondensedAttachments(history, storedMessages) {
-  if (!Array.isArray(history) || !Array.isArray(storedMessages)) return;
-  const length = Math.min(history.length, storedMessages.length);
-  for (let i = 0; i < length; i++) {
-    const live = history[i];
-    const stored = storedMessages[i];
-    if (!live || !stored || live.role !== stored.role || live.content !== stored.content) break;
-    if (live.role !== "user" || !live.attachments?.length) continue;
-    const storedChars = attachmentCharCount(normalizeAttachments(stored.attachments));
-    const freshChars = attachmentCharCount(condenseAttachments(live.attachments, STORED_ATTACHMENT_PREVIEW_CHARS));
-    if (storedChars < freshChars) live.quotaCondensed = true;
-  }
-}
-
 export {
   cleanForTopic,
   makeTopicTitle,
   toStoredMessage,
   compressForQuota,
-  rememberQuotaCondensedAttachments,
   STORED_ATTACHMENT_PREVIEW_CHARS,
   QUOTA_ATTACHMENT_PREVIEW_CHARS,
 };

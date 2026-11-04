@@ -15,9 +15,14 @@
       <select id="modelSelect" aria-label="Model" title="Select model" data-i18n-aria-label="modelSelect_ariaLabel" data-i18n-title="modelSelect_title"></select>
     </div>
     <div class="controls">
-      <label class="toggle" title="Include the current page content" data-i18n-title="readCurrentPage_title">
-        <input type="checkbox" id="includeContextToggle" checked />
+      <label class="toggle context-mode" title="Choose whether the current page is sent with your questions" data-i18n-title="readCurrentPage_title">
         <span data-i18n="readCurrentPage_label">Read current page</span>
+        <select id="includeContextSelect" aria-label="Read current page" data-i18n-aria-label="readCurrentPage_label">
+          <option value="" disabled hidden selected data-i18n="readCurrentPage_unset">Not set</option>
+          <option value="off" data-i18n="readCurrentPage_off">Off</option>
+          <option value="ask" data-i18n="readCurrentPage_ask">Ask each time</option>
+          <option value="on" data-i18n="readCurrentPage_on">Always</option>
+        </select>
       </label>
       <button id="clearBtn" class="icon-btn" type="button" title="Clear conversation" data-i18n="clear_button" data-i18n-title="clear_title">Clear</button>
       <button id="optionsBtn" class="icon-btn" type="button" title="Open settings page" data-i18n="settings_button" data-i18n-title="settings_title">Settings</button>

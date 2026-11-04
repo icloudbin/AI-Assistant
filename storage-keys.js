@@ -8,8 +8,20 @@ export const HISTORY_STORAGE_KEY = "conversationHistory";
 export const LANGUAGE_STORAGE_KEY = "languagePreference";
 // UI theme: "light" | "dark" | "device".
 export const THEME_STORAGE_KEY = "themePreference";
-// Privacy: send the current page with ordinary questions.
+// Privacy: send the current page with ordinary questions. true = always,
+// false = off, "ask" = ask each time. ABSENT means the user has not chosen yet
+// (first run): page reading stays off and the panel asks once. See
+// page-context-policy.js.
 export const INCLUDE_CONTEXT_STORAGE_KEY = "includeCurrentPageContext";
+// Privacy: the user's own site lists - arrays of host names (see
+// sensitive-sites.js). Pages of the first are never sent, even by a quick
+// action; the second skips the sensitive-site protection and the "ask" prompt.
+export const PAGE_NEVER_HOSTS_STORAGE_KEY = "pageNeverSendHosts";
+export const PAGE_ALLOW_HOSTS_STORAGE_KEY = "pageAlwaysAllowHosts";
+// One-time notices the user has already seen (booleans). They are shown once,
+// before the first microphone use / the first attached image.
+export const MIC_CLOUD_NOTICE_STORAGE_KEY = "micCloudNoticeAcknowledged";
+export const IMAGE_NOTICE_STORAGE_KEY = "imageNoticeAcknowledged";
 // Privacy: attach page screenshots/images to quick actions.
 export const PAGE_VISUALS_STORAGE_KEY = "pageVisualsEnabled";
 // Privacy filter default-on flag (see privacy/pii-filter.js).
