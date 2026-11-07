@@ -396,6 +396,9 @@ let currentAssistantBubble = null;
 // plain text (see setBubbleContent) and stored with plain: true.
 let pendingPlainReply = false;
 let currentAssistantText = "";
+// Independent UI-side cap: also protects multi-batch translations and guards
+// against any malformed internal CHUNK message that bypasses the SSE reader.
+const MAX_ASSISTANT_REPLY_CHARS = 1_000_000;
 // placeholder -> value map of the in-flight request (sent by the worker as
 // PII_MAP). The reply text itself keeps its placeholders ([EMAIL#1]); values
 // are put back only when it is DISPLAYED, and only in text (setBubbleContent).
@@ -1550,7 +1553,29 @@ function handlePortMessage(msg) {
       break;
     }
     case "CHUNK": {
-      currentAssistantText += msg.delta;
+      const delta = typeof msg.delta === "string" ? msg.delta : "";
+      const remaining = MAX_ASSISTANT_REPLY_CHARS - currentAssistantText.length;
+      if (delta.length > remaining) {
+        let prefix = remaining > 0 ? delta.slice(0, remaining) : "";
+        if (prefix.length && /[\uD800-\uDBFF]$/.test(prefix)) prefix = prefix.slice(0, -1);
+        currentAssistantText += prefix;
+        scheduleStreamingRender();
+
+        // Send STOP, then use the normal ERROR finalizer to retain the
+        // partial response and re-enable the composer.
+        const requestId = currentRequestId;
+        try { port?.postMessage({ type: "STOP", requestId }); } catch {}
+        handlePortMessage({
+          type: "ERROR",
+          requestId,
+          error: t(currentLang, "bg_error_streamTooLarge", {
+            limit: MAX_ASSISTANT_REPLY_CHARS.toLocaleString(),
+          }),
+        });
+        currentRequestId = null;
+        break;
+      }
+      currentAssistantText += delta;
       scheduleStreamingRender();
       break;
     }

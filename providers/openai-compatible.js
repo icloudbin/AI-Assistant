@@ -294,6 +294,19 @@ export function extractOpenAIDelta(json) {
 const STREAM_IDLE_TIMEOUT_MS = 90 * 1000;
 const STREAM_TOTAL_TIMEOUT_MS = 15 * 60 * 1000;
 
+// Per-request resource limits. Bytes count the complete upstream response
+// (including SSE framing); line size bounds one SSE event before JSON.parse;
+// content size counts user-visible text rather than provider metadata.
+export const STREAM_MAX_BYTES = 4 * 1024 * 1024;
+export const STREAM_MAX_CONTENT_CHARS = 1_000_000;
+export const STREAM_MAX_SSE_LINE_CHARS = 256 * 1024;
+
+function streamLimitError(lang, limit) {
+  return new Error(t(lang, "bg_error_streamTooLarge", {
+    limit: Number(limit).toLocaleString(),
+  }));
+}
+
 async function readSse(resp, extractDelta, ctx, extractError = null) {
   const reader = resp.body.getReader();
   const signal = ctx.signal;
@@ -311,6 +324,14 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
   let jsonText = isJsonResponse ? "" : null;
   let buffer = "";
   let emitted = false;
+  let receivedBytes = 0;
+  let contentChars = 0;
+  const maxBytes = Number.isSafeInteger(ctx.streamMaxBytes) && ctx.streamMaxBytes > 0
+    ? ctx.streamMaxBytes : STREAM_MAX_BYTES;
+  const maxContentChars = Number.isSafeInteger(ctx.streamMaxContentChars) && ctx.streamMaxContentChars > 0
+    ? ctx.streamMaxContentChars : STREAM_MAX_CONTENT_CHARS;
+  const maxSseLineChars = Number.isSafeInteger(ctx.streamMaxSseLineChars) && ctx.streamMaxSseLineChars > 0
+    ? ctx.streamMaxSseLineChars : STREAM_MAX_SSE_LINE_CHARS;
   // A well-formed OpenAI-compatible stream always ends with an explicit
   // terminal event: the "data: [DONE]" marker and/or a chunk carrying
   // finish_reason. A network failure mid-stream (connection reset, offline)
@@ -384,6 +405,20 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
     // A stream that produced reasoning but no content therefore counts as an
     // empty completion and fails below, exactly like the translation behavior.
     if (content) {
+      const remaining = maxContentChars - contentChars;
+      if (content.length > remaining) {
+        // Preserve the allowed prefix, but do not accept text beyond the cap.
+        let prefix = remaining > 0 ? content.slice(0, remaining) : "";
+        if (prefix.length && /[\uD800-\uDBFF]$/.test(prefix)) prefix = prefix.slice(0, -1);
+        if (prefix) {
+          emitted = true;
+          contentChars += prefix.length;
+          if (ctx.lineTranslator) ctx.lineTranslator.push(prefix);
+          else ctx.sendChunk(prefix);
+        }
+        throw streamLimitError(ctx.lang, maxContentChars);
+      }
+      contentChars += content.length;
       emitted = true;
       if (ctx.lineTranslator) ctx.lineTranslator.push(content);
       else ctx.sendChunk(content);
@@ -410,15 +445,18 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
       throwIfStopped();
       if (done) break;
       armIdleTimer();
+      receivedBytes += value?.byteLength || 0;
+      if (receivedBytes > maxBytes) throw streamLimitError(ctx.lang, maxBytes);
       const decoded = decoder.decode(value, { stream: true });
       if (jsonText !== null) jsonText += decoded;
-      buffer += decoded;
-      const lines = buffer.split("\n");
+      const lines = (buffer + decoded).split("\n");
       buffer = lines.pop() || "";
       for (const line of lines) {
         throwIfStopped();
+        if (line.length > maxSseLineChars) throw streamLimitError(ctx.lang, maxSseLineChars);
         handleLine(line);
       }
+      if (buffer.length > maxSseLineChars) throw streamLimitError(ctx.lang, maxSseLineChars);
     }
     if (timedOut) throw timeoutError();
     throwIfStopped();
@@ -427,6 +465,7 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
     const tail = decoder.decode();
     if (jsonText !== null) jsonText += tail;
     buffer += tail;
+    if (buffer.length > maxSseLineChars) throw streamLimitError(ctx.lang, maxSseLineChars);
     if (buffer.trim()) handleLine(buffer);
   } catch (err) {
     reader.cancel().catch(() => {});

@@ -9,11 +9,12 @@
 //
 // Pure functions, no chrome.* calls, so they can be unit-tested in Node.
 //
-// Known limit: a PUBLIC hostname whose DNS record points at a private address
-// (DNS rebinding, or wildcard-DNS services) cannot be detected here - browser
-// extensions have no DNS-resolution API. The best-effort suffix list below
-// covers the common wildcard-DNS services; everything else relies on the
-// redirect/final-URL check and on the response having to be a genuine image.
+// Browser extensions do not expose a reliable DNS-resolution-and-pinning API.
+// Therefore arbitrary hostnames must never be fetched by this privileged worker.
+// The allowlist below contains exact, vendor-controlled image hostnames only;
+// no wildcard subdomains, arbitrary ports, redirects, or private-network
+// exceptions are permitted. Public IP literals are safe from DNS rebinding and
+// are independently checked against non-public address ranges.
 
 // ---------- IPv4 ----------
 function parseIPv4(host) {
@@ -107,6 +108,35 @@ const LOCAL_NAME_SUFFIXES = [
 // has no dot-separated suffix for LOCAL_NAME_SUFFIXES to catch.
 const LOCAL_NAMES = new Set(['localhost', 'localtest.me', 'lvh.me', 'nip.io', 'sslip.io', 'xip.io', 'traefik.me']);
 
+// Exact hostnames only. Do not replace this with suffix matching: tenant-owned
+// subdomains and wildcard DNS would reintroduce attacker-controlled DNS names.
+const TRUSTED_IMAGE_HOSTS = new Set([
+  'cdn.discordapp.com',
+  'cdn.jsdelivr.net',
+  'cdn.shopify.com',
+  'i.imgur.com',
+  'i.pinimg.com',
+  'images-na.ssl-images-amazon.com',
+  'images.ctfassets.net',
+  'images.pexels.com',
+  'images.unsplash.com',
+  'lh3.googleusercontent.com',
+  'm.media-amazon.com',
+  'pbs.twimg.com',
+  'raw.githubusercontent.com',
+  'upload.wikimedia.org',
+]);
+
+function isPublicIpLiteral(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  if (host.startsWith('[') && host.endsWith(']')) {
+    const groups = parseIPv6(host.slice(1, -1));
+    return Boolean(groups && !isNonPublicIPv6(groups));
+  }
+  const octets = parseIPv4(host);
+  return Boolean(octets && !isNonPublicIPv4(octets));
+}
+
 // True when `hostname` (as returned by URL.hostname, which already normalises
 // decimal/hex/octal IPv4 spellings and IPv6 forms) names this machine, a private
 // or reserved network, or an unqualified intranet name - i.e. anything that is
@@ -128,19 +158,14 @@ export function isNonPublicHost(hostname) {
   return LOCAL_NAME_SUFFIXES.some((suffix) => host.endsWith(suffix));
 }
 
-// Decides whether the service worker may fetch `rawUrl` as an image.
-//  - only http(s), no embedded credentials;
-//  - public hosts are allowed;
-//  - a non-public host is allowed ONLY when it is the same scheme AND host AND
-//    PORT as the page the user is currently looking at (`pageUrl`), so images
-//    on an intranet or localhost page still work while that page is open, but
-//    a page on localhost:3000 (or a model reply) can never point the extension
-//    at another service on the same machine such as localhost:6379 or :22.
-//    Same scheme matters because URL.host hides DEFAULT ports (80 for http,
-//    443 for https): without it, an http://localhost/ page (port 80) would
-//    also unlock https://localhost/ (port 443) - a different local service.
-// Returns the parsed URL when allowed, otherwise null.
-export function checkImageUrl(rawUrl, pageUrl = '') {
+// Decides whether the privileged service worker may fetch `rawUrl` as an image.
+// A public hostname is still unsafe to resolve here: DNS rebinding can make it
+// resolve to a private address after the string-level check. Since extensions
+// cannot pin fetch() to a verified DNS result, only exact, vetted image hosts
+// and public IP literals (which require no DNS lookup) are allowed.
+// `pageUrl` is retained for call-site compatibility but deliberately grants
+// no same-origin or private-network exception.
+export function checkImageUrl(rawUrl, _pageUrl = '') {
   let url;
   try {
     url = new URL(String(rawUrl));
@@ -149,13 +174,14 @@ export function checkImageUrl(rawUrl, pageUrl = '') {
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
   if (url.username || url.password) return null;
-  if (!isNonPublicHost(url.hostname)) return url;
-  try {
-    const page = new URL(String(pageUrl));
-    if (page.protocol === url.protocol && page.host === url.host) return url; // host = hostname + non-default port
-  } catch {
-    // no usable page URL: fall through to blocked
-  }
+  // Only default ports are permitted. URL.port is empty for an implicit or
+  // explicitly written default port, and non-empty for every non-default port.
+  if (url.port) return null;
+
+  const host = url.hostname.toLowerCase().replace(/\.+$/, '');
+  if (isNonPublicHost(host)) return null;
+  if (isPublicIpLiteral(host)) return url;
+  if (TRUSTED_IMAGE_HOSTS.has(host)) return url;
   return null;
 }
 

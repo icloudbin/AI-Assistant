@@ -11,32 +11,36 @@ const eq = (name, got, want) => {
 };
 const allowed = (img, page) => checkImageUrl(img, page) !== null;
 
-// Same host AND port as the page: allowed (images on a local dev page keep working).
-eq("localhost:3000 page, image on localhost:3000", allowed("http://localhost:3000/a.png", "http://localhost:3000/"), true);
-eq("intranet page, image on same host", allowed("http://nas.corp:5000/a.png", "http://nas.corp:5000/x"), true);
-eq("default port is the same as an explicit one", allowed("http://localhost/a.png", "http://localhost:80/"), true);
-// Other ports on the same machine: blocked (the reported bug).
+// Private and intranet destinations are blocked even when they match pageUrl.
+for (const [url, page] of [
+  ["http://localhost:3000/a.png", "http://localhost:3000/"],
+  ["http://nas.corp:5000/a.png", "http://nas.corp:5000/x"],
+  ["http://localhost/a.png", "http://localhost:80/"],
+  ["https://localhost:8443/a.png", "https://localhost:8443/x"],
+  ["http://127.0.0.1:3000/a.png", "http://127.0.0.1:3000/"],
+  ["http://[::1]:3000/a.png", "http://[::1]:3000/"],
+]) {
+  eq(`private destination blocked: ${url}`, allowed(url, page), false);
+}
 for (const port of [6379, 22, 5432, 8080, 80]) {
   eq(`localhost:3000 page -> localhost:${port}`, allowed(`http://localhost:${port}/x`, "http://localhost:3000/"), false);
 }
-eq("127.0.0.1:3000 page -> 127.0.0.1:6379", allowed("http://127.0.0.1:6379/x", "http://127.0.0.1:3000/"), false);
-eq("[::1]:3000 page -> [::1]:6379", allowed("http://[::1]:6379/x", "http://[::1]:3000/"), false);
-eq("localhost page (no port) -> localhost:6379", allowed("http://localhost:6379/x", "http://localhost/"), false);
-// Same host but the OTHER scheme's default port (80 vs 443) is a different
-// local service: URL.host hides default ports, so these used to compare equal.
-eq("http://localhost/ page -> https://localhost/", allowed("https://localhost/a.png", "http://localhost/"), false);
-eq("https://localhost/ page -> http://localhost/", allowed("http://localhost/a.png", "https://localhost/"), false);
-eq("http://localhost:80/ page -> https://localhost:443/", allowed("https://localhost:443/a.png", "http://localhost:80/"), false);
-eq("https page, image on same explicit https port", allowed("https://localhost:8443/a.png", "https://localhost:8443/x"), true);
 // Other hosts, from a public page, and metadata endpoints.
 eq("public page -> localhost", allowed("http://localhost:3000/x", "https://example.com/"), false);
 eq("public page -> 169.254.169.254", allowed("http://169.254.169.254/latest/meta-data", "https://example.com/"), false);
 eq("local page -> different local host", allowed("http://192.168.1.1/a.png", "http://localhost:3000/"), false);
 eq("no page url -> local host blocked", allowed("http://localhost:3000/a.png", ""), false);
-// Public hosts still fine; non-http and credentials still rejected.
-eq("public image allowed", allowed("https://upload.wikimedia.org/a.png", "https://example.com/"), true);
+// Exact trusted image hosts and DNS-free public IP literals are allowed.
+eq("allowlisted Wikimedia host", allowed("https://upload.wikimedia.org/a.png", "https://example.com/"), true);
+eq("allowlisted Unsplash host", allowed("https://images.unsplash.com/photo.jpg", "https://example.com/"), true);
+eq("allowlisted host with trailing dot", allowed("https://upload.wikimedia.org./a.png", "https://example.com/"), true);
+eq("public IPv4 literal", allowed("https://93.184.216.34/a.png", "https://example.com/"), true);
+eq("public IPv6 literal", allowed("https://[2001:4860:4860::8888]/a.png", "https://example.com/"), true);
+eq("arbitrary public hostname blocked", allowed("https://example.com/a.png", "https://example.com/"), false);
+eq("unapproved CDN hostname blocked", allowed("https://cdn.corporate.com/a.png", "https://example.com/"), false);
+eq("non-default port blocked", allowed("https://upload.wikimedia.org:8443/a.png", "https://example.com/"), false);
 eq("file: rejected", allowed("file:///etc/passwd", "http://localhost:3000/"), false);
-eq("credentials rejected", allowed("http://u:p@localhost:3000/a.png", "http://localhost:3000/"), false);
+eq("credentials rejected", allowed("https://u:p@upload.wikimedia.org/a.png", "https://example.com/"), false);
 // Internal-network suffixes are non-public.
 for (const h of ["printer.corp", "nas.home", "svc.test", "a.example", "x.invalid", "db.private", "pc.domain", "box.workgroup", "laptop.tail1234.ts.net", "router.lan", "a.internal", "b.local"]) {
   eq(`${h} is non-public`, isNonPublicHost(h), true);
@@ -48,7 +52,8 @@ for (const h of ["example.com", "upload.wikimedia.org", "cdn.corporate.com", "ho
 for (const h of ["nip.io", "sslip.io", "xip.io", "traefik.me", "localtest.me", "lvh.me"]) {
   eq(`${h} (bare) is non-public`, isNonPublicHost(h), true);
 }
-// Internal-suffix host is only reachable from a page on the same host:port.
+// Wildcard-DNS hostnames remain blocked regardless of the embedded address.
 eq("public page -> printer.corp", allowed("http://printer.corp/a.png", "https://example.com/"), false);
+eq("nip.io rebinding hostname blocked", allowed("http://127.0.0.1.nip.io/a.png", "https://example.com/"), false);
 
 process.exit(failed ? 1 : 0);
