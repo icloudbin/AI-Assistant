@@ -14,7 +14,7 @@ Custom prompts configured by the user
 Interface language and translation preferences
 Voice input language preference
 Locally saved conversation history
-Privacy filter, page reading mode, Never send / Always allow site lists, page screenshot and automatic web search preferences
+Privacy filter, page reading checkbox, page screenshot and automatic web search preferences
 Temporary information required to pass a user-initiated context-menu action to the Side Panel
 
 The Extension does not transmit these locally stored settings to the Extension developer's servers.
@@ -37,13 +37,11 @@ Examples include asking questions about the current page, summarizing, translati
 
 The Extension is designed to use the current active webpage and refresh its context when the user changes tabs or navigates to another page.
 
-When the Read current page option is disabled, ordinary questions are not sent with the current webpage content as context.
+When the Read current page checkbox is unchecked, ordinary questions are not sent with the current webpage content as context.
 
-"Read current page" has three states - Off, Ask each time, and Always - chosen by the user on first use and changeable any time in the side panel. Until the user has made that choice (for example on a fresh install), nothing is read for ordinary questions, which is the same behavior as Off. When it is Ask each time, a confirmation dialog shows what would be sent (the page's title and site, and the selected model) before anything goes out; the user can send it, send the question without the page, or cancel. The side panel's context bar shows which page (title and site) would be sent with the next question.
+"Read current page" is a checkbox in the side panel, checked by default: with it checked, the current page is sent with ordinary questions; unchecking it stops that until it is checked again. The side panel's context bar shows which page (title and site) would be sent with the next question.
 
-The quick actions (Summarize, Translate, Explain, Key Points and Fact Check) are explicit actions on the current page and run regardless of the "Read current page" mode.
-
-The Extension ships with a heuristic list of sensitive sites - webmail, online banking and payment, brokerages, crypto exchanges, password managers, sign-in and identity, tax/government and payment-dashboard pages (for example Gmail, Outlook, Proton Mail, PayPal and major banks, plus self-hosted mail pages recognised by the extension's mail extractors). On a sensitive site the page is sent only after the user confirms it in the dialog described above, or after the user clicks "Don't ask again for this site" - a permission that applies only to that site and only until the side panel is closed. On ordinary questions a sensitive page is not sent at all unless "Read current page" is Always. The user can add two editable lists in Settings, which take precedence over the built-in rules: a Never send list (nothing from such a site is sent; quick actions on it are refused outright) and an Always allow list (skips the sensitive-site confirmation and the Ask-each-time question, but not the Off mode). The built-in list is a heuristic and does not cover every mail or banking site.
+The quick actions (Summarize, Translate, Explain, Key Points and Fact Check) are explicit actions on the current page and read it whatever the checkbox says. There are no site lists and no per-send confirmation dialogs; the privacy filter described below still applies to the page text.
 
 Page screenshot and images: only if the user turns on "Page screenshot and images" in Settings (off by default), the quick actions also capture a screenshot of the visible part of the current tab and up to a few of the page's images and send them to the selected AI provider. These images are sent as they appear, including any personal information visible on the page; the privacy filter described below cannot redact images. Images the user attaches themselves are sent as described in section 3.
 
@@ -126,8 +124,6 @@ Translate - the selected text is translated into the Preferred Translation Langu
 
 The selected text is used only for the user-requested operation. The Extension does not automatically process all webpage selections or monitor right-click activity. The selected text and the page URL are held only in the browser's in-memory session storage until the action runs (or for at most two minutes, whichever comes first); they are never written to disk.
 
-The site rules described in section 2 apply to this action as well: on a site the user has put on the Never send list the action is refused, and on a sensitive site the Extension asks for confirmation first (with a per-site "don't ask again" option). Only the text the user selected is sent - never the rest of the page.
-
 10. Data Sharing
 
 The Extension does not sell user data.
@@ -154,7 +150,7 @@ However, when information is sent to a third-party AI provider, that provider's 
 
 13. User Control
 
-Users can control whether webpage content is included in ordinary AI requests through the Read current page setting, and can add sites to the Never send / Always allow lists in Settings.
+Users can control whether webpage content is included in ordinary AI requests through the Read current page checkbox in the side panel.
 
 Users can also:
 

@@ -7,19 +7,16 @@ import {
   MAX_SAVED_CONVERSATIONS,
   THEME_STORAGE_KEY,
   INCLUDE_CONTEXT_STORAGE_KEY,
-  PAGE_NEVER_HOSTS_STORAGE_KEY,
-  PAGE_ALLOW_HOSTS_STORAGE_KEY,
   MIC_CLOUD_NOTICE_STORAGE_KEY,
   IMAGE_NOTICE_STORAGE_KEY,
   PAGE_VISUALS_STORAGE_KEY,
   COMPOSER_HEIGHT_STORAGE_KEY,
   MIC_LANG_STORAGE_KEY,
 } from "../storage-keys.js";
-import { sitePolicy, hostOf, parseHostList } from "../sensitive-sites.js";
+import { hostOf } from "../url-safety.js";
 // S-05: the rules for "does this request send the page?" (pure, unit-tested) and
 // the modal questions the panel asks.
-import { pageContextModeOf, storedValueForMode, decidePageSend, contextBarStateFor } from "../page-context-policy.js";
-import { showPageChoiceDialog, showPageConfirmDialog, showNoticeDialog, dismissDialog, PAGE_CHOICE_DIALOG_ID, PAGE_CONFIRM_DIALOG_ID } from "./dialogs.js";
+import { showNoticeDialog, dismissDialog } from "./dialogs.js";
 import { getStoredLanguage, applyStaticTranslations, t, LANGUAGE_STORAGE_KEY, normalizeLanguage } from "../i18n.js";
 // The panel owns two settings whose live writes must reach the IndexedDB
 // recovery mirror: "Read current page" (a storage reset must never silently
@@ -152,68 +149,23 @@ const questionInput = document.getElementById("questionInput");
 const sendBtn = document.getElementById("sendBtn");
 const clearBtn = document.getElementById("clearBtn");
 const optionsBtn = document.getElementById("optionsBtn");
-const includeContextSelect = document.getElementById("includeContextSelect");
-// Privacy (S-05). What "Read current page" does is the USER's choice, made on
-// first use: off, ask each time, or always (page-context-policy.js). Until they
-// choose, `pageContextMode` is null and no page is read for ordinary questions.
-// On top of that, webmail / banking and other sensitive sites (sensitive-sites.js)
-// are protected, and the user's own never-send / always-allow lists come first.
-// Quick actions (Summarize, ...) are explicit actions on the page: they ask once
-// on a sensitive site and are refused on a never-send site.
+const includeContextCheckbox = document.getElementById("includeContextCheckbox");
+// "Read current page": a plain checkbox, checked by default. Checked = the page
+// goes with ordinary questions; unchecked = it does not. Quick actions
+// (Summarize, ...) operate on the page and always read it. There are no site
+// lists and no per-send confirmations.
 const pageContextBar = document.getElementById("pageContextBar");
 const pageContextTitle = document.getElementById("pageContextTitle");
-const pageContextAllowBtn = document.getElementById("pageContextAllowBtn");
-// null (not chosen yet) | "off" | "ask" | "on"
-let pageContextMode = null;
-// Hosts the user approved for the life of this panel ("don't ask again for this
-// site", "send this site this session"). Never persisted.
-const sessionAllowedHosts = new Set();
-// The user's never-send / always-allow lists as last read. Display only: every
-// request re-reads storage (readSiteLists) before it decides.
-let siteLists = { neverHosts: [], allowHosts: [] };
+let pageReadingEnabled = true;
 
-async function readSiteLists() {
-  const stored = await chrome.storage.local.get([PAGE_NEVER_HOSTS_STORAGE_KEY, PAGE_ALLOW_HOSTS_STORAGE_KEY]);
-  return {
-    neverHosts: parseHostList(stored[PAGE_NEVER_HOSTS_STORAGE_KEY]),
-    allowHosts: parseHostList(stored[PAGE_ALLOW_HOSTS_STORAGE_KEY]),
-  };
-}
-
-async function refreshSiteListsCache() {
-  try {
-    siteLists = await readSiteLists();
-  } catch (err) {
-    console.debug("[AI Assistant] Unable to read the site lists:", err);
-  }
-}
-
-function pageReadingActive() {
-  return pageContextMode === "on" || pageContextMode === "ask";
-}
-
-// The decision for one page. `kind` is "ordinary" (a typed question) or "quick"
-// (Summarize and the other page actions); `source` names the extractor that read
-// the page (content.js), which can recognise webmail no hostname list knows.
-function pageDecision({ url, source = "", kind, lists = siteLists }) {
-  const policy = sitePolicy(url, lists, { source });
-  const host = hostOf(url);
-  return {
-    ...decidePageSend({ mode: pageContextMode, kind, policy, sessionAllowed: sessionAllowedHosts.has(host) }),
-    policy,
-    host,
-  };
-}
-
-// The page-reading preference is a privacy control, so it must be known before
-// the composer is unlocked. A failed read fails safe: page reading is OFF for
-// this panel session and the user is told - and is not asked to choose, because
-// there is no telling whether they already did.
+// The page-reading preference must be known before the composer is unlocked.
+// A failed read fails safe: page reading is OFF for this panel session and the
+// user is told.
 let includeContextPreferenceUnavailable = false;
 let includeContextPreferenceWarningShown = false;
 
-function syncContextSelect() {
-  includeContextSelect.value = pageContextMode ?? "";
+function syncContextCheckbox() {
+  includeContextCheckbox.checked = pageReadingEnabled;
 }
 
 async function loadIncludeContextPreference() {
@@ -226,15 +178,17 @@ async function loadIncludeContextPreference() {
         timer = setTimeout(() => reject(new Error("Timed out reading the page-reading preference.")), 5000);
       }),
     ]);
-    pageContextMode = pageContextModeOf(saved);
+    // A pre-checkbox build could store "ask" (an ask-each-time mode that no
+    // longer exists): it meant the user wanted the page, so it reads as checked.
+    pageReadingEnabled = saved === "ask" ? true : saved !== false;
     includeContextPreferenceUnavailable = false;
   } catch (err) {
-    pageContextMode = "off";
+    pageReadingEnabled = false;
     includeContextPreferenceUnavailable = true;
     console.warn("[AI Assistant] Unable to read the page-reading preference; page reading is off for this session:", err);
   } finally {
     if (timer) clearTimeout(timer);
-    syncContextSelect();
+    syncContextCheckbox();
   }
 }
 
@@ -245,7 +199,7 @@ function warnIncludeContextPreference() {
 }
 
 function applyIncludeContextUi() {
-  if (pageReadingActive()) {
+  if (pageReadingEnabled) {
     refreshActivePageContext().catch((err) => console.debug("[AI Assistant] Unable to refresh page context:", err));
   } else {
     // Invalidate a refresh that is already waiting on getCurrentActiveTab();
@@ -256,78 +210,53 @@ function applyIncludeContextUi() {
   }
 }
 
-// Settings import and the IndexedDB recovery layer write these keys directly.
-// Without this listener an already-open panel kept its old mode and could send
-// the page after an imported opt-out; the site lists are re-read for the bar too.
+// Settings import and the IndexedDB recovery layer write this key directly.
+// Without this listener an already-open panel kept its old state and could
+// send (or stop sending) the page against the imported choice.
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local") return;
-  if (changes[PAGE_NEVER_HOSTS_STORAGE_KEY] || changes[PAGE_ALLOW_HOSTS_STORAGE_KEY]) {
-    refreshSiteListsCache().then(() => renderContextBar());
-  }
-  if (!changes[INCLUDE_CONTEXT_STORAGE_KEY]) return;
-  const next = pageContextModeOf(changes[INCLUDE_CONTEXT_STORAGE_KEY].newValue);
+  if (areaName !== "local" || !changes[INCLUDE_CONTEXT_STORAGE_KEY]) return;
+  const next = changes[INCLUDE_CONTEXT_STORAGE_KEY].newValue;
   includeContextPreferenceUnavailable = false;
-  if (next === pageContextMode) return;
-  pageContextMode = next;
-  syncContextSelect();
-  // Chosen in another window (or imported): this window's first-run question is moot.
-  if (next !== null) dismissDialog(PAGE_CHOICE_DIALOG_ID);
+  const enabled = next === "ask" ? true : next !== false;
+  if (enabled === pageReadingEnabled) return;
+  pageReadingEnabled = enabled;
+  syncContextCheckbox();
   applyIncludeContextUi();
 });
 
-// Stores a mode the user picked (top bar or first-run question). Resolves to
-// whether it was saved; on a failed write the control goes back to what is stored.
-async function persistPageContextMode(mode) {
-  const value = storedValueForMode(mode);
-  if (value === undefined) {
-    syncContextSelect();
-    return false;
-  }
+// Stores the user's checkbox choice. Resolves to whether it was saved; on a
+// failed write the control goes back to what is stored.
+async function persistPageContextEnabled(enabled) {
   // Prevent a second change while the first write is being verified; otherwise
   // the two verifications can read each other's values and report a false
   // failure (or persist a stale choice).
-  includeContextSelect.disabled = true;
+  includeContextCheckbox.disabled = true;
   try {
-    await chrome.storage.local.set({ [INCLUDE_CONTEXT_STORAGE_KEY]: value });
+    await chrome.storage.local.set({ [INCLUDE_CONTEXT_STORAGE_KEY]: enabled });
     // Verify the write, so a storage failure cannot leave the control showing
     // a privacy choice that was not actually persisted.
     const verified = (await chrome.storage.local.get(INCLUDE_CONTEXT_STORAGE_KEY))[INCLUDE_CONTEXT_STORAGE_KEY];
-    if (verified !== value) throw new Error("The value was not persisted.");
+    if (verified !== enabled) throw new Error("The value was not persisted.");
   } catch (err) {
-    syncContextSelect();
+    syncContextCheckbox();
     addBubble("error", t(currentLang, "settings_saveFailed_template", {
       message: err?.message || t(currentLang, "unknownError"),
     }));
     applyIncludeContextUi();
     return false;
   } finally {
-    includeContextSelect.disabled = isStreaming;
+    includeContextCheckbox.disabled = isStreaming;
   }
-  pageContextMode = mode;
+  pageReadingEnabled = enabled;
   includeContextPreferenceUnavailable = false;
-  syncContextSelect();
+  syncContextCheckbox();
   // A failed recovery-mirror write does not change the primary setting; log it
   // rather than claiming the user's choice failed.
-  saveSettingsBackup({ [INCLUDE_CONTEXT_STORAGE_KEY]: value }).catch((err) => {
+  saveSettingsBackup({ [INCLUDE_CONTEXT_STORAGE_KEY]: enabled }).catch((err) => {
     console.warn("[AI Assistant] Unable to mirror the page-reading preference:", err);
   });
   applyIncludeContextUi();
   return true;
-}
-
-// First run: nobody has said whether the assistant may read pages, so ask - once
-// per panel, before anything is read. "Decide later" (or Esc) leaves it unset:
-// page reading stays off and the question comes back the next time the panel opens.
-let pageChoicePromptShown = false;
-async function promptPageContextChoiceIfNeeded() {
-  if (pageContextMode !== null || includeContextPreferenceUnavailable || pageChoicePromptShown) return;
-  pageChoicePromptShown = true;
-  await languageReady;
-  if (pageContextMode !== null) return;
-  const choice = await showPageChoiceDialog({ lang: currentLang });
-  // null: decided later. Not null but decided meanwhile (another window): keep that.
-  if (choice === null || pageContextMode !== null) return;
-  await persistPageContextMode(choice);
 }
 const modelSelect = document.getElementById("modelSelect");
 const uploadBtn = document.getElementById("uploadBtn");
@@ -1139,8 +1068,7 @@ function setStreaming(streaming) {
   // The page-reading toggle controls what the NEXT request sends; disabling it
   // during a request prevents the UI from claiming a page was excluded while
   // that request was already built with it.
-  includeContextSelect.disabled = streaming;
-  pageContextAllowBtn.disabled = streaming;
+  includeContextCheckbox.disabled = streaming;
   if (SpeechRecognitionCtor) {
     micBtn.disabled = streaming;
     micLangBtn.disabled = streaming;
@@ -1173,8 +1101,6 @@ function stopActiveRequest() {
   // a chunk already queued on the port before the abort signal reaches the
   // fetch on the other end).
   currentRequestId = null;
-  // A "send this page?" question belonging to the stopped request is answered "no".
-  dismissDialog(PAGE_CONFIRM_DIALOG_ID);
   if (port) {
     try {
       port.postMessage({ type: "STOP", requestId: stoppedRequestId });
@@ -1459,8 +1385,6 @@ async function captureVisiblePageScreenshot(expectedTabId, expectedUrl) {
   }
 }
 function renderContextBar() {
-  pageContextAllowBtn.hidden = true;
-  pageContextAllowBtn.removeAttribute("data-host");
   const state = lastContextBarState;
   if (!state) {
     pageContextBar.hidden = true;
@@ -1472,37 +1396,15 @@ function renderContextBar() {
     return;
   }
   const pageContext = state.pageContext;
-  const host = hostOf(pageContext.url);
   const label = pageContext.title || pageContext.url;
-  // `sent`: this is the page the request just sent (a quick action, or a question
-  // the user confirmed), whatever the mode says about the NEXT question. Otherwise
-  // the bar is derived from the very decision the next question would get.
-  const bar = state.sent
-    ? "send"
-    : contextBarStateFor(pageDecision({ url: pageContext.url, source: pageContext.source, kind: "ordinary" }));
-  switch (bar) {
-    case "hidden":
-      pageContextBar.hidden = true;
-      return;
-    case "never":
-      pageContextTitle.textContent = `🚫 ${t(currentLang, "contextBar_neverSend_template", { host })}`;
-      return;
-    case "blockedSensitive":
-      // Webmail / banking: make it unmistakable that nothing is sent.
-      pageContextTitle.textContent = `🔒 ${t(currentLang, "contextBar_sensitiveBlocked_template", { host })}`;
-      pageContextAllowBtn.textContent = t(currentLang, "contextBar_allowSensitive");
-      pageContextAllowBtn.dataset.host = host;
-      pageContextAllowBtn.hidden = false;
-      return;
-    case "askSensitive":
-      pageContextTitle.textContent = `🔒 ${t(currentLang, "contextBar_askSensitive_template", { host })}`;
-      return;
-    case "ask":
-      pageContextTitle.textContent = `📄 ${t(currentLang, "contextBar_willAsk_template", { title: label, host })}`;
-      return;
-    default:
-      pageContextTitle.textContent = `📄 ${t(currentLang, "contextBar_willSend_template", { title: label, host })}`;
+  // `sent`: this is the page the request just sent (a quick action, or a
+  // question with the checkbox on). Otherwise the bar previews the NEXT
+  // ordinary question, which carries the page only when the checkbox is on.
+  if (!state.sent && !pageReadingEnabled) {
+    pageContextBar.hidden = true;
+    return;
   }
+  pageContextTitle.textContent = `📄 ${t(currentLang, "contextBar_willSend_template", { title: label, host: hostOf(pageContext.url) })}`;
 }
 
 // `sent`: the page was actually sent with the request that is running now.
@@ -2021,7 +1923,7 @@ async function selectConversation(id) {
 // the tab the user is on now, exactly like the include-context toggle's own
 // change handler does.
 function refreshContextBarAfterConversationSwitch() {
-  if (pageReadingActive()) {
+  if (pageReadingEnabled) {
     refreshActivePageContext().catch(() => {});
   } else {
     updateContextBar(null);
@@ -3181,78 +3083,13 @@ async function shouldAttachPageVisuals(includePageImages, selectedModel) {
   }
 }
 
-// Carries out a pageDecision(): asks the user when it says "confirm".
-// -> "send" | "without" (the question goes without the page) | "cancel" (nothing is sent).
-async function resolvePageDecision(decision, { title, url, kind, selectedModel, visuals, isCancelled }) {
-  switch (decision.action) {
-    case "send":
-      return "send";
-    case "skip":
-      return "without";
-    case "refuse":
-      addBubble("notice", t(currentLang, "pageContext_neverRefused_template", { host: decision.host || shortenForDialog(url, 60) }));
-      return "cancel";
-    case "confirm": {
-      const answer = await showPageConfirmDialog({
-        lang: currentLang,
-        sensitive: decision.reason === "sensitive",
-        title: shortenForDialog(title),
-        host: decision.host || shortenForDialog(url, 60),
-        model: selectedModel.label,
-        // A typed question can still be asked without the page; a page action cannot.
-        allowWithout: kind === "ordinary",
-        visuals,
-      });
-      if (isCancelled()) return "cancel";
-      // "Don't ask again" belongs to sending the page; it is not a reason to trust a site the user just declined.
-      if (answer.choice === "send" && answer.remember && decision.host) sessionAllowedHosts.add(decision.host);
-      return answer.choice === "send" || answer.choice === "without" ? answer.choice : "cancel";
-    }
-    default:
-      return "cancel";
-  }
-}
-
-// Decides, BEFORE anything is cleared, pushed or saved, whether and which page
-// goes with this request - so Cancel leaves the draft exactly as it was.
-// -> { abort: true }                  nothing is sent; the user was told why, or declined
-//    { abort: false, includePage, approved }
-//      approved = { tabId, host, sensitive } for the page the user approved (or that needed no approval)
-async function gatePageSend({ kind, forcedIncludePageContext, selectedModel, visuals, isCancelled }) {
-  const none = { abort: false, includePage: false, approved: null };
-  // The context-menu "translate selection" works on the selected text only.
-  if (forcedIncludePageContext === false) return none;
-  // An ordinary question with page reading off (or not chosen yet) carries no page.
-  if (kind === "ordinary" && !pageReadingActive()) return none;
-
-  const tab = await getCurrentActiveTab();
-  // Fresh from storage: a list edited in Settings a moment ago applies to this request.
-  const lists = await readSiteLists();
-  if (isCancelled()) return { abort: true };
-  // No active tab: nothing can be read, and the capture below says so.
-  if (!tab) return { abort: false, includePage: true, approved: null };
-  const url = String(tab.url || "");
-  const title = String(tab.title || "");
-  const decision = pageDecision({ url, kind, lists });
-  if (decision.action === "skip") {
-    // Show on the bar why the page is not sent (🔒 / 🚫).
-    if (decision.reason === "sensitive" || decision.reason === "never") updateContextBar({ title, url });
-    return none;
-  }
-  const verdict = await resolvePageDecision(decision, { title, url, kind, selectedModel, visuals, isCancelled });
-  if (isCancelled() || verdict === "cancel") return { abort: true };
-  if (verdict === "without") return none;
-  if (decision.action === "confirm") {
-    // The user may have switched tabs while the question was open: what they
-    // approved is the page they were looking at when it opened.
-    const tabAfter = await getCurrentActiveTab();
-    if (isCancelled()) return { abort: true };
-    if (!tabAfter || tabAfter.id !== tab.id || hostOf(tabAfter.url) !== decision.host) {
-      addBubble("notice", t(currentLang, "pageContext_tabChanged"));
-      return { abort: true };
-    }
-  }
-  return { abort: false, includePage: true, approved: { tabId: tab.id, host: decision.host, sensitive: decision.policy === "sensitive" } };
+// Decides, BEFORE anything is cleared, pushed or saved, whether the page goes
+// with this request. Quick actions (Summarize, ...) operate on the page and
+// always include it; ordinary questions include it when the "Read current
+// page" checkbox is checked.
+function gatePageSend(kind, forcedIncludePageContext) {
+  if (forcedIncludePageContext === false) return false;
+  return kind !== "ordinary" || pageReadingEnabled;
 }
 
 async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "", noWebResearch = false, includePageImages = false, forceWebResearch = false, translateMode = false, translateSource = null, translateSourceFormat = "text", translateSourceTruncated = false) {
@@ -3338,17 +3175,8 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     saveConversations().catch(notifyHistorySaveFailure);
   };
   try {
-    // S-05: may the page go with this request? Asked before anything is cleared,
-    // pushed or saved: Cancel leaves the draft exactly as it was.
     const attachPageVisuals = await shouldAttachPageVisuals(includePageImages, selectedModel);
-    const gate = await gatePageSend({ kind: pageKind, forcedIncludePageContext, selectedModel, visuals: attachPageVisuals, isCancelled });
-    if (isCancelled()) return;
-    if (gate.abort) {
-      // Nothing was pushed or sent: unlock and keep the draft.
-      currentRequestId = null;
-      setStreaming(false);
-      return;
-    }
+    let sendPage = gatePageSend(pageKind, forcedIncludePageContext);
 
     // Only clear the composer when the submission came from it. Quick actions
     // and context-menu actions pass a forcedQuestion; wiping the input then
@@ -3386,42 +3214,13 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     if (isCancelled()) return;
 
     let pageContext = null;
-    // Whether this request carries the page: decided by gatePageSend() above, and
-    // decided again on the page that was actually read.
-    let sendPage = gate.includePage;
     if (sendPage) {
       // Capture the page at the moment the user submits the request. The API
       // request must never reuse the page context shown or captured earlier.
       pageContext = await getActivePageContext(0, translateMode === true && !translateSource ? "markdown" : null);
       if (isCancelled()) return;
       if (pageContext) {
-        // The page that was really read can differ from the one the user approved
-        // (the tab changed in between), or only now turn out to be sensitive (a
-        // webmail extractor recognised it). Decide again on what was read.
-        const post = pageDecision({ url: pageContext.url, source: pageContext.source, kind: pageKind, lists: await readSiteLists() });
-        const approvedAlready = post.action === "send"
-          || (post.action === "confirm" && gate.approved?.host === post.host && (gate.approved.sensitive || post.reason !== "sensitive"));
-        const verdict = approvedAlready
-          ? "send"
-          : await resolvePageDecision(post, { title: pageContext.title, url: pageContext.url, kind: pageKind, selectedModel, visuals: attachPageVisuals, isCancelled });
-        if (isCancelled()) return;
-        if (verdict === "cancel") {
-          // Nothing was sent. The question was already pushed and saved, so take
-          // it back and give the user their text again.
-          currentRequestId = null;
-          autoScrollEnabled = false;
-          rollbackSubmit();
-          setStreaming(false);
-          if (forcedQuestion === null && !questionInput.value) questionInput.value = question;
-          return;
-        }
-        if (verdict === "without") {
-          sendPage = false;
-          updateContextBar({ title: pageContext.title, url: pageContext.url, source: pageContext.source });
-          pageContext = null;
-        } else {
-          updateContextBar(pageContext, true);
-        }
+        updateContextBar(pageContext, true);
       } else {
         // Capture failed - the page may still be loading, or may not be a
         // readable web page (new tab, PDF viewer, browser-internal pages).
@@ -3461,9 +3260,9 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       const screenshotTab = pageContextValid
         ? { id: pageContext.tabId, url: pageContext.url }
         : await getCurrentActiveTab();
-      const approvedTab = pageContextValid
-        || (gate.approved && screenshotTab?.id === gate.approved.tabId && hostOf(screenshotTab?.url) === gate.approved.host);
-      if (approvedTab) pageScreenshot = await captureVisiblePageScreenshot(screenshotTab?.id, String(screenshotTab?.url || ""));
+      if (pageContextValid || screenshotTab?.id) {
+        pageScreenshot = await captureVisiblePageScreenshot(screenshotTab?.id, String(screenshotTab?.url || ""));
+      }
     }
     if (isCancelled()) return;
     const pageVisualInputCount = automaticPageImages.length + (pageScreenshot ? 1 : 0);
@@ -3621,25 +3420,6 @@ async function getPreferredTranslationLanguage() {
 async function processContextAction(pending) {
   if (!pending?.action || !pending?.text) return;
 
-  // The same site gate the quick actions go through (v1.10.146). The selection
-  // is the user's own text, but a site on the Never-send list carries an
-  // explicit standing instruction about that site, so it wins and the action is
-  // refused; a sensitive site shows the same per-site confirm the quick actions
-  // show (with "Don't ask again for this site"). pending.url is the page the
-  // menu was opened on (background.js stores it with the pending action); it
-  // used to be carried along but never consulted, so a right-click translate
-  // silently bypassed both lists. Refuse/confirm are decided BEFORE any running
-  // request is stopped, so a refused action changes nothing.
-  const gate = pageDecision({ url: String(pending.url || ""), kind: "quick", lists: await readSiteLists() });
-  if (gate.action === "refuse") {
-    addBubble("notice", t(currentLang, "pageContext_neverRefused_template", { host: gate.host || shortenForDialog(pending.url, 60) }));
-    return;
-  }
-  if (gate.action === "confirm") {
-    const verdict = await resolvePageDecision(gate, { title: "", url: String(pending.url || ""), kind: "quick", selectedModel: getSelectedModel(), visuals: false, isCancelled: () => false });
-    if (verdict !== "send") return;
-  }
-
   if (isStreaming) stopActiveRequest();
 
   // The context menu has exactly one item ("Translate selected text", see
@@ -3770,10 +3550,8 @@ chrome.runtime.onMessage.addListener((message, sender) => {
 chatForm.addEventListener("submit", handleSubmit);
 
 // Quick actions always operate on the page that is active at the moment the
-// button is clicked. They are explicit actions on that page, so they work in every
-// "Read current page" mode - but not past the site rules: on a sensitive site they
-// ask first, and on a site the user put on the never-send list they do not run
-// (see decidePageSend in page-context-policy.js).
+// button is clicked: they are explicit actions on that page and read it
+// whatever the "Read current page" checkbox says.
 // The page's current selection as Markdown ("" when nothing is selected or the
 // page is unreachable). Used by the Fact Check quick action: the claim is the
 // user's own highlighted text - the documented unfiltered-claim exception
@@ -3883,17 +3661,8 @@ historySelect.addEventListener("change", async () => {
   await selectConversation(historySelect.value);
 });
 
-pageContextAllowBtn.addEventListener("click", async () => {
-  // Allow the host the bar actually showed, not whatever tab happens to be
-  // active if the user switched tabs before clicking.
-  const tab = await getCurrentActiveTab().catch(() => null);
-  const host = pageContextAllowBtn.dataset.host || hostOf(tab?.url);
-  if (host) sessionAllowedHosts.add(host);
-  await refreshActivePageContext();
-});
-
-includeContextSelect.addEventListener("change", () => {
-  void persistPageContextMode(includeContextSelect.value);
+includeContextCheckbox.addEventListener("change", () => {
+  void persistPageContextEnabled(includeContextCheckbox.checked);
 });
 
 // Keep the displayed page context synchronized with the browser tab the user
@@ -3902,7 +3671,7 @@ includeContextSelect.addEventListener("change", () => {
 let lastPageContextTabId = null;
 
 async function refreshActivePageContext() {
-  if (!pageReadingActive()) return;
+  if (!pageReadingEnabled) return;
   const token = ++pageContextRefreshToken;
   try {
     const tab = await getCurrentActiveTab();
@@ -3913,7 +3682,7 @@ async function refreshActivePageContext() {
     lastPageContextTabId = tab.id;
     // Re-check after the await: the user may have switched page reading off while
     // the tab query was in flight. The token also rejects a newer refresh.
-    if (!pageReadingActive() || token !== pageContextRefreshToken) return;
+    if (!pageReadingEnabled || token !== pageContextRefreshToken) return;
     // Display-only refresh: show which page the next message would use,
     // from the tab's own title/URL. This used to run the full content-script
     // extraction (cloning and stripping document.body on large pages) on
@@ -3945,7 +3714,7 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!pageReadingActive() || tabId !== lastPageContextTabId) return;
+  if (!pageReadingEnabled || tabId !== lastPageContextTabId) return;
   // Refresh after navigation commits or when the document title changes.
   if (changeInfo.status === "complete" || changeInfo.title) {
     (async () => {
@@ -3974,7 +3743,7 @@ function setInitLocked() {
   quickActionButtons.forEach((button) => { button.disabled = true; });
   modelSelect.disabled = true;
   uploadBtn.disabled = true;
-  includeContextSelect.disabled = true;
+  includeContextCheckbox.disabled = true;
   if (SpeechRecognitionCtor) {
     micBtn.disabled = true;
     micLangBtn.disabled = true;
@@ -3989,7 +3758,6 @@ async function init() {
   // Privacy first: know whether page reading is allowed before the composer is
   // unlocked, and before any other await can fail and land in the catch below.
   await loadIncludeContextPreference();
-  await refreshSiteListsCache();
   populateModelSelect();
   // Render the selector immediately so the control is never dependent on the
   // timing of asynchronous model/storage initialization.
@@ -4006,16 +3774,13 @@ async function init() {
   scheduleHistoryRender();
   ensurePort();
   initCoreDone = true;
-  includeContextSelect.disabled = false;
+  includeContextCheckbox.disabled = false;
   if (!isStreaming) setStreaming(false);
   warnIncludeContextPreference();
   await consumePendingContextAction();
-  if (pageReadingActive()) {
+  if (pageReadingEnabled) {
     await refreshActivePageContext();
   }
-  // First run: nobody has chosen yet whether the assistant may read pages. Not
-  // awaited - a modal question must not hold up everything that waits for init.
-  promptPageContextChoiceIfNeeded().catch((err) => console.debug("[AI Assistant] First-run question failed:", err));
 }
 
 setInitLocked();
@@ -4026,7 +3791,7 @@ initPromise = init().catch((err) => {
     initCoreDone = true;
     if (!isStreaming) setStreaming(false);
   }
-  includeContextSelect.disabled = false;
+  includeContextCheckbox.disabled = false;
   warnIncludeContextPreference();
 });
 

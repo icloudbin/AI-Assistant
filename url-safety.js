@@ -158,3 +158,12 @@ export function checkImageUrl(rawUrl, pageUrl = '') {
   }
   return null;
 }
+
+// Hostname of any URL, for display and as a key.
+export function hostOf(url) {
+  try {
+    return new URL(String(url || "")).hostname.toLowerCase().replace(/\.+$/, "");
+  } catch {
+    return "";
+  }
+}

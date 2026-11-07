@@ -19,8 +19,6 @@ import {
   PAGE_VISUALS_STORAGE_KEY,
   AUTO_WEB_RESEARCH_KEY,
   INCLUDE_CONTEXT_STORAGE_KEY,
-  PAGE_NEVER_HOSTS_STORAGE_KEY,
-  PAGE_ALLOW_HOSTS_STORAGE_KEY,
   MIC_LANG_STORAGE_KEY,
   COMPOSER_HEIGHT_STORAGE_KEY,
 } from "./storage-keys.js";
@@ -52,15 +50,12 @@ export const PERSISTED_SETTING_KEYS = [
   // saveSettingsBackup(): the key loop silently dropped them, so after an
   // unexpected storage reset the privacy toggles reverted to their defaults.
   // "Read current page" has no default any more (a missing value means "the
-  // user has not chosen yet"), but the user's choice - and their never-send /
-  // always-allow site lists - must still survive a reset. Never include
-  // credentials here (see above).
+  // user has not chosen yet"), but the user's choice must still survive a
+  // reset. Never include credentials here (see above).
   PII_FILTER_STORAGE_KEY,
   PAGE_VISUALS_STORAGE_KEY,
   AUTO_WEB_RESEARCH_KEY,
   INCLUDE_CONTEXT_STORAGE_KEY,
-  PAGE_NEVER_HOSTS_STORAGE_KEY,
-  PAGE_ALLOW_HOSTS_STORAGE_KEY,
   "selectedModelId",
   MIC_LANG_STORAGE_KEY,
   COMPOSER_HEIGHT_STORAGE_KEY,

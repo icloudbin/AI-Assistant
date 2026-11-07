@@ -1,8 +1,6 @@
 // sidepanel/dialogs.js
 //
-// The modal questions the panel asks the user (S-05, S-08):
-//   showPageChoiceDialog   first run: should the assistant read the page at all?
-//   showPageConfirmDialog  before a page (or a sensitive page) is sent
+// The modal questions the panel asks the user (S-08):
 //   showNoticeDialog       a one-time heads-up that needs a "continue" (microphone, images)
 //
 // Every function returns a promise and never rejects. Esc, and a programmatic
@@ -75,70 +73,6 @@ export function dismissAllDialogs() {
 
 export function isDialogOpen(id) {
   return openDialogs.has(id);
-}
-
-export const PAGE_CHOICE_DIALOG_ID = "pageChoiceDialog";
-export const PAGE_CONFIRM_DIALOG_ID = "pageConfirmDialog";
-
-// -> "off" | "ask" | "on" | null (decide later)
-export function showPageChoiceDialog({ lang }) {
-  return openModal(PAGE_CHOICE_DIALOG_ID, null, (dialog, finish) => {
-    dialog.setAttribute("aria-labelledby", "pageChoiceTitle");
-    const title = make("h3", "", t(lang, "pageChoice_title"));
-    title.id = "pageChoiceTitle";
-    dialog.append(title, make("p", "", t(lang, "pageChoice_body")));
-    const options = make("div", "ai-choice");
-    for (const mode of ["off", "ask", "on"]) {
-      const choice = button(`pageChoice_${mode}`, "", "ai-choice-btn");
-      choice.append(make("strong", "", t(lang, `readCurrentPage_${mode}`)), make("span", "", t(lang, `pageChoice_${mode}_desc`)));
-      choice.addEventListener("click", () => finish(mode));
-      if (mode === "ask") choice.autofocus = true;
-      options.append(choice);
-    }
-    const later = button("pageChoice_later", t(lang, "pageChoice_later"), "ai-link-btn");
-    later.addEventListener("click", () => finish(null));
-    const actions = make("div", "ai-dialog-actions");
-    actions.append(later);
-    dialog.append(options, actions);
-  });
-}
-
-// -> { choice: "send" | "without" | "cancel", remember: boolean }
-//   sensitive     stronger wording for a webmail / banking / ... page
-//   allowWithout  offer "Send without page" (an ordinary question can still be asked)
-//   visuals       a screenshot and images of the page would go too
-export function showPageConfirmDialog({ lang, sensitive, title, host, model, allowWithout, visuals }) {
-  return openModal(PAGE_CONFIRM_DIALOG_ID, { choice: "cancel", remember: false }, (dialog, finish) => {
-    dialog.setAttribute("aria-labelledby", "pageConfirmTitle");
-    const heading = make("h3", "", t(lang, sensitive ? "pageConfirm_title_sensitive" : "pageConfirm_title_ask"));
-    heading.id = "pageConfirmTitle";
-    dialog.append(heading);
-    if (sensitive) dialog.append(make("p", "ai-dialog-warning", t(lang, "pageConfirm_sensitiveWarning")));
-    dialog.append(make("p", "", t(lang, "pageConfirm_body_template", { title: title || host, host, model })));
-    if (visuals) dialog.append(make("p", "ai-dialog-muted", t(lang, "pageConfirm_visualsNote")));
-    const remember = document.createElement("input");
-    remember.type = "checkbox";
-    remember.id = "pageConfirmRemember";
-    const rememberRow = make("label", "ai-dialog-check");
-    rememberRow.append(remember, make("span", "", t(lang, "pageConfirm_remember")));
-    dialog.append(rememberRow, make("p", "ai-dialog-muted", t(lang, "pageConfirm_manageHint")));
-
-    const cancel = button("pageConfirmCancel", t(lang, "dialog_cancel"));
-    cancel.autofocus = true; // the safe choice is the default one
-    cancel.addEventListener("click", () => finish({ choice: "cancel", remember: false }));
-    const actions = make("div", "ai-dialog-actions");
-    actions.append(cancel);
-    if (allowWithout) {
-      const without = button("pageConfirmWithout", t(lang, "pageConfirm_withoutPage"));
-      // Sending the question WITHOUT the page is not a reason to trust the site.
-      without.addEventListener("click", () => finish({ choice: "without", remember: false }));
-      actions.append(without);
-    }
-    const send = button("pageConfirmSend", t(lang, "pageConfirm_send"), "primary");
-    send.addEventListener("click", () => finish({ choice: "send", remember: remember.checked }));
-    actions.append(send);
-    dialog.append(actions);
-  });
 }
 
 // -> true when the user continues, false on Cancel / Esc.

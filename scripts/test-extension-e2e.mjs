@@ -199,24 +199,24 @@ async function main() {
     await page.send("Page.navigate", { url: sideUrl });
     for (let i = 0; i < 60; i++) {
       await sleep(250);
-      const ready = await page.eval("document.readyState === 'complete' && !!document.getElementById('includeContextSelect')");
+      const ready = await page.eval("document.readyState === 'complete' && !!document.getElementById('includeContextCheckbox')");
       if (ready) break;
     }
     await sleep(1500);
     check("side panel page loads with real chrome APIs", await page.eval("typeof chrome?.storage?.local?.get === 'function' && document.title.length > 0"));
     check("side panel initialized (send button exists)", await page.eval("!!document.getElementById('sendBtn')"));
 
-    // P2-3 live sync + P2-2 reload with saved opt-out. v1.10.141: the checkbox
-    // became a three-state select (off / ask / on).
+    // P2-3 live sync + P2-2 reload with saved opt-out. v1.10.151: the page
+    // reading control is a plain checkbox (checked by default).
     await page.eval("chrome.storage.local.set({ includeCurrentPageContext: true })");
     await sleep(300);
-    check("live sync: storage true updates the mode select", await page.eval("document.getElementById('includeContextSelect').value === 'on'"));
+    check("live sync: storage true keeps the checkbox checked", await page.eval("document.getElementById('includeContextCheckbox').checked === true"));
     await page.eval("chrome.storage.local.set({ includeCurrentPageContext: false })");
     await sleep(300);
-    check("live sync: storage false updates the mode select", await page.eval("document.getElementById('includeContextSelect').value === 'off'"));
+    check("live sync: storage false unchecks the checkbox", await page.eval("document.getElementById('includeContextCheckbox').checked === false"));
     await page.send("Page.reload", { ignoreCache: true });
     await sleep(1800);
-    check("reload honors saved page-reading opt-out", await page.eval("document.getElementById('includeContextSelect').value === 'off'"));
+    check("reload honors saved page-reading opt-out", await page.eval("document.getElementById('includeContextCheckbox').checked === false"));
 
     // P3-10 language refresh / P3-22 roles.
     await page.eval("chrome.storage.local.set({ languagePreference: 'zh-CN' })");

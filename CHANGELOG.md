@@ -4,6 +4,18 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Page reading simplified: a checkbox, no site lists, no confirmations (v1.10.151)
+
+User decision: the three-state page-reading control and the site-list machinery from v1.10.141 were more machinery than wanted. This release returns page reading to a plain checkbox and removes the rest of that layer.
+
+- The side panel's "Read current page" dropdown becomes a checkbox, CHECKED BY DEFAULT: checked = the page goes with ordinary questions; unchecked = it does not. Quick actions always read the page. The first-run choice dialog, the Ask-each-time mode, and all per-send confirmation dialogs are removed.
+- The Settings section "Sites: never send / always allow" is removed together with its logic and storage keys: there are no user site lists and no built-in sensitive-site gating - on every site, what is sent is governed by the checkbox (ordinary questions) and the quick action itself. The privacy filter still applies to all page text.
+- The settings import review follows: a file that UNCHECKS page reading is applied only on an explicit tick (the current settings may rely on it); re-checking is the default state and applies unasked.
+- privacy-policy.md updated to describe exactly this.
+- Removed: page-context-policy.js, sensitive-sites.js, their two decision-table suites, and 204 lines of dead UI strings across the six languages.
+- Checked: full sweep (22 suites - the two retired suites account for the drop) + check-package green; real-Chrome 11/11; the extension-level E2E ran against the EXTRACTED shipped package (EXT_ROOT) - 31/31. That packaged run immediately earned its keep: it caught a stale refreshSiteListsCache() call left in init() by the removal, which silently aborted panel initialization after a reload (unclaimed context actions, empty bubble).
+- Build bumped to 1.10.151.
+
 ## Packaging: four runtime modules were missing from every shipped zip since v1.10.140 (v1.10.150)
 
 - **Problem (P0).** build-package.mjs assembles the store package from a hand-maintained RUNTIME_FILES list, and the list was never updated when v1.10.140/141 added new modules: attachments.js, page-context-policy.js, sidepanel/dialogs.js and options/settings-import.js were absent from every zip built since - while the service worker (background.js imports attachments.js) and the side panel (sidepanel.js imports dialogs.js and page-context-policy.js) cannot even load without them. Nothing caught it: check-package's import-closure walk validates the WORKING TREE (where all files exist and are tracked), the byte-level zip verification proved that the INCLUDED files matched the repo byte-for-byte, and both browser suites run the unpacked working tree. Found by asking whether scripts/ was the only excluded folder and re-checking the zip's import closure.
