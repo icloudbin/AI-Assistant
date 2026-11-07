@@ -1135,24 +1135,19 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
   const { text: questionText, attachmentText } = splitResearchQuestion(question, ctx.attachments);
   const trigger = force ? 'explicit' : onlineResearchTrigger(questionText, pageContext, attachmentText);
   if (!trigger) return null;
-  // An implicit trigger is only the extension's guess that the page cannot
-  // answer the question (a year the page does not contain, low keyword overlap,
-  // or no page text at all). Acting on it sends the user's question to Tavily
-  // although the user never asked for a web search, so it needs the user's
-  // opt-in. An explicit request ("search the web"), the Explain action and
-  // Fact Check are the user's own request and are not affected by the switch.
+  // An implicit trigger is the extension's estimate that the page cannot
+  // answer the question (a missing year, low keyword overlap, or no page text).
+  // The opt-out setting below controls these automatic lookups. An explicit
+  // request ("search the web"), Explain and Fact Check are user-initiated and
+  // are not affected by that setting.
   if (trigger === 'implicit' && !(await autoWebResearchEnabled())) return null;
 
   const stored = await chrome.storage.local.get(['tavilyApiKey']);
   const apiKey = String(stored.tavilyApiKey || '').trim();
   if (!apiKey) {
-    // Research is always an optional enhancement: without a Tavily key the
-    // question is still answered by the model from the page. An explicit
-    // request (or the Explain action) tells the user research was skipped via a
-    // NOTICE; an implicit lookup is skipped silently. Never throw here - that
-    // used to stop the model from being called at all.
-    // Explain research is optional. If Tavily is not configured, continue
-    // directly to the selected AI model without adding a search-status notice.
+    // Research is optional. If Tavily is not configured, continue directly
+    // to the selected AI model. Explain deliberately stays silent in the
+    // conversation UI when the optional search service is unavailable.
     // Other explicit web-search requests keep their existing missing-key notice.
     if (trigger !== 'implicit' && !force) {
       ctx.safePost?.({ type: 'NOTICE', text: t(ctx.lang, 'bg_notice_tavilyKeyMissingSkipped'), requestId: ctx.requestId });
@@ -1160,11 +1155,24 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
     return null;
   }
 
-  // Automatic (implicit) research is an optional enhancement: if Tavily times
-  // out, returns HTTP 429/5xx or yields no results, log it and let the model
-  // answer from the page / its own knowledge. Explicit or forced research
-  // still reports the error. A deliberate STOP is always re-thrown.
+  // Explain's Tavily lookup is an optional preflight. If it fails or returns
+  // no usable sources, keep the request moving and let the selected model
+  // answer without web evidence. A deliberate STOP must still abort normally.
+  if (force) {
+    try {
+      return await fetchTavilyEvidence();
+    } catch (err) {
+      if (err?.name === 'AbortError' || ctx.signal?.aborted) throw err;
+      console.warn('Explain Tavily preflight failed; continuing with the selected model:', err);
+      return null;
+    }
+  }
+
+  // Explicit user-requested search continues to report a search-service error.
   if (trigger !== 'implicit') return await fetchTavilyEvidence();
+
+  // An automatic lookup is an optional enhancement: failure must not block
+  // the model's answer.
   try {
     return await fetchTavilyEvidence();
   } catch (err) {
