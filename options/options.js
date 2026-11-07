@@ -113,7 +113,7 @@ autoWebResearchToggle.addEventListener("change", () => {
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (changes[AUTO_WEB_RESEARCH_KEY]) {
-    autoWebResearchToggle.checked = changes[AUTO_WEB_RESEARCH_KEY].newValue !== false;
+    autoWebResearchToggle.checked = isAutoWebResearchEnabled(changes[AUTO_WEB_RESEARCH_KEY].newValue);
   }
   if (changes.piiFilterEnabled) {
     piiFilterToggle.checked = changes.piiFilterEnabled.newValue !== false;
