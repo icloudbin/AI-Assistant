@@ -1569,7 +1569,7 @@ function handlePortMessage(msg) {
           type: "ERROR",
           requestId,
           error: t(currentLang, "bg_error_streamTooLarge", {
-            limit: MAX_ASSISTANT_REPLY_CHARS.toLocaleString(),
+            limit: `${MAX_ASSISTANT_REPLY_CHARS.toLocaleString()} characters`,
           }),
         });
         currentRequestId = null;
