@@ -11,6 +11,8 @@ import { chooseTranslationSelection } from "./translation-selection.js";
 import { streamDeepSeek, streamGroq, streamOpenRouter, classifyProviderFailure, readBoundedText } from "./providers/openai-compatible.js";
 import { factCheckLanguageInstruction, untrustedBoundary, newBoundaryId } from "./providers/messages.js";
 import { normalizeAttachments } from "./attachments.js";
+import { createRequestKeepAlive } from "./request-keep-alive.js";
+import { isAutoWebResearchEnabled } from "./auto-web-research.js";
 
 // Restore settings as soon as the service worker starts, before any request
 // arrives. restoreSettingsFromBackupOnce() memoizes the run for this service
@@ -365,47 +367,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 // ---------- MV3 keep-alive for in-flight provider requests ----------
-// An MV3 service worker is terminated after ~30 seconds of inactivity, and
-// only dispatched events and extension API calls reset that idle timer -
-// an open fetch() or a silent stream does NOT. A provider request whose
-// stream produces no visible text for ~30s therefore gets its worker killed
-// mid-request: the port to the side panel drops with it, and the panel shows
-// "The connection to the AI service was interrupted" even though nothing
-// failed on the wire (any real HTTP error would have surfaced through the
-// ERROR path instead). Some providers can spend more than 30 seconds before producing visible output, so the service worker needs a keep-alive during long-running requests. A side-effect-free
-// extension API call every 20s (under the 30s idle threshold) keeps the
-// worker alive until DONE/ERROR/STOP.
-//
-// The service worker is a single process shared by every browser window, and
-// each open side panel has its own port and its own in-flight request. The
-// timer is therefore shared and reference-held: every in-flight ASK takes one
-// hold, the timer runs while at least one hold exists, and it is cleared only
-// when the last hold is released. (A single timer that any request could stop
-// let one window finishing - or its panel closing - silently remove the
-// keep-alive of a request still streaming in another window.)
-const KEEP_ALIVE_INTERVAL_MS = 20000;
-let keepAliveTimer = null;
-const keepAliveHolds = new Set();
-
-// Takes a hold for one request and returns the function that releases it.
-// Releasing is idempotent, so a request can never release twice and drop a
-// hold that belongs to a different request.
-function startRequestKeepAlive() {
-  const hold = Symbol("request-keep-alive");
-  keepAliveHolds.add(hold);
-  if (keepAliveTimer === null) {
-    keepAliveTimer = setInterval(() => {
-      void chrome.runtime.getPlatformInfo();
-    }, KEEP_ALIVE_INTERVAL_MS);
-  }
-  return function stopRequestKeepAlive() {
-    if (!keepAliveHolds.delete(hold)) return;
-    if (keepAliveHolds.size === 0 && keepAliveTimer !== null) {
-      clearInterval(keepAliveTimer);
-      keepAliveTimer = null;
-    }
-  };
-}
+// The worker is event-driven: an open fetch()/silent response stream alone is
+// not a durable guarantee that it will remain alive. During an ASK, the shared
+// coordinator invokes a harmless extension API immediately and then at a
+// serialized interval while at least one request is active. Each request owns
+// one reference-counted hold, so one panel cannot stop another panel's signal.
+// Chrome can still recycle the worker; side-panel disconnect recovery handles
+// that case by preserving partial output and reporting an interrupted request.
 
 // Long translations are sent as several requests in a row. Free tiers (Groq
 // especially) answer a later batch with HTTP 429 or a transient 5xx, which used
@@ -1141,14 +1109,13 @@ function pageResearchQuery(question, pageContext) {
   return cleanResearchText([title, excerpt].filter(Boolean).join("\n"), 900) || question;
 }
 
-// "Automatically search the web" in Settings. OFF unless the user turned it on
-// (anything but a stored `true`, including a failed read, counts as off).
+// "Automatically search the web" is ON by default and opt-out: only a
+// persisted false disables implicit lookups. Storage read failure remains
+// conservative and does not send an unrequested query to Tavily.
 async function autoWebResearchEnabled() {
   try {
-    // Checked by default: a stored false is an explicit opt-out, anything
-    // else (including a fresh profile) has automatic web research on. A
-    // storage failure stays conservative: no unexpected Tavily queries.
-    return (await chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY))[AUTO_WEB_RESEARCH_KEY] !== false;
+    const stored = await chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY);
+    return isAutoWebResearchEnabled(stored[AUTO_WEB_RESEARCH_KEY]);
   } catch {
     return false;
   }
