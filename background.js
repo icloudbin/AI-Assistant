@@ -11,7 +11,6 @@ import { chooseTranslationSelection } from "./translation-selection.js";
 import { streamDeepSeek, streamGroq, streamOpenRouter, classifyProviderFailure, readBoundedText } from "./providers/openai-compatible.js";
 import { factCheckLanguageInstruction, untrustedBoundary, newBoundaryId } from "./providers/messages.js";
 import { normalizeAttachments } from "./attachments.js";
-import { createRequestKeepAlive } from "./request-keep-alive.js";
 import { isAutoWebResearchEnabled } from "./auto-web-research.js";
 
 // Restore settings as soon as the service worker starts, before any request
@@ -366,24 +365,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return false;
 });
 
-// ---------- MV3 keep-alive for in-flight provider requests ----------
-// The worker is event-driven: an open fetch()/silent response stream alone is
-// not a durable guarantee that it will remain alive. During an ASK, the shared
-// coordinator invokes a harmless extension API immediately and then at a
-// serialized interval while at least one request is active. Each request owns
-// one reference-counted hold, so one panel cannot stop another panel's signal.
-// Chrome can still recycle the worker; side-panel disconnect recovery handles
-// that case by preserving partial output and reporting an interrupted request.
-const requestKeepAlive = createRequestKeepAlive({
-  heartbeat: () => chrome.runtime.getPlatformInfo(),
-  onError: (error) => console.warn("[AI Assistant] Keep-alive heartbeat failed:", error),
-});
-
-// Each request owns one idempotent reference-counted hold; one side panel
-// cannot stop another panel's keep-alive activity when its own request ends.
-function startRequestKeepAlive() {
-  return requestKeepAlive.start();
-}
+// MV3 keep-alive is driven by each side panel over its own long-lived Port.
+// Chrome 114+ resets the service worker idle timer when a Port message is sent;
+// simply keeping the Port open is not enough. The side panel sends KEEP_ALIVE
+// while its request is active (see request-keep-alive.js). This message needs
+// no response and does not alter the active request state.
 
 // Long translations are sent as several requests in a row. Free tiers (Groq
 // especially) answer a later batch with HTTP 429 or a transient 5xx, which used
@@ -496,6 +482,10 @@ chrome.runtime.onConnect.addListener((port) => {
     // call below, which rejects with a DOMException named "AbortError" that
     // the catch block downstream recognizes and does NOT report as an
     // error (the user asked for this, it isn't a failure).
+    // A Port message is intentionally used instead of a worker-owned timer:
+    // Chrome 114+ resets the MV3 idle timer when this message is sent. No reply
+    // is needed, and one side panel cannot stop another panel's heartbeat.
+    if (msg?.type === "KEEP_ALIVE") return;
     if (msg?.type === "STOP") {
       if (msg.requestId === activeRequestId) activeAbortController?.abort();
       return;
@@ -513,12 +503,6 @@ chrome.runtime.onConnect.addListener((port) => {
     const abortController = new AbortController();
     activeRequestId = requestId;
     activeAbortController = abortController;
-    // Keep the worker alive for the whole request (Tavily preflight included)
-    // - without this, any provider whose first visible chunk takes >30s
-    // (providers with long-running requests) loses the worker mid-request.
-    // Released in the finally block below, exactly once per request.
-    const releaseKeepAlive = startRequestKeepAlive();
-
     let pageSentChars = 0;
     let requestWasTranslation = false;
     // Hoisted so the catch below can flush text the PII placeholder restorer
@@ -853,11 +837,6 @@ chrome.runtime.onConnect.addListener((port) => {
         activeRequestId = null;
         activeAbortController = null;
       }
-      // Always release THIS request's hold - even if a newer ASK on the same
-      // port has already replaced activeRequestId (STOP followed immediately
-      // by a new question), which skips the reset above. Each request owns
-      // exactly one hold, so this neither leaks nor drops anyone else's.
-      releaseKeepAlive();
     }
   });
 });
