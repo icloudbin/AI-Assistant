@@ -374,6 +374,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // one reference-counted hold, so one panel cannot stop another panel's signal.
 // Chrome can still recycle the worker; side-panel disconnect recovery handles
 // that case by preserving partial output and reporting an interrupted request.
+const requestKeepAlive = createRequestKeepAlive({
+  heartbeat: () => chrome.runtime.getPlatformInfo(),
+  onError: (error) => console.warn("[AI Assistant] Keep-alive heartbeat failed:", error),
+});
+
+// Each request owns one idempotent reference-counted hold; one side panel
+// cannot stop another panel's keep-alive activity when its own request ends.
+function startRequestKeepAlive() {
+  return requestKeepAlive.start();
+}
 
 // Long translations are sent as several requests in a row. Free tiers (Groq
 // especially) answer a later batch with HTTP 429 or a transient 5xx, which used
