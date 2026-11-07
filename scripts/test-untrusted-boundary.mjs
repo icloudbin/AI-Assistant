@@ -365,10 +365,9 @@ await test("S-04: Explain's Tavily query is built from the filtered page excerpt
     assert.ok(/merger/.test(query), "the query should still be about the page");
     // The provider got no real values either.
     assert.ok(!/Dana Whitfield|dana@initech/.test(JSON.stringify(r.bodies[0])), "the real name reached the model provider");
-    // The user was shown what was sent, and it is the same text.
-    const preview = r.notices.find((n) => n.includes("Tavily"));
-    assert.ok(preview, `no preview notice: ${JSON.stringify(r.notices)}`);
-    assert.ok(preview.includes(query.slice(0, 40)), "the preview does not show the query that was sent");
+    // Explain's Tavily lookup is an internal preflight. The conversation
+    // should show the selected model's response directly, not a search notice.
+    assert.equal(r.notices.length, 0, `Explain unexpectedly posted a notice: ${JSON.stringify(r.notices)}`);
   } finally {
     store.piiFilterEnabled = false;
   }
