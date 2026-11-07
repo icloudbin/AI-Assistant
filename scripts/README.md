@@ -32,7 +32,7 @@ None of these are loaded by the extension (they are not referenced from `manifes
 | `node scripts/test-url-safety.mjs` | Remote image URL and SSRF destination policy |
 | `python scripts/test-sidepanel-context.py` | Side-panel page-context policy checks |
 
-## Real-browser tests (need `playwright` with Chromium; the chat-flow test also needs `openssl`)
+## Playwright browser tests (need `playwright` with Chromium; the chat-flow test also needs `openssl`)
 
 They load this folder as an unpacked extension in headless Chromium.
 
@@ -47,12 +47,14 @@ They load this folder as an unpacked extension in headless Chromium.
 | `node scripts/e2e-import-settings.mjs [folder]` | S-06: a hostile settings file shows a review dialog, risky items start unticked, Cancel changes nothing, only ticked items are applied; S-05: a file that weakens page reading or the site lists needs its own ticks, a file that only tightens needs none, a bogus mode or list is ignored |
 | `node scripts/e2e-page-privacy.mjs [folder]` | S-05 / S-08: the first-run question (Esc = undecided); ask-each-time (Cancel keeps the draft and saves nothing, send without the page, "don't ask again" per site); sensitive sites (stronger wording, blocked in always-read mode, "Allow" for the session); quick actions on sensitive and never-send sites; the always-allow list; a tab switch while a question is open; a webmail that only the page extractor recognises (second question, and Cancel takes the question back out of the saved history); the Settings site lists; the one-time voice-input and image notices. Every "was the page sent?" check looks for a marker in the request the fake provider actually received. `ONLY=<regex>` runs matching tests only |
 | `node scripts/e2e-tabs-permission.mjs` | S-07: loads the extension with and without the `tabs` permission and compares what the panel needs (tab url/title of web pages, scripting, captureVisibleTab, tabs.onUpdated) |
-| `node scripts/test-extension-e2e.mjs` | End-to-end test of the real unpacked extension, service worker, options page, side panel, storage and image-fetch handler (Chrome 125+ with Extensions CDP support) |
 
 `[folder]` runs the same test against another copy of the extension (for example the original package) as a control.
 
-## Standalone Chrome/CDP test
+## Standalone Chrome/CDP tests
 
-`node scripts/test-chrome-browser.mjs` runs the separate locally installed Chrome/CDP browser suite. It expects Chrome at `C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe`; adjust `CHROME_PATH` in the script or environment when using a different installation.
+These tests use Chrome's DevTools Protocol directly; they do not require Playwright.
+
+- `node scripts/test-extension-e2e.mjs` loads the unpacked extension and exercises the real service worker, options page, side panel, storage and image-fetch handler. Requires Chrome 125+ with the `Extensions` CDP domain and `--enable-unsafe-extension-debugging`. Optional environment variables: `CHROME_PATH`, `EXT_TEST_PORT`, and `EXT_ROOT`.
+- `node scripts/test-chrome-browser.mjs` runs the separate CDP browser suite. It uses the `CHROME_PATH` constant near the top of the script; edit that value when Chrome is installed elsewhere.
 
 Each script exits non-zero if an assertion fails.
