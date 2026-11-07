@@ -4,6 +4,17 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Privacy filter: Luhn check ran backwards for even-length cards, and 12-digit ID rules ate card numbers (v1.10.144)
+
+Two related defects found by an external review of the card-redaction path and confirmed by a 3000-samples-per-length probe against the live filter.
+
+- **Problem 1 (high).** `luhnValid()` iterated left-to-right with the first digit undoubled. That is equivalent to the standard (right-to-left) doubling direction only for odd lengths, so 14/16/18-digit cards failed the check ~90% of the time and leaked in plaintext - measured detection 9.6-10.6% for even lengths vs 100% for odd, and 16 digits is the mainstream Visa/Mastercard/Discover/JCB/UnionPay length. `4539148803436467` went out verbatim; grouped "4539 1488 0343 6467" was untouched in ~91% of samples. The repository tests missed it because their one card sample (`4111 1111 1111 1111`) was masked by Problem 2's prefix match, so the leak was invisible.
+- **Fix 1.** The standard right-to-left Luhn iteration. Odd lengths (13/15/17/19 and the 9-digit SIN, which shares the helper) return identical results under both directions - asserted by tests.
+- **Problem 2.** The 12-digit Aadhaar (Verhoeff) and Japanese My Number rules ran BEFORE the card rule and matched the first 12 digits of a grouped card ("4539 1488 0343" passed the My Number check for the 4111... sample), cutting a valid card into "[ID_NUMBER] + last 4" - mislabeling the value for the model and leaking the last 4 digits. Measured: ~20% of grouped 16-digit cards took that path even with a correct Luhn.
+- **Fix 2.** The two 12-digit rules now run AFTER the card rule. They are exactly 12 digits and the card rule requires 13-19, so only genuine card-length runs reclassify; standalone Aadhaar / My Number numbers are unaffected. The card rule deliberately stays after the SSN/IBAN rules (an IBAN's digit tail can pass Luhn and must not be relabeled a card).
+- **Checked.** New unit tests in `test-pii-filter.mjs`: deterministic Luhn-valid cards at every length 13-19, solid and grouped, each redacted as exactly one `[CREDIT_CARD]`; the concrete report cases (`4539148803436467`, "Card number: 4539 1488 0343 6467", Amex `3714 496353 98431`); the 4111 sample now asserted as `card [CREDIT_CARD]` (previously "[ID_NUMBER] 1111"); SIN and Spanish-mobile regressions. Full sweep (25 suites) + check-package green; real-Chrome 11/11.
+- Build bumped to 1.10.144.
+
 ## Provider errors: rate limits and page-size refusals get separate advice; Groq output-cap admission fallback (v1.10.143)
 
 Follow-up to the model-catalog round (v1.10.142): the same live probes showed that Groq's output-token admission limit (OTPM) sends HTTP 429 with a body that BEGINS "Request too large", and the error-hint logic could not tell it from a genuinely oversized page.

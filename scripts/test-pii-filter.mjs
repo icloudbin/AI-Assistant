@@ -163,6 +163,50 @@ check('"Customer Name: John Smith" still redacts (person-plausible qualifier)', 
   check("Aadhaar with a wrong check digit stays", R("2345 6789 0123") === "2345 6789 0123");
 }
 
+// ---- credit cards: every common length, solid and grouped ----
+// Regression for two review findings (2026-11-07):
+//  1. luhnValid() iterated left-to-right with the first digit undoubled -
+//     equivalent to the standard direction only for ODD lengths, so 14/16/
+//     18-digit cards (16 is the mainstream Visa/Mastercard/Discover/JCB/
+//     UnionPay length) failed the check ~90% of the time and leaked in
+//     plaintext (measured: 9-10% detection for even lengths).
+//  2. The 12-digit Aadhaar / My Number rules ran BEFORE the card rule and
+//     swallowed a grouped card's first 12 digits - the 4111... sample below
+//     surfaced as "[ID_NUMBER] 1111", which is why the outbound-PII suite
+//     never noticed bug 1 (its assertion only requires the full number to be
+//     gone, and it was).
+// The card rule now runs before the 12-digit rules, so a valid 13-19-digit
+// card is always ONE [CREDIT_CARD] - and never "[ID_NUMBER] + last 4".
+const luhnCheckDigit = (base) => {
+  let sum = 0;
+  let dbl = true; // from the right: skip the (future) check digit, double the rest alternately
+  for (let i = base.length - 1; i >= 0; i--) {
+    let d = base.charCodeAt(i) - 48;
+    if (dbl) { d *= 2; if (d > 9) d -= 9; }
+    sum += d;
+    dbl = !dbl;
+  }
+  return String((10 - (sum % 10)) % 10);
+};
+for (const L of [13, 14, 15, 16, 17, 18, 19]) {
+  const base = "45391876425309714539187642530971".slice(0, L - 1);
+  const card = base + luhnCheckDigit(base);
+  const grouped = card.replace(/(\d{4})(?=\d)/g, "$1 ");
+  check(`card ${L} digits (solid) redacted whole`, R(`pay ${card} now`) === "pay [CREDIT_CARD] now", JSON.stringify(R(`pay ${card} now`)));
+  check(`card ${L} digits (grouped) redacted whole`, R(`pay ${grouped} now`) === "pay [CREDIT_CARD] now", JSON.stringify(R(`pay ${grouped} now`)));
+}
+// The concrete report cases. "4111 1111 1111 1111" is the outbound-PII suite's
+// own sample: its first 12 digits pass the My Number check, so before the rule
+// reorder it came back as "[ID_NUMBER] 1111" even after the Luhn fix.
+check("Visa 16 solid (4539 1488 0343 6467) redacted", R("Pay 4539148803436467 now") === "Pay [CREDIT_CARD] now", JSON.stringify(R("Pay 4539148803436467 now")));
+check("Visa 16 grouped with cue redacted", R("Card number: 4539 1488 0343 6467") === "Card number: [CREDIT_CARD]", JSON.stringify(R("Card number: 4539 1488 0343 6467")));
+check("Amex 15 grouped redacted", R("Pay 3714 496353 98431 now") === "Pay [CREDIT_CARD] now", JSON.stringify(R("Pay 3714 496353 98431 now")));
+check("4111 sample is one [CREDIT_CARD], not [ID_NUMBER] + 1111", R("card 4111 1111 1111 1111") === "card [CREDIT_CARD]", JSON.stringify(R("card 4111 1111 1111 1111")));
+// The SIN rule shares the Luhn helper (9 digits): the direction fix must not
+// change it, and a Spanish mobile must stay a [PHONE] (rule order untouched).
+check("valid SIN still redacted as [SIN]", R("my sin 046 454 286") === "my sin [SIN]", JSON.stringify(R("my sin 046 454 286")));
+check("Spanish mobile is still [PHONE], not [SIN]", R("612 345 678") === "[PHONE]", R("612 345 678"));
+
 // ---- restoreNamePlaceholders: names only, other placeholders untouched ----// ---- restoreNamePlaceholders: names only, other placeholders untouched ----
 {
   const s = createRedactionSession();

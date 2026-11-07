@@ -23,14 +23,21 @@ import { PII_FILTER_STORAGE_KEY } from "../storage-keys.js";
 
 export { PII_FILTER_STORAGE_KEY };
 
+// Luhn check, iterated RIGHT to left with the doubling starting at the second
+// digit from the right - the standard direction. The previous left-to-right
+// loop with the first digit undoubled is only equivalent for ODD lengths: for
+// 14/16/18-digit cards (16 is the mainstream Visa/Mastercard/Discover/JCB/
+// UnionPay length) every doubling position was shifted by one, ~90% of valid
+// cards failed the check and leaked in plaintext. Odd lengths (13/15/17/19 and
+// the 9-digit SIN) keep identical results under both directions.
 function luhnValid(digits) {
   let sum = 0;
-  let alt = false;
-  for (const ch of digits) {
-    let d = ch.charCodeAt(0) - 48;
-    if (alt) { d *= 2; if (d > 9) d -= 9; }
+  let dbl = false;
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = digits.charCodeAt(i) - 48;
+    if (dbl) { d *= 2; if (d > 9) d -= 9; }
     sum += d;
-    alt = !alt;
+    dbl = !dbl;
   }
   return sum % 10 === 0;
 }
@@ -334,13 +341,15 @@ const RULES = [
     const body = m.slice(0, -1).replace(/[- ]/g, "");
     return dniValid(body, m.at(-1)) && /\d{8}|[XYZ]\d{7}/.test(body) ? "[ID_NUMBER]" : m;
   }],
-  // Indian Aadhaar: 12 digits (never starting 0/1), Verhoeff-checked.
-  [/(?<![\w.])[2-9]\d{3}(?:[ -]?\d{4}){2}(?!\w)/g, (m) => (verhoeffValid(m.replace(/[ -]/g, "")) ? "[ID_NUMBER]" : m)],
-  // Japanese My Number: 12 digits + official check digit (solid or 4-4-4).
-  [/(?<![\w.])(?:\d{4}[ -]?){2}\d{4}(?!\w)/g, (m) => (myNumberValid(m.replace(/[ -]/g, "")) ? "[ID_NUMBER]" : m)],
   [/\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b/g, "[SSN]"],
   [/\b[A-Z]{2}\d{2}[ ]?(?:[A-Z0-9]{4}[ ]?){2,7}[A-Z0-9]{1,4}\b/g, (m) => (m.replace(/\s/g, "").length >= 15 ? "[IBAN]" : m)],
-  // credit / debit cards: 13-19 digits, optional space/dash separators, Luhn-checked
+  // credit / debit cards: 13-19 digits, optional space/dash separators, Luhn-checked.
+  // Runs BEFORE the 12-digit Aadhaar / My Number rules below: those shapes also
+  // match the FIRST 12 digits of a grouped card ("4539 1488 0343" of
+  // "4539 1488 0343 6467" passed the My Number check), which used to cut a
+  // valid card into "[ID_NUMBER] + last 4" before the card rule ever saw it.
+  // The ID rules themselves are unaffected - they are exactly 12 digits and the
+  // card rule requires 13-19, so only genuine card-length runs reclassify.
   [/(?<![\w.])\d(?:[ -]?\d){12,18}(?![\w])/g, (m, offset, whole) => {
     // Digits directly after a "/" are a URL path segment ("/status/1580..."),
     // not a card - about 10% of random 13-19 digit numbers pass Luhn.
@@ -348,6 +357,12 @@ const RULES = [
     const d = m.replace(/[ -]/g, "");
     return d.length >= 13 && d.length <= 19 && luhnValid(d) ? "[CREDIT_CARD]" : m;
   }],
+  // Indian Aadhaar: 12 digits (never starting 0/1), Verhoeff-checked. After the
+  // card rule (see there): the shape also matches a grouped card's prefix.
+  [/(?<![\w.])[2-9]\d{3}(?:[ -]?\d{4}){2}(?!\w)/g, (m) => (verhoeffValid(m.replace(/[ -]/g, "")) ? "[ID_NUMBER]" : m)],
+  // Japanese My Number: 12 digits + official check digit (solid or 4-4-4).
+  // After the card rule (see there), for the same prefix-match reason.
+  [/(?<![\w.])(?:\d{4}[ -]?){2}\d{4}(?!\w)/g, (m) => (myNumberValid(m.replace(/[ -]/g, "")) ? "[ID_NUMBER]" : m)],
   [/((?:cvv|cvc|cid|security code|安全码)\s*[:=：#]?\s*)\d{3,4}\b/gi, "$1[CVV]"],
   // Canadian Business Number with its GST/HST program account ("123456789 RT0001").
   // Must run before the SIN rule so the 9-digit part is not handled on its own.
