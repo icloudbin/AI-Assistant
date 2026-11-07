@@ -1,25 +1,27 @@
 // request-keep-alive.js
 //
-// MV3 service workers are event-driven and may be terminated when idle. This
-// small coordinator holds the worker active while one or more requests are in
-// flight by periodically invoking a harmless extension API (or another
-// extension event source). It is deliberately best-effort: callers must still
-// handle worker termination, port disconnects and partial results.
-//
-// The timeout is scheduled only after the previous heartbeat settles. That
-// prevents overlapping extension API calls if the browser or API is slow.
+// A Manifest V3 service worker's idle timer is reset when a message is sent
+// through a long-lived extension Port (Chrome 114+). The side panel owns this
+// timer and sends a lightweight message while an ASK is active. Merely opening
+// a Port is not sufficient, and this is still best-effort: the panel handles
+// worker/port disconnects and preserves partial output as a separate fallback.
 
 export const REQUEST_KEEP_ALIVE_INTERVAL_MS = 20_000;
 
-export function createRequestKeepAlive({
-  heartbeat,
+/**
+ * Keep the receiving extension service worker active by sending Port messages.
+ * The returned stop function is idempotent and should be called as soon as the
+ * request reaches DONE, ERROR or STOP.
+ */
+export function startPortKeepAlive({
+  getPort,
   intervalMs = REQUEST_KEEP_ALIVE_INTERVAL_MS,
   onError = () => {},
   schedule = setTimeout,
   cancel = clearTimeout,
 } = {}) {
-  if (typeof heartbeat !== "function") {
-    throw new TypeError("A heartbeat function is required.");
+  if (typeof getPort !== "function") {
+    throw new TypeError("getPort must be a function.");
   }
   if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
     throw new RangeError("intervalMs must be a positive finite number.");
@@ -28,59 +30,34 @@ export function createRequestKeepAlive({
     throw new TypeError("schedule and cancel must be functions.");
   }
 
-  const holds = new Set();
+  let stopped = false;
   let timer = null;
-  let heartbeatInFlight = false;
 
-  const scheduleNext = () => {
-    if (!holds.size || timer !== null || heartbeatInFlight) return;
-    timer = schedule(() => {
-      timer = null;
-      void runHeartbeat();
-    }, intervalMs);
-  };
+  const tick = () => {
+    if (stopped) return;
 
-  const runHeartbeat = async () => {
-    if (!holds.size || heartbeatInFlight) return;
-    heartbeatInFlight = true;
     try {
-      await heartbeat();
+      const port = getPort();
+      if (port) port.postMessage({ type: "KEEP_ALIVE" });
     } catch (error) {
-      // A failed keep-alive must not become an unhandled rejection or stop
-      // later retries. The caller remains responsible for recovery if Chrome
-      // nevertheless terminates the worker.
+      // A stale/disconnected Port must not break the side panel's request
+      // lifecycle. Continue trying until setStreaming(false) releases us.
       try { onError(error); } catch {}
-    } finally {
-      heartbeatInFlight = false;
-      scheduleNext();
     }
+
+    if (!stopped) timer = schedule(tick, intervalMs);
   };
 
-  return {
-    start() {
-      const hold = Symbol("request-keep-alive");
-      holds.add(hold);
+  // Send immediately, then schedule the next message. A recursive timeout
+  // avoids an unbounded backlog if the host scheduler runs late.
+  tick();
 
-      // Run immediately, rather than waiting for the first interval. This
-      // covers the initial async preparation phase before the provider starts.
-      if (timer === null && !heartbeatInFlight) void runHeartbeat();
-
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        holds.delete(hold);
-        if (holds.size === 0 && timer !== null) {
-          cancel(timer);
-          timer = null;
-        }
-      };
-    },
-    get activeHolds() {
-      return holds.size;
-    },
-    get heartbeatPending() {
-      return heartbeatInFlight;
-    },
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    if (timer !== null) {
+      cancel(timer);
+      timer = null;
+    }
   };
 }
