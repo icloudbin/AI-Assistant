@@ -4,6 +4,14 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Packaging: four runtime modules were missing from every shipped zip since v1.10.140 (v1.10.150)
+
+- **Problem (P0).** build-package.mjs assembles the store package from a hand-maintained RUNTIME_FILES list, and the list was never updated when v1.10.140/141 added new modules: attachments.js, page-context-policy.js, sidepanel/dialogs.js and options/settings-import.js were absent from every zip built since - while the service worker (background.js imports attachments.js) and the side panel (sidepanel.js imports dialogs.js and page-context-policy.js) cannot even load without them. Nothing caught it: check-package's import-closure walk validates the WORKING TREE (where all files exist and are tracked), the byte-level zip verification proved that the INCLUDED files matched the repo byte-for-byte, and both browser suites run the unpacked working tree. Found by asking whether scripts/ was the only excluded folder and re-checking the zip's import closure.
+- **Fix.** The four modules are in the list, and the build now validates itself: after the byte-level verification, every shipped JS entry's relative imports are resolved against the shipped entries, and the build FAILS (removing the archive) if any import does not resolve inside the package - the failure mode is structurally closed, not just corrected.
+- **Note.** Zips v1.10.142-149 are affected (140/141 were never built). If any of them was uploaded to the Chrome Web Store, replace that package with this build.
+- **Checked.** check-package derives 34 required files; the shipped zip closes with zero unresolved imports; the extension-level E2E suite ran against the EXTRACTED shipped package (EXT_ROOT) for the first time - 31/31 on the actual store artifact; full sweep (24 suites) + check-package green; real-Chrome 11/11.
+- Build bumped to 1.10.150.
+
 ## Deep-analysis round: three small fixes found by re-reading the last eight releases (v1.10.148)
 
 A post-release deep pass over everything v1.10.140-147 changed, plus live real-key testing of every provider.

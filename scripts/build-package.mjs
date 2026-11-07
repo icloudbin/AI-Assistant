@@ -65,11 +65,14 @@ const RUNTIME_FILES = [
   "url-safety.js",
   "sensitive-sites.js",
   "conversation-store.js",
+  "attachments.js",
+  "page-context-policy.js",
   "providers/messages.js",
   "providers/openai-compatible.js",
   "privacy/pii-filter.js",
   "options/options.html",
   "options/options.js",
+  "options/settings-import.js",
   "sidepanel/sidepanel.html",
   "sidepanel/sidepanel.css",
   "sidepanel/sidepanel.js",
@@ -78,6 +81,7 @@ const RUNTIME_FILES = [
   "sidepanel/mic-permission.js",
   "sidepanel/history-manager.js",
   "sidepanel/attachment-budget.js",
+  "sidepanel/dialogs.js",
   "sidepanel/rendering/markdown.js",
   "icons/icon16.png",
   "icons/icon48.png",
@@ -251,6 +255,28 @@ function verifyZip(zipBuffer, entries, zipFilePath) {
     pos += 46 + nameLen + extraLen + commentLen;
   }
   if (pos !== cdOffset + cdSize) fail("central directory size does not match the EOCD record");
+
+  // Import-closure check over the SHIPPED entries: every relative import of
+  // every shipped JS file must resolve to another shipped entry. The file list
+  // above is a hand-maintained allowlist, and when v1.10.140/141 added
+  // attachments.js / page-context-policy.js / dialogs.js / settings-import.js
+  // it drifted: four runtime modules were missing from every zip for eight
+  // releases while every repo-side check stayed green (they only validate the
+  // working tree). Byte-identity of the INCLUDED files says nothing about
+  // closure of their imports - so the package validates itself here.
+  const shipped = new Set(entries.map((e) => e.name));
+  const importRe = /(?:from\s+|import\s*\(\s*|import\s+)"(\.[^"]+)"/g;
+  for (const entry of entries) {
+    if (!entry.name.endsWith(".js")) continue;
+    const text = entry.data.toString("utf8");
+    let m;
+    while ((m = importRe.exec(text))) {
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(entry.name), m[1]));
+      if (!shipped.has(target)) {
+        fail(`entry ${entry.name} imports "${m[1]}" but ${target} is not in the package`);
+      }
+    }
+  }
 }
 
 // 4. Read the runtime files and build the archive
