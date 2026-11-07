@@ -302,9 +302,7 @@ export const STREAM_MAX_CONTENT_CHARS = 1_000_000;
 export const STREAM_MAX_SSE_LINE_CHARS = 256 * 1024;
 
 function streamLimitError(lang, limit) {
-  return new Error(t(lang, "bg_error_streamTooLarge", {
-    limit: Number(limit).toLocaleString(),
-  }));
+  return new Error(t(lang, "bg_error_streamTooLarge", { limit: String(limit) }));
 }
 
 async function readSse(resp, extractDelta, ctx, extractError = null) {
@@ -416,7 +414,7 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
           if (ctx.lineTranslator) ctx.lineTranslator.push(prefix);
           else ctx.sendChunk(prefix);
         }
-        throw streamLimitError(ctx.lang, maxContentChars);
+        throw streamLimitError(ctx.lang, `${Number(maxContentChars).toLocaleString()} characters`);
       }
       contentChars += content.length;
       emitted = true;
@@ -446,17 +444,17 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
       if (done) break;
       armIdleTimer();
       receivedBytes += value?.byteLength || 0;
-      if (receivedBytes > maxBytes) throw streamLimitError(ctx.lang, maxBytes);
+      if (receivedBytes > maxBytes) throw streamLimitError(ctx.lang, `${(maxBytes / (1024 * 1024)).toFixed(1)} MiB`);
       const decoded = decoder.decode(value, { stream: true });
       if (jsonText !== null) jsonText += decoded;
       const lines = (buffer + decoded).split("\n");
       buffer = lines.pop() || "";
       for (const line of lines) {
         throwIfStopped();
-        if (line.length > maxSseLineChars) throw streamLimitError(ctx.lang, maxSseLineChars);
+        if (line.length > maxSseLineChars) throw streamLimitError(ctx.lang, `${Number(maxSseLineChars).toLocaleString()} characters per SSE line`);
         handleLine(line);
       }
-      if (buffer.length > maxSseLineChars) throw streamLimitError(ctx.lang, maxSseLineChars);
+      if (buffer.length > maxSseLineChars) throw streamLimitError(ctx.lang, `${Number(maxSseLineChars).toLocaleString()} characters per SSE line`);
     }
     if (timedOut) throw timeoutError();
     throwIfStopped();
@@ -465,7 +463,7 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
     const tail = decoder.decode();
     if (jsonText !== null) jsonText += tail;
     buffer += tail;
-    if (buffer.length > maxSseLineChars) throw streamLimitError(ctx.lang, maxSseLineChars);
+    if (buffer.length > maxSseLineChars) throw streamLimitError(ctx.lang, `${Number(maxSseLineChars).toLocaleString()} characters per SSE line`);
     if (buffer.trim()) handleLine(buffer);
   } catch (err) {
     reader.cancel().catch(() => {});
