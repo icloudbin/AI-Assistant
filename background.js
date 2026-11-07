@@ -1151,10 +1151,10 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
     // request (or the Explain action) tells the user research was skipped via a
     // NOTICE; an implicit lookup is skipped silently. Never throw here - that
     // used to stop the model from being called at all.
-    if (trigger !== 'implicit') {
-      // safePost, like every other port write: the panel can close during the
-      // storage read above, and a raw postMessage would then throw out of the
-      // research path and kill the model call with a TypeError.
+    // Explain research is optional. If Tavily is not configured, continue
+    // directly to the selected AI model without adding a search-status notice.
+    // Other explicit web-search requests keep their existing missing-key notice.
+    if (trigger !== 'implicit' && !force) {
       ctx.safePost?.({ type: 'NOTICE', text: t(ctx.lang, 'bg_notice_tavilyKeyMissingSkipped'), requestId: ctx.requestId });
     }
     return null;
@@ -1184,12 +1184,11 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
     // user's own question - it may be an e-mail or an internal document - so the
     // privacy filter is NOT undone for it: names and every other placeholder stay
     // redacted (the tokens themselves are dropped, they are noise to a search
-    // engine). The user is shown exactly what is sent, before it is sent.
+    // engine). Explain research is silent in the conversation UI; the model's
+    // answer is the visible response.
     let searchQuery;
     if (force) {
       searchQuery = stripPlaceholderTokens(pageResearchQuery(questionText, pageContext)) || stripPlaceholderTokens(questionText) || questionText;
-      const shown = searchQuery.length > 400 ? `${searchQuery.slice(0, 400)}…` : searchQuery;
-      ctx.safePost?.({ type: 'NOTICE', text: t(ctx.lang, 'bg_notice_tavilyPageQuery_template', { query: shown }), requestId: ctx.requestId });
     } else {
       searchQuery = restoreNamePlaceholders(questionText, ctx.piiSession);
     }
