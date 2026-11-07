@@ -11,6 +11,7 @@ import { chooseTranslationSelection } from "./translation-selection.js";
 import { streamDeepSeek, streamGroq, streamOpenRouter, classifyProviderFailure, readBoundedText } from "./providers/openai-compatible.js";
 import { factCheckLanguageInstruction, untrustedBoundary, newBoundaryId } from "./providers/messages.js";
 import { normalizeAttachments } from "./attachments.js";
+import { isAutoWebResearchEnabled } from "./auto-web-research.js";
 
 // Restore settings as soon as the service worker starts, before any request
 // arrives. restoreSettingsFromBackupOnce() memoizes the run for this service
@@ -364,48 +365,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return false;
 });
 
-// ---------- MV3 keep-alive for in-flight provider requests ----------
-// An MV3 service worker is terminated after ~30 seconds of inactivity, and
-// only dispatched events and extension API calls reset that idle timer -
-// an open fetch() or a silent stream does NOT. A provider request whose
-// stream produces no visible text for ~30s therefore gets its worker killed
-// mid-request: the port to the side panel drops with it, and the panel shows
-// "The connection to the AI service was interrupted" even though nothing
-// failed on the wire (any real HTTP error would have surfaced through the
-// ERROR path instead). Some providers can spend more than 30 seconds before producing visible output, so the service worker needs a keep-alive during long-running requests. A side-effect-free
-// extension API call every 20s (under the 30s idle threshold) keeps the
-// worker alive until DONE/ERROR/STOP.
-//
-// The service worker is a single process shared by every browser window, and
-// each open side panel has its own port and its own in-flight request. The
-// timer is therefore shared and reference-held: every in-flight ASK takes one
-// hold, the timer runs while at least one hold exists, and it is cleared only
-// when the last hold is released. (A single timer that any request could stop
-// let one window finishing - or its panel closing - silently remove the
-// keep-alive of a request still streaming in another window.)
-const KEEP_ALIVE_INTERVAL_MS = 20000;
-let keepAliveTimer = null;
-const keepAliveHolds = new Set();
-
-// Takes a hold for one request and returns the function that releases it.
-// Releasing is idempotent, so a request can never release twice and drop a
-// hold that belongs to a different request.
-function startRequestKeepAlive() {
-  const hold = Symbol("request-keep-alive");
-  keepAliveHolds.add(hold);
-  if (keepAliveTimer === null) {
-    keepAliveTimer = setInterval(() => {
-      void chrome.runtime.getPlatformInfo();
-    }, KEEP_ALIVE_INTERVAL_MS);
-  }
-  return function stopRequestKeepAlive() {
-    if (!keepAliveHolds.delete(hold)) return;
-    if (keepAliveHolds.size === 0 && keepAliveTimer !== null) {
-      clearInterval(keepAliveTimer);
-      keepAliveTimer = null;
-    }
-  };
-}
+// MV3 keep-alive is driven by each side panel over its own long-lived Port.
+// Chrome 114+ resets the service worker idle timer when a Port message is sent;
+// simply keeping the Port open is not enough. The side panel sends KEEP_ALIVE
+// while its request is active (see request-keep-alive.js). This message needs
+// no response and does not alter the active request state.
 
 // Long translations are sent as several requests in a row. Free tiers (Groq
 // especially) answer a later batch with HTTP 429 or a transient 5xx, which used
@@ -518,6 +482,10 @@ chrome.runtime.onConnect.addListener((port) => {
     // call below, which rejects with a DOMException named "AbortError" that
     // the catch block downstream recognizes and does NOT report as an
     // error (the user asked for this, it isn't a failure).
+    // A Port message is intentionally used instead of a worker-owned timer:
+    // Chrome 114+ resets the MV3 idle timer when this message is sent. No reply
+    // is needed, and one side panel cannot stop another panel's heartbeat.
+    if (msg?.type === "KEEP_ALIVE") return;
     if (msg?.type === "STOP") {
       if (msg.requestId === activeRequestId) activeAbortController?.abort();
       return;
@@ -535,12 +503,6 @@ chrome.runtime.onConnect.addListener((port) => {
     const abortController = new AbortController();
     activeRequestId = requestId;
     activeAbortController = abortController;
-    // Keep the worker alive for the whole request (Tavily preflight included)
-    // - without this, any provider whose first visible chunk takes >30s
-    // (providers with long-running requests) loses the worker mid-request.
-    // Released in the finally block below, exactly once per request.
-    const releaseKeepAlive = startRequestKeepAlive();
-
     let pageSentChars = 0;
     let requestWasTranslation = false;
     // Hoisted so the catch below can flush text the PII placeholder restorer
@@ -875,11 +837,6 @@ chrome.runtime.onConnect.addListener((port) => {
         activeRequestId = null;
         activeAbortController = null;
       }
-      // Always release THIS request's hold - even if a newer ASK on the same
-      // port has already replaced activeRequestId (STOP followed immediately
-      // by a new question), which skips the reset above. Each request owns
-      // exactly one hold, so this neither leaks nor drops anyone else's.
-      releaseKeepAlive();
     }
   });
 });
@@ -1141,14 +1098,13 @@ function pageResearchQuery(question, pageContext) {
   return cleanResearchText([title, excerpt].filter(Boolean).join("\n"), 900) || question;
 }
 
-// "Automatically search the web" in Settings. OFF unless the user turned it on
-// (anything but a stored `true`, including a failed read, counts as off).
+// "Automatically search the web" is ON by default and opt-out: only a
+// persisted false disables implicit lookups. Storage read failure remains
+// conservative and does not send an unrequested query to Tavily.
 async function autoWebResearchEnabled() {
   try {
-    // Checked by default: a stored false is an explicit opt-out, anything
-    // else (including a fresh profile) has automatic web research on. A
-    // storage failure stays conservative: no unexpected Tavily queries.
-    return (await chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY))[AUTO_WEB_RESEARCH_KEY] !== false;
+    const stored = await chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY);
+    return isAutoWebResearchEnabled(stored[AUTO_WEB_RESEARCH_KEY]);
   } catch {
     return false;
   }
@@ -1158,36 +1114,44 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
   const { text: questionText, attachmentText } = splitResearchQuestion(question, ctx.attachments);
   const trigger = force ? 'explicit' : onlineResearchTrigger(questionText, pageContext, attachmentText);
   if (!trigger) return null;
-  // An implicit trigger is only the extension's guess that the page cannot
-  // answer the question (a year the page does not contain, low keyword overlap,
-  // or no page text at all). Acting on it sends the user's question to Tavily
-  // although the user never asked for a web search, so it needs the user's
-  // opt-in. An explicit request ("search the web"), the Explain action and
-  // Fact Check are the user's own request and are not affected by the switch.
+  // An implicit trigger is the extension's estimate that the page cannot
+  // answer the question (a missing year, low keyword overlap, or no page text).
+  // The opt-out setting below controls these automatic lookups. An explicit
+  // request ("search the web"), Explain and Fact Check are user-initiated and
+  // are not affected by that setting.
   if (trigger === 'implicit' && !(await autoWebResearchEnabled())) return null;
 
   const stored = await chrome.storage.local.get(['tavilyApiKey']);
   const apiKey = String(stored.tavilyApiKey || '').trim();
   if (!apiKey) {
-    // Research is always an optional enhancement: without a Tavily key the
-    // question is still answered by the model from the page. An explicit
-    // request (or the Explain action) tells the user research was skipped via a
-    // NOTICE; an implicit lookup is skipped silently. Never throw here - that
-    // used to stop the model from being called at all.
-    if (trigger !== 'implicit') {
-      // safePost, like every other port write: the panel can close during the
-      // storage read above, and a raw postMessage would then throw out of the
-      // research path and kill the model call with a TypeError.
+    // Research is optional. If Tavily is not configured, continue directly
+    // to the selected AI model. Explain deliberately stays silent in the
+    // conversation UI when the optional search service is unavailable.
+    // Other explicit web-search requests keep their existing missing-key notice.
+    if (trigger !== 'implicit' && !force) {
       ctx.safePost?.({ type: 'NOTICE', text: t(ctx.lang, 'bg_notice_tavilyKeyMissingSkipped'), requestId: ctx.requestId });
     }
     return null;
   }
 
-  // Automatic (implicit) research is an optional enhancement: if Tavily times
-  // out, returns HTTP 429/5xx or yields no results, log it and let the model
-  // answer from the page / its own knowledge. Explicit or forced research
-  // still reports the error. A deliberate STOP is always re-thrown.
+  // Explain's Tavily lookup is an optional preflight. If it fails or returns
+  // no usable sources, keep the request moving and let the selected model
+  // answer without web evidence. A deliberate STOP must still abort normally.
+  if (force) {
+    try {
+      return await fetchTavilyEvidence();
+    } catch (err) {
+      if (err?.name === 'AbortError' || ctx.signal?.aborted) throw err;
+      console.warn('Explain Tavily preflight failed; continuing with the selected model:', err);
+      return null;
+    }
+  }
+
+  // Explicit user-requested search continues to report a search-service error.
   if (trigger !== 'implicit') return await fetchTavilyEvidence();
+
+  // An automatic lookup is an optional enhancement: failure must not block
+  // the model's answer.
   try {
     return await fetchTavilyEvidence();
   } catch (err) {
@@ -1207,12 +1171,11 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
     // user's own question - it may be an e-mail or an internal document - so the
     // privacy filter is NOT undone for it: names and every other placeholder stay
     // redacted (the tokens themselves are dropped, they are noise to a search
-    // engine). The user is shown exactly what is sent, before it is sent.
+    // engine). Explain research is silent in the conversation UI; the model's
+    // answer is the visible response.
     let searchQuery;
     if (force) {
       searchQuery = stripPlaceholderTokens(pageResearchQuery(questionText, pageContext)) || stripPlaceholderTokens(questionText) || questionText;
-      const shown = searchQuery.length > 400 ? `${searchQuery.slice(0, 400)}…` : searchQuery;
-      ctx.safePost?.({ type: 'NOTICE', text: t(ctx.lang, 'bg_notice_tavilyPageQuery_template', { query: shown }), requestId: ctx.requestId });
     } else {
       searchQuery = restoreNamePlaceholders(questionText, ctx.piiSession);
     }

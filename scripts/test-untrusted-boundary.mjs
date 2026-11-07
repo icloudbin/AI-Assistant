@@ -72,12 +72,19 @@ function sseResponse(reply) {
 
 // Runs one ASK through the real handler; returns what the provider received.
 let requestCounter = 0;
+let tavilyFailureStatus = 0;
 async function ask(payload) {
   const providerBodies = [];
   const tavilyQueries = [];
   globalThis.fetch = async (url, init) => {
     if (String(url).includes("tavily")) {
       tavilyQueries.push(JSON.parse(init.body));
+      if (tavilyFailureStatus) {
+        return new Response(JSON.stringify({ message: "mock Tavily unavailable" }), {
+          status: tavilyFailureStatus,
+          headers: { "content-type": "application/json" },
+        });
+      }
       return new Response(JSON.stringify({
         results: [{
           title: "Evidence page",
@@ -365,12 +372,50 @@ await test("S-04: Explain's Tavily query is built from the filtered page excerpt
     assert.ok(/merger/.test(query), "the query should still be about the page");
     // The provider got no real values either.
     assert.ok(!/Dana Whitfield|dana@initech/.test(JSON.stringify(r.bodies[0])), "the real name reached the model provider");
-    // The user was shown what was sent, and it is the same text.
-    const preview = r.notices.find((n) => n.includes("Tavily"));
-    assert.ok(preview, `no preview notice: ${JSON.stringify(r.notices)}`);
-    assert.ok(preview.includes(query.slice(0, 40)), "the preview does not show the query that was sent");
+    // Explain's Tavily lookup is an internal preflight. The conversation
+    // should show the selected model's response directly, not a search notice.
+    assert.equal(r.notices.length, 0, `Explain unexpectedly posted a notice: ${JSON.stringify(r.notices)}`);
   } finally {
     store.piiFilterEnabled = false;
+  }
+});
+
+await test("S-04: Explain answers with the selected model when Tavily returns an error", async () => {
+  tavilyFailureStatus = 503;
+  try {
+    const r = await ask({
+      question: "Explain the current page",
+      includePageContext: true,
+      pageContext: { tabId: 1, title: "Local report", url: "https://example.test/report", text: "A report about a delayed project launch." },
+      noWebResearch: false,
+      forceWebResearch: true,
+    });
+    assert.equal(r.tavilyQueries.length, 1, "Explain should still attempt the optional Tavily preflight");
+    assert.equal(r.bodies.length, 1, "the selected AI model must still be called");
+    assert.ok(!r.error, `Explain was blocked by Tavily's error: ${JSON.stringify(r.error)}`);
+    assert.equal(r.notices.length, 0, "the conversation should not display a Tavily status/error notice");
+  } finally {
+    tavilyFailureStatus = 0;
+  }
+});
+
+await test("S-04: Explain answers with the selected model when no Tavily key is configured", async () => {
+  const savedKey = store.tavilyApiKey;
+  delete store.tavilyApiKey;
+  try {
+    const r = await ask({
+      question: "Explain the current page",
+      includePageContext: true,
+      pageContext: { tabId: 1, title: "Local report", url: "https://example.test/report", text: "A report about a delayed project launch." },
+      noWebResearch: false,
+      forceWebResearch: true,
+    });
+    assert.equal(r.tavilyQueries.length, 0, "Tavily should not be called without a key");
+    assert.equal(r.bodies.length, 1, "the selected AI model must still be called");
+    assert.ok(!r.error, JSON.stringify(r.error));
+    assert.equal(r.notices.length, 0, "Explain should be silent when Tavily is not configured");
+  } finally {
+    store.tavilyApiKey = savedKey;
   }
 });
 

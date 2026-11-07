@@ -54,6 +54,8 @@ console.log(`\n[2/4] Packaging ${manifest.name} (v${version})...`);
 const RUNTIME_FILES = [
   "manifest.json",
   "background.js",
+  "request-keep-alive.js",
+  "auto-web-research.js",
   "content.js",
   "models.js",
   "storage-keys.js",

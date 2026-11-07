@@ -29,6 +29,7 @@ import { markdownToHtml } from "./rendering/markdown.js";
 import { makeTopicTitle, toStoredMessage, compressForQuota } from "./history-manager.js";
 import { sanitizeAttachmentName, normalizeAttachments, migrateLegacyConversations } from "../attachments.js";
 import { sanitizePiiMap, usedPiiMap, restoreWithMap, restoreInHtmlText } from "../privacy/pii-filter.js";
+import { startPortKeepAlive } from "../request-keep-alive.js";
 import {
   MAX_ATTACHMENTS,
   MAX_TOTAL_ATTACHMENT_TEXT_CHARS,
@@ -413,6 +414,9 @@ let pendingModelId = "";
 // already abandoned (e.g. a CHUNK already queued on the port before the
 // abort signal reached the fetch on the other end).
 let currentRequestId = null;
+// The side panel sends Port messages during a request to reset the MV3 service
+// worker idle timer. The handle is cleared on every DONE/ERROR/STOP path.
+let stopRequestKeepAlive = null;
 
 // During streaming, follow the newest translated text automatically until
 // the user interacts with the conversation viewport. User interaction stops
@@ -1063,6 +1067,17 @@ optionsBtn.addEventListener("click", async () => {
 // ---------- Streaming message handling ----------
 function setStreaming(streaming) {
   isStreaming = streaming;
+  if (streaming) {
+    if (!stopRequestKeepAlive) {
+      stopRequestKeepAlive = startPortKeepAlive({
+        getPort: () => port,
+        onError: (error) => console.debug("[AI Assistant] Port keep-alive message failed:", error),
+      });
+    }
+  } else if (stopRequestKeepAlive) {
+    stopRequestKeepAlive();
+    stopRequestKeepAlive = null;
+  }
   sendBtn.disabled = streaming;
   questionInput.disabled = streaming;
   quickActionButtons.forEach((button) => { button.disabled = streaming; });
