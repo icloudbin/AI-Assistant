@@ -14,6 +14,9 @@ A Chromium side-panel extension (Manifest V3, Chrome 116 or newer) that answers 
 ```
 AI-Assistant/
 ├── manifest.json
+├── README.md
+├── CHANGELOG.md
+├── privacy-policy.md
 ├── background.js
 ├── content.js
 ├── models.js
