@@ -28,6 +28,7 @@ import { migrateLegacyMessage, normalizeAttachments } from "../attachments.js";
 import { sanitizePiiMap } from "../privacy/pii-filter.js";
 import { cutAtCodePointBoundary, MAX_CUSTOM_PROMPT_CHARS } from "../models.js";
 import { PROVIDER_NAMES, dropOverlongPrompt, planSettingsImport, approvedSettings } from "./settings-import.js";
+import { isAutoWebResearchEnabled } from "../auto-web-research.js";
 
 const apiKeyInput = document.getElementById("apiKey");
 const openrouterApiKeyInput = document.getElementById("openrouterApiKey");
@@ -90,8 +91,13 @@ pageVisualsToggle.addEventListener("change", () => {
 });
 const autoWebResearchToggle = document.getElementById("autoWebResearchToggle");
 // Automatic web search (the question is sent to Tavily when the extension
-// guesses the page cannot answer it): OFF by default, saved immediately when toggled.
-chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY).then((s) => { autoWebResearchToggle.checked = s[AUTO_WEB_RESEARCH_KEY] !== false; }).catch(() => {});
+// guesses the page cannot answer it): ON by default, saved immediately when toggled.
+chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY).then((s) => {
+  autoWebResearchToggle.checked = isAutoWebResearchEnabled(s[AUTO_WEB_RESEARCH_KEY]);
+}).catch(() => {
+  // On storage failure the background disables implicit research; reflect that.
+  autoWebResearchToggle.checked = false;
+});
 autoWebResearchToggle.addEventListener("change", () => {
   void persistToggle(AUTO_WEB_RESEARCH_KEY, autoWebResearchToggle);
 });
