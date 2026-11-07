@@ -15,7 +15,7 @@ import { buildMessages } from "./messages.js";
 // the chat; keep only a bounded excerpt. JSON bodies (all three providers'
 // error format) are unwrapped to their human-readable message so the user
 // sees "You have uploaded an unsupported image…" instead of the raw JSON.
-async function providerHttpError(resp) {
+async function providerHttpError(resp, lang) {
   let body = "";
   try {
     body = (await resp.text()).replace(/\s+/g, " ").trim();
@@ -32,7 +32,25 @@ async function providerHttpError(resp) {
       // Not valid JSON after all: fall through to the raw excerpt.
     }
   }
+  // A retired model (Groq preview models can be removed at short notice) has
+  // its own shapes on both the HTTP path (404 model_not_found JSON) and the
+  // OpenRouter free router ("No allowed providers are available..."). One
+  // actionable, localized message beats the raw excerpt here.
+  if (isModelUnavailableError(body)) return t(lang, "bg_error_modelUnavailable");
   return `HTTP ${resp.status}${message ? ` ${message.slice(0, 500)}${message.length > 500 ? "…" : ""}` : ""}`;
+}
+
+// Recognizes every provider shape that means "this model is gone or has no
+// active route": Groq's 404 `model_not_found` / `model_decommissioned` codes
+// ("The model `x` does not exist or you do not have access to it."), and the
+// OpenRouter free router's in-stream failures ("No allowed providers are
+// available for the selected model", "No endpoints found for ..."). Deliberately
+// NOT matched: rate-limit and quota errors (429 OTPM, TPM/TPD) - those have
+// their own, size-related guidance in background.js.
+const MODEL_UNAVAILABLE_RE = /\bmodel_not_found\b|\bmodel_decommissioned\b|\bdoes not exist\b|\bno longer (?:exists?|available|supported)\b|\bhas been (?:decommissioned|retired)\b|\bno allowed providers\b|\bno endpoints found\b/i;
+
+export function isModelUnavailableError(text) {
+  return typeof text === "string" && MODEL_UNAVAILABLE_RE.test(text);
 }
 
 // First-byte watchdog: the stream idle/total timers only start once the
@@ -106,7 +124,7 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
       ...(model.reasoningEffort ? { reasoning_effort: model.reasoningEffort } : {}),
     }),
   }, ctx);
-  if (!resp.ok) throw new Error(await providerHttpError(resp));
+  if (!resp.ok) throw new Error(await providerHttpError(resp, ctx.lang));
 
   await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
 }
@@ -131,9 +149,15 @@ async function streamGroq(model, question, pageContext, history, images, ctx) {
       model: model.apiModel,
       messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang, ctx.translateMode, { boundaryId: ctx.boundaryId, attachments: ctx.attachments }),
       stream: true,
+      // Catalog-level output cap (see maxOutputTokens in models.js): without
+      // it Groq stops the reply at its small per-model default (probed live
+      // 2026-11-07: 2048-3072 tokens, finish_reason "length" mid-essay).
+      // Models without the field (qwen3.8-27b) must send NOTHING here - its
+      // free tier rejects any declared cap above 1000 with HTTP 429 OTPM.
+      ...(model.maxOutputTokens ? { max_completion_tokens: model.maxOutputTokens } : {}),
     }),
   }, ctx);
-  if (!resp.ok) throw new Error(await providerHttpError(resp));
+  if (!resp.ok) throw new Error(await providerHttpError(resp, ctx.lang));
 
   await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
 }
@@ -164,7 +188,7 @@ async function streamOpenRouter(model, question, pageContext, history, images, c
       stream: true,
     }),
   }, ctx);
-  if (!resp.ok) throw new Error(await providerHttpError(resp));
+  if (!resp.ok) throw new Error(await providerHttpError(resp, ctx.lang));
 
   await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
 }
@@ -266,7 +290,9 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
       return;
     }
     const streamError = extractError?.(json);
-    if (streamError) throw new Error(streamError);
+    if (streamError) {
+      throw new Error(isModelUnavailableError(streamError) ? t(ctx.lang, "bg_error_modelUnavailable") : streamError);
+    }
     // finish_reason "length" = the reply hit the output-token limit and was cut
     // off by the server. Without this the answer just stops mid-sentence.
     if (json?.choices?.[0]?.finish_reason === "length") ctx.truncatedByLength = true;
@@ -349,7 +375,9 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
     let parsed = null;
     try { parsed = JSON.parse(jsonText); } catch {}
     const jsonError = parsed ? (extractError?.(parsed) || "") : "";
-    if (jsonError) throw new Error(jsonError);
+    if (jsonError) {
+      throw new Error(isModelUnavailableError(jsonError) ? t(ctx.lang, "bg_error_modelUnavailable") : jsonError);
+    }
   }
 
   // A stream that ended without a single visible character (empty completion,

@@ -26,12 +26,31 @@ export function cutAtCodePointBoundary(text, max) {
 // maxPageChars: cap on the current-page text sent with a request (about 4
 // characters per token). Free tiers (Groq, OpenRouter free) reject or
 // rate-limit large requests, so they get a much smaller budget than DeepSeek.
+//
+// maxOutputTokens: sent to Groq as max_completion_tokens (streamGroq). Without
+// it Groq caps a reply at a small per-model default and cuts it off mid-answer:
+// probed live 2026-11-07, a "write 2000 words" request stopped with
+// finish_reason "length" at 3072 completion tokens (gpt-oss-120b) and 2048
+// (qwen3.8-27b, gpt-oss-20b). 65536 is the accepted maximum for both GPT-OSS
+// models (named by Groq's own 400 for a larger value, then confirmed accepted
+// by a real request). Qwen 3.8 27B deliberately declares NO cap: this key's
+// free tier enforces an output-tokens-per-minute admission limit of 1000 for
+// that preview model and REJECTS (HTTP 429 OTPM) every request that declares
+// more, while without the parameter the default 2048 goes through. Revisit
+// only for a key known to allow more.
 export const DEFAULT_MAX_PAGE_CHARS = MAX_PAGE_CONTEXT_CHARS;
 export const MODELS = [
   { id: "deepseek-flash", label: "DeepSeek V4.1 Flash", provider: "deepseek", apiModel: "deepseek-flash", thinking: "enabled", maxPageChars: MAX_PAGE_CONTEXT_CHARS },
-  { id: "groq-gpt-oss-120b", label: "Groq: GPT-OSS 120B", provider: "groq", apiModel: "openai/gpt-oss-120b", vision: false, maxPageChars: 24000 },
-  { id: "groq-qwen3.8-27b", label: "Groq: Qwen 3.8 27B", provider: "groq", apiModel: "qwen/qwen3.8-27b", vision: false, maxPageChars: 24000 },
-  { id: "groq-gpt-oss-20b", label: "Groq: GPT-OSS 20B", provider: "groq", apiModel: "openai/gpt-oss-20b", vision: false, maxPageChars: 24000 },
+  { id: "groq-gpt-oss-120b", label: "Groq: GPT-OSS 120B", provider: "groq", apiModel: "openai/gpt-oss-120b", vision: false, maxOutputTokens: 65536, maxPageChars: 24000 },
+  // Preview model (Groq docs: evaluation only, can be changed or removed at
+  // short notice). `preview: true` labels it in the dropdown, and a retirement
+  // (404 model_not_found / model_decommissioned, or the free router's
+  // "no allowed providers") maps to an actionable localized error instead of
+  // the raw HTTP excerpt - see isModelUnavailableError() in
+  // providers/openai-compatible.js. The default model is production, so an
+  // unknown ID never silently lands here.
+  { id: "groq-qwen3.8-27b", label: "Groq: Qwen 3.8 27B", provider: "groq", apiModel: "qwen/qwen3.8-27b", preview: true, maxPageChars: 24000 },
+  { id: "groq-gpt-oss-20b", label: "Groq: GPT-OSS 20B", provider: "groq", apiModel: "openai/gpt-oss-20b", vision: false, maxOutputTokens: 65536, maxPageChars: 24000 },
   { id: "openrouter-free-auto", label: "OpenRouter: Free Model (Auto)", provider: "openrouter", apiModel: "openrouter/free", vision: false, maxPageChars: 24000 },
 ];
 
@@ -52,8 +71,11 @@ export function findKnownModel(id) {
 }
 
 // Whether the model accepts image input. Models are assumed to support it
-// unless the catalog says `vision: false` (both GPT-OSS models and Qwen 3.8
-// 27B on Groq, and the OpenRouter free model, are text-only).
+// unless the catalog says `vision: false` (both GPT-OSS models and the
+// OpenRouter free model are text-only - GPT-OSS rejects multipart content
+// with HTTP 400 "messages[0].content must be a string"). Qwen 3.8 27B is
+// natively multimodal: verified live 2026-11-07, a data-URL image_url part
+// came back HTTP 200 and was read correctly, so it has no vision flag.
 export function modelSupportsVision(model) {
   return model?.vision !== false;
 }

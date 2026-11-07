@@ -4,7 +4,8 @@
 // integration-tested in the browser; here the shared machinery is driven
 // with synthetic Response bodies. Run:  node scripts/test-openai-compatible.mjs
 import assert from "node:assert/strict";
-import { readSse, openAICompatibleStreamError, providerHttpError, extractOpenAIDelta, fetchWithHeadersTimeout } from "../providers/openai-compatible.js";
+import { readSse, openAICompatibleStreamError, providerHttpError, extractOpenAIDelta, fetchWithHeadersTimeout, streamGroq, isModelUnavailableError } from "../providers/openai-compatible.js";
+import { MODELS, findKnownModel } from "../models.js";
 
 const encoder = new TextEncoder();
 function sse(chunks) {
@@ -316,5 +317,108 @@ assert.equal(openAICompatibleStreamError({ error: { code: 500 } }), '{"code":500
   assert.equal(ctx.chunks.join(""), "Hello!", "content-part arrays are flattened");
 }
 
-console.log("OK: openai-compatible — SSE reassembly, in-stream error release, empty-stream guard, stream-cut detection, stream timeout, JSON error body, content-part arrays, error mapping.");
+// ---------- streamGroq request body: max_completion_tokens passthrough ----------
+// Live probe 2026-11-07: without the parameter Groq cut replies at per-model
+// defaults (3072/2048 tokens, finish_reason "length" mid-essay), while
+// qwen3.8-27b's free tier REJECTS any declared cap above 1000 with HTTP 429
+// OTPM. So catalog models WITH maxOutputTokens must send it, and models
+// WITHOUT it (qwen) must send nothing - both directions are regression-guarded
+// here against the request body Groq actually receives.
+{
+  const originalFetch = globalThis.fetch;
+  const captured = [];
+  globalThis.fetch = async (url, init) => {
+    captured.push({ url, init });
+    const { resp } = sse(['data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n']);
+    // streamGroq checks resp.ok and the content type before reading the body.
+    return { ...resp, ok: true, status: 200, headers: { get: () => "text/event-stream" } };
+  };
+  // streamGroq reads the key from chrome.storage.local (and a legacy fallback
+  // name); neither the fetch nor storage exist in Node, so both are stubbed.
+  globalThis.chrome = { storage: { local: { get: async () => ({ groqApiKey: " gsk_test_key " }) } } };
+  try {
+    const groqModels = MODELS.filter((m) => m.provider === "groq");
+    assert.equal(groqModels.length, 3, "the three Groq catalog models are exercised");
+    for (const model of groqModels) {
+      const ctx = makeCtx();
+      ctx.safePost = () => {};
+      await streamGroq(model, "question", null, [], [], ctx);
+      const { url, init } = captured[captured.length - 1];
+      assert.equal(url, "https://api.groq.com/openai/v1/chat/completions", `[${model.id}] endpoint`);
+      assert.equal(init.headers.Authorization, "Bearer gsk_test_key", `[${model.id}] key is trimmed into the header`);
+      const body = JSON.parse(init.body);
+      assert.equal(body.model, model.apiModel, `[${model.id}] apiModel sent`);
+      assert.equal(body.stream, true, `[${model.id}] streams`);
+      assert.ok(Array.isArray(body.messages) && body.messages[0].role === "system", `[${model.id}] message list built with a leading system message`);
+      if (model.maxOutputTokens) {
+        assert.equal(body.max_completion_tokens, model.maxOutputTokens, `[${model.id}] sends its catalog output cap`);
+      } else {
+        assert.equal(body.max_completion_tokens, undefined, `[${model.id}] must NOT declare max_completion_tokens (free-tier OTPM 1000)`);
+      }
+      assert.equal("max_tokens" in body, false, `[${model.id}] uses the max_completion_tokens name, not the deprecated max_tokens`);
+    }
+    assert.equal(findKnownModel("groq-qwen3.8-27b").maxOutputTokens, undefined, "qwen stays uncapped in the catalog");
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete globalThis.chrome;
+  }
+}
+
+// ---------- retired-model errors map to one actionable, localized message ----------
+// Groq can retire preview models at short notice (qwen3.8-27b IS one), and the
+// OpenRouter free router fails in-stream with "No allowed providers...". All
+// such shapes become bg_error_modelUnavailable; ordinary errors keep their raw
+// (bounded) form.
+{
+  // isModelUnavailableError: the recognized shapes...
+  assert.equal(isModelUnavailableError('The model `qwen/qwen3.8-27b` does not exist or you do not have access to it.'), true, "Groq 404 message shape");
+  assert.equal(isModelUnavailableError("model_decommissioned"), true, "Groq decommissioned code");
+  assert.equal(isModelUnavailableError("No allowed providers are available for the selected model."), true, "OpenRouter free-router in-stream shape");
+  assert.equal(isModelUnavailableError("No endpoints found for openrouter/free."), true, "OpenRouter no-endpoint shape");
+  assert.equal(isModelUnavailableError("model_not_found"), true, "bare model_not_found code");
+  // ...and what must stay untouched: rate limits, quotas, ordinary failures.
+  assert.equal(isModelUnavailableError("Request too large for model `qwen/qwen3.8-27b` ... on output tokens per minute (OTPM): Limit 1000"), false, "OTPM 429 is NOT a retirement");
+  assert.equal(isModelUnavailableError("Rate limit reached for model `openai/gpt-oss-120b`"), false, "plain rate limit is NOT a retirement");
+  assert.equal(isModelUnavailableError("upstream maintenance"), false, "ordinary stream error is NOT a retirement");
+  assert.equal(isModelUnavailableError(undefined), false, "non-string is not a retirement");
+
+  // providerHttpError: the Groq 404 model_not_found JSON body (raw body must
+  // be inspected, because unwrapping keeps only the human message)...
+  const groq404 = { status: 404, text: async () => '{"error":{"message":"The model `qwen/qwen3.8-27b` does not exist or you do not have access to it.","type":"invalid_request_error","code":"model_not_found"}}' };
+  assert.match(await providerHttpError(groq404, "en"), /currently unavailable/i, "Groq 404 model_not_found maps to the localized unavailable error");
+  assert.doesNotMatch(await providerHttpError(groq404, "en"), /HTTP 404/, "the raw excerpt is replaced, not prefixed");
+  // ...an ordinary HTTP error keeps the raw form (lang optional, as called by tests).
+  assert.match(await providerHttpError({ status: 502, text: async () => "bad gateway" }), /^HTTP 502 bad gateway$/, "ordinary HTTP error keeps the raw form");
+
+  // readSse: the OpenRouter free router reports the failure in-stream on HTTP 200.
+  {
+    const ctx = makeCtx();
+    const { resp } = sse(['data: {"error":{"message":"No allowed providers are available for the selected model."}}\n\n']);
+    await assert.rejects(
+      readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError),
+      /currently unavailable/i,
+      "in-stream no-providers error maps to the localized unavailable error"
+    );
+  }
+  // readSse: the same router can also return a 200 JSON error body.
+  {
+    const ctx = makeCtx();
+    const body = new TextEncoder().encode('{"error":{"message":"No endpoints found for openrouter/free."}}');
+    const stream = new ReadableStream({ start(c) { c.enqueue(body); c.close(); } });
+    const resp = { body: stream, headers: { get: () => "application/json" } };
+    await assert.rejects(
+      readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError),
+      /currently unavailable/i,
+      "a 200 JSON no-endpoints error body maps to the localized unavailable error"
+    );
+  }
+  // readSse: an ordinary in-stream error is NOT rewritten.
+  {
+    const ctx = makeCtx();
+    const { resp } = sse(['data: {"error":{"message":"rate limited"}}\n\n']);
+    await assert.rejects(readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError), /^(Error: )?rate limited$/, "ordinary in-stream errors pass through unchanged");
+  }
+}
+
+console.log("OK: openai-compatible — SSE reassembly, in-stream error release, empty-stream guard, stream-cut detection, stream timeout, JSON error body, content-part arrays, error mapping, Groq output-cap passthrough, retired-model error mapping.");
 process.exit(0);

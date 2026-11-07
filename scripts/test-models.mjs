@@ -30,12 +30,33 @@ for (const m of MODELS) {
 // ---------- 2. Vision capability flags (#7 regression guard) ----------
 // Text-only models MUST have vision: false to avoid HTTP 400 from providers
 assert.equal(modelSupportsVision(findKnownModel("groq-gpt-oss-120b")), false, "groq-gpt-oss-120b is text-only");
-assert.equal(modelSupportsVision(findKnownModel("groq-qwen3.8-27b")), false, "groq-qwen3.8-27b is text-only");
+// Qwen 3.8 27B is natively multimodal (verified live 2026-11-07: a data-URL
+// image_url part got HTTP 200 and was read correctly) and must NOT carry
+// vision: false - that flag silently blocks attaching images to it.
+assert.equal(modelSupportsVision(findKnownModel("groq-qwen3.8-27b")), true, "groq-qwen3.8-27b accepts images (live-verified)");
 assert.equal(modelSupportsVision(findKnownModel("groq-gpt-oss-20b")), false, "groq-gpt-oss-20b is text-only");
 assert.equal(modelSupportsVision(findKnownModel("openrouter-free-auto")), false, "openrouter-free-auto is text-only");
 
 assert.equal(modelSupportsVision(findKnownModel("deepseek-flash")), true, "deepseek-flash accepts vision");
 assert.equal(modelSupportsVision(null), true, "null model defaults to vision true");
+
+// ---------- 2b. Groq output caps (live-probed 2026-11-07) ----------
+// Without an explicit max_completion_tokens Groq cut replies at small per-model
+// defaults (3072/2048/2048, finish_reason "length" mid-essay). The two GPT-OSS
+// models declare their accepted maximum (65536); qwen3.8-27b must declare
+// NOTHING - its free tier rejects any declared cap above 1000 with HTTP 429.
+assert.equal(findKnownModel("groq-gpt-oss-120b").maxOutputTokens, 65536, "groq-gpt-oss-120b sends max_completion_tokens 65536");
+assert.equal(findKnownModel("groq-gpt-oss-20b").maxOutputTokens, 65536, "groq-gpt-oss-20b sends max_completion_tokens 65536");
+assert.equal(findKnownModel("groq-qwen3.8-27b").maxOutputTokens, undefined, "groq-qwen3.8-27b must NOT declare max_completion_tokens (free-tier OTPM 1000)");
+assert.equal(findKnownModel("deepseek-flash").maxOutputTokens, undefined, "deepseek-flash uses the provider default (64K in thinking mode)");
+assert.equal(findKnownModel("openrouter-free-auto").maxOutputTokens, undefined, "openrouter-free-auto uses the provider default");
+
+// ---------- 2c. Preview flag (Groq retires preview models at short notice) ----------
+assert.equal(findKnownModel("groq-qwen3.8-27b").preview, true, "groq-qwen3.8-27b is flagged preview (dropdown label + retirement error mapping)");
+assert.equal(findKnownModel("groq-gpt-oss-120b").preview, undefined, "production models carry no preview flag");
+assert.equal(findKnownModel("groq-gpt-oss-20b").preview, undefined, "production models carry no preview flag");
+assert.equal(findKnownModel("openrouter-free-auto").preview, undefined, "production models carry no preview flag");
+assert.equal(findKnownModel("deepseek-flash").preview, undefined, "the default model is not preview");
 
 // ---------- 3. Resolving aliases ----------
 assert.equal(resolveModelId("deepseek-flash"), "deepseek-flash");

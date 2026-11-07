@@ -115,6 +115,8 @@ function applyLanguage(lang) {
   // document.querySelectorAll would miss it at those times.
   emptyState.innerHTML = t(lang, "emptyState_html");
   renderHistorySelect();
+  // The model dropdown carries a localized "(preview)" suffix.
+  populateModelSelect();
   renderAttachments();
   refreshMicUiLanguage();
   refreshExistingCopyButtons();
@@ -1033,13 +1035,22 @@ function getBubbleTextEl(bubbleEl) {
 }
 
 function populateModelSelect() {
+  // applyLanguage() re-runs this on every language switch (and once at
+  // startup, possibly after the model was restored): rebuilding the options
+  // resets a select's value, so the current selection is put back explicitly.
+  const previous = modelSelect.value;
   modelSelect.innerHTML = "";
   for (const m of MODELS) {
     const opt = document.createElement("option");
     opt.value = m.id;
-    opt.textContent = m.label;
+    // Preview models (Groq docs: evaluation only, can be retired at short
+    // notice) carry a localized suffix. Only the option TEXT is suffixed -
+    // m.label stays unsuffixed so label-based lookups (findModelIdByLabel)
+    // keep matching backups and restored conversations.
+    opt.textContent = m.preview ? `${m.label} (${t(currentLang, "model_preview_suffix")})` : m.label;
     modelSelect.appendChild(opt);
   }
+  if (previous && MODELS.some((m) => m.id === previous)) modelSelect.value = previous;
 }
 
 async function restoreSelectedModel() {

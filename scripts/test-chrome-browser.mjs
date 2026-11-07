@@ -481,9 +481,9 @@ async function main() {
         })()
       `);
 
-      assert.equal(modelsResult.qwenVision, false, "groq-qwen3.8-27b must have vision: false");
+      assert.equal(modelsResult.qwenVision, undefined, "groq-qwen3.8-27b must accept images (live-verified 2026-11-07, no vision flag)");
       assert.equal(modelsResult.openrouterVision, false, "openrouter-free-auto must have vision: false");
-      recordPass("Fix #7 (Models Vision Metadata)", "groq-qwen3.8-27b and openrouter-free-auto correctly set vision: false in Chrome");
+      recordPass("Fix #7 (Models Vision Metadata)", "groq-qwen3.8-27b image-capable (no vision flag) and openrouter-free-auto vision: false in Chrome");
     } catch (err) {
       recordFail("Fix #7 Models Vision", err);
     }

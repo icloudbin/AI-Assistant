@@ -4,6 +4,19 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Model catalog: live-probed Groq output caps, Qwen 3.8 27B vision and preview labelling (v1.10.142)
+
+A deep review of the connected models against the providers' current documentation; every claim below was verified against the live API with a real key on 2026-11-07.
+
+- **Problem 1.** Groq requests sent no `max_completion_tokens`, so replies were cut at Groq's small per-model defaults: a live probe stopped a 2000-word essay at 3072 completion tokens (gpt-oss-120b) and 2048 (qwen3.8-27b, gpt-oss-20b), every one with finish_reason "length".
+- **Fix 1.** The catalog carries `maxOutputTokens` and `streamGroq` sends it as `max_completion_tokens`: 65536 for both GPT-OSS models (the accepted maximum, named by Groq's own 400 and confirmed accepted by a real request). Qwen 3.8 27B deliberately declares nothing - this key's free tier enforces an output-tokens-per-minute admission limit of 1000 for that model and REJECTS every request declaring more (HTTP 429 OTPM) - a trap the probe caught before it shipped.
+- **Problem 2.** The catalog marked Qwen 3.8 27B `vision: false`, so the panel refused image attachments and page screenshots for a model that is natively multimodal.
+- **Fix 2.** The flag is gone: a live data-URL image request came back HTTP 200 and was read correctly ("Red"). The GPT-OSS rejection shape ("messages[0].content must be a string") is documented in the catalog, and the regression tests assert both directions.
+- **Problem 3.** Groq's preview models (docs: evaluation only, removed at short notice) were indistinguishable from production models in the UI, and a retirement surfaced as a raw "HTTP 404 The model ... does not exist" excerpt.
+- **Fix 3.** The preview model is labelled in the dropdown (localized suffix, re-applied on language switches without losing the selection), and every retirement shape - Groq 404 `model_not_found` / `model_decommissioned`, and the OpenRouter free router's "No allowed providers" / "No endpoints found" both in-stream and as a 200 JSON error body - maps to one actionable, localized "model unavailable" message in all six UI languages. Rate-limit and quota errors are deliberately not rewritten: their own, size-related guidance stays.
+- **Checked.** New tests: Groq output-cap passthrough asserted against the actual request body (including the qwen must-send-nothing guard and the deprecated `max_tokens` name staying unused) and the retired-model mapping on all three surfaces (HTTP error, in-stream error, 200 JSON error body) with the OTPM 429 explicitly kept raw; `test-models.mjs` asserts the caps and the preview flag; the real-Chrome suite's model-metadata check follows the new flag. Full sweep (25 suites) + check-package green; real-Chrome 11/11.
+- Build bumped to 1.10.142.
+
 ## Privacy: you choose whether the page is read, site lists, message ids for clean two-window merges (v1.10.141)
 
 Three review themes: the page-sending rules become the user's explicit choice (S-05), two windows merging one conversation no longer scramble or fold turns (B-04), and two privacy-filter blind spots are disclosed before they happen (S-08).
