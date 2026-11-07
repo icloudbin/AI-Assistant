@@ -8,7 +8,7 @@ import { checkImageUrl } from "./url-safety.js";
 import { redactOutbound, createRedactionSession, restoreNamePlaceholders, placeholderMapFromSession, PII_FILTER_STORAGE_KEY } from "./privacy/pii-filter.js";
 import { prepareLineTranslation, numberedBatches, LineTranslator } from "./translate-lines.js";
 import { chooseTranslationSelection } from "./translation-selection.js";
-import { streamDeepSeek, streamGroq, streamOpenRouter, classifyProviderFailure } from "./providers/openai-compatible.js";
+import { streamDeepSeek, streamGroq, streamOpenRouter, classifyProviderFailure, readBoundedText } from "./providers/openai-compatible.js";
 import { factCheckLanguageInstruction, untrustedBoundary, newBoundaryId } from "./providers/messages.js";
 import { normalizeAttachments } from "./attachments.js";
 
@@ -990,7 +990,9 @@ async function tavilySearchRequest(query, apiKey, signal, topic, maxResults) {
     signal,
   });
   if (!resp.ok) {
-    const detail = await resp.text();
+    // Bounded read: a gateway error page can be megabytes of HTML and only
+    // 500 characters are ever used.
+    const detail = await readBoundedText(resp);
     throw new Error(`Tavily HTTP ${resp.status}: ${detail.slice(0, 500)}`);
   }
   return resp.json();

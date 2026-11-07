@@ -479,8 +479,8 @@ assert.equal(openAICompatibleStreamError({ error: { code: 500 } }), '{"code":500
     };
     await assert.rejects(
       () => streamGroq(findKnownModel("groq-gpt-oss-120b"), "question", null, [], [], makeCtx()),
-      /HTTP 429/,
-      "a plain rate-limit 429 is not retried"
+      /HTTP 429 Rate limit reached for model `openai\/gpt-oss-120b` on tokens per minute/,
+      "a plain rate-limit 429 is not retried and keeps its body detail"
     );
     assert.equal(calls.length, 1, "no retry for a non-OTPM 429");
     // qwen declares no cap, so there is nothing to drop: an OTPM 429 on it is

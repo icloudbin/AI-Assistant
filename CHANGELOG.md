@@ -4,6 +4,16 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Deep-analysis round: three small fixes found by re-reading the last eight releases (v1.10.148)
+
+A post-release deep pass over everything v1.10.140-147 changed, plus live real-key testing of every provider.
+
+- **Fix 1.** The Groq OTPM fallback read the 429 body with an unbounded `resp.text()` - and consumed it, so a NON-OTPM 429 then lost its error detail (the follow-up read hit an already-consumed body and the message degraded to the bare status). The body is now read once through the bounded reader and handed to the error builder.
+- **Fix 2.** The Tavily error path buffered the whole error page (`resp.text()`) only to slice 500 characters from it; it now uses the same bounded reader.
+- **Fix 3.** The page/selection extractor kept image Markdown intact inside a link label, but its detection required a full `](url)` - an ESCAPED image (`![alt]\(src\)`) in a link label was still corrupted by the bracket strip. The detection now covers both forms.
+- **Live testing (real keys from the extension's own storage, driving the actual provider modules).** DeepSeek chat, Groq gpt-oss-120b (a 23,892-character / ~5-6k-token reply - live proof the v1.10.142 output cap replaced the 3072-token default that truncated long answers), OpenRouter free router, Tavily search, and the privacy filter on a mixed sentence: 5/5. Real-Chrome suites: 11/11 CDP and 31/31 extension-level E2E; 24 static suites + check-package green.
+- Build bumped to 1.10.148.
+
 ## PII round: seven missed shapes, three false positives, and a quadratic Markdown path (v1.10.147)
 
 A 95-sample missed-detection probe and a false-positive review, plus a quadratic-rendering measurement. (The review's model-catalog items were already resolved in v1.10.142: the Qwen preview flag, its live-verified vision support, and the Groq output caps.)

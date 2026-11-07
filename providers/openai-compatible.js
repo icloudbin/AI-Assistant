@@ -20,7 +20,7 @@ import { buildMessages } from "./messages.js";
 // so an unbounded resp.text() just buffered the whole page for nothing. Falls
 // back to resp.text() for the synthetic responses the unit tests pass (no body
 // stream).
-async function readBoundedText(resp, maxChars = 4000) {
+export async function readBoundedText(resp, maxChars = 4000) {
   const reader = resp.body?.getReader?.();
   if (!reader) return await resp.text();
   const decoder = new TextDecoder();
@@ -34,10 +34,14 @@ async function readBoundedText(resp, maxChars = 4000) {
   return out;
 }
 
-async function providerHttpError(resp, lang) {
+// `preReadText`: a body already read (bounded) by the caller - the OTPM
+// fallback reads the 429 body to decide whether to retry, and a consumed body
+// cannot be read again (the retry-less path would otherwise lose the error
+// detail and degrade to the bare status).
+async function providerHttpError(resp, lang, preReadText = null) {
   let body = "";
   try {
-    body = (await readBoundedText(resp)).replace(/\s+/g, " ").trim();
+    body = (preReadText ?? (await readBoundedText(resp))).replace(/\s+/g, " ").trim();
   } catch {
     // Unreadable body: the status code alone is still useful.
   }
@@ -212,11 +216,15 @@ async function streamGroq(model, question, pageContext, history, images, ctx) {
   // (finish_reason "length", surfaced as usual), which still beats refusing
   // outright. A plain rate-limit 429 and capless models never retry here.
   if (!resp.ok && resp.status === 429 && body.max_completion_tokens) {
-    const text = await resp.text().catch(() => "");
-    if (PROVIDER_OUTPUT_RATE_RE.test(text)) {
+    const preRead = await readBoundedText(resp).catch(() => "");
+    if (PROVIDER_OUTPUT_RATE_RE.test(preRead)) {
       const uncapped = { ...body };
       delete uncapped.max_completion_tokens;
       resp = await fetchWithHeadersTimeout("https://api.groq.com/openai/v1/chat/completions", { ...init, body: JSON.stringify(uncapped) }, ctx);
+    } else {
+      // A plain rate-limit 429: no retry. The body was already consumed for
+      // the check, so hand it to the error builder instead of re-reading.
+      throw new Error(await providerHttpError(resp, ctx.lang, preRead));
     }
   }
   if (!resp.ok) throw new Error(await providerHttpError(resp, ctx.lang));
