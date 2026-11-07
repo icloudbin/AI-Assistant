@@ -86,7 +86,10 @@ if (inGit) {
   const src = fs.readFileSync(path.join(root, "i18n.js"), "utf8");
   const langs = {};
   let cur = null;
-  for (const line of src.split("\n")) {
+  // Split CRLF-tolerantly: on Windows (core.autocrlf=true) a fresh clone or a
+  // hard reset checks this file out with CRLF, and a "\n"-only split made every
+  // language table match fail ("could not find the English table").
+  for (const line of src.split(/\r?\n/)) {
     const lm = line.match(/^  (?:"([\w-]+)"|(\w+)): \{$/);
     if (lm) { cur = lm[1] || lm[2]; langs[cur] = {}; continue; }
     const km = line.match(/^    ([A-Za-z0-9_]+):\s*(.*)$/);

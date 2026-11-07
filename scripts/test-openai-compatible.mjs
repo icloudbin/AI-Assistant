@@ -55,8 +55,8 @@ const delta = (json) => json.choices?.[0]?.delta?.content ?? "";
   const ctx = makeCtx();
   ctx.streamMaxContentChars = 5;
   const { resp } = sse([
-    'data: {"choices":[{"delta":{"content":"abcdefgh"}}]}\\n\\n',
-    "data: [DONE]\\n\\n",
+    'data: {"choices":[{"delta":{"content":"abcdefgh"}}]}\n\n',
+    "data: [DONE]\n\n",
   ]);
   await assert.rejects(
     () => readSse(resp, delta, ctx, openAICompatibleStreamError),
@@ -69,7 +69,7 @@ const delta = (json) => json.choices?.[0]?.delta?.content ?? "";
   const ctx = makeCtx();
   ctx.streamMaxBytes = 32;
   ctx.streamMaxSseLineChars = 128;
-  const { resp } = sse([`: ${"x".repeat(40)}\\n\\n`]);
+  const { resp } = sse([`: ${"x".repeat(40)}\n\n`]);
   await assert.rejects(
     () => readSse(resp, delta, ctx, openAICompatibleStreamError),
     /safety limit/i,
@@ -80,7 +80,7 @@ const delta = (json) => json.choices?.[0]?.delta?.content ?? "";
   const ctx = makeCtx();
   ctx.streamMaxBytes = 1024;
   ctx.streamMaxSseLineChars = 16;
-  const { resp } = sse([`: ${"x".repeat(20)}\\n\\n`]);
+  const { resp } = sse([`: ${"x".repeat(20)}\n\n`]);
   await assert.rejects(
     () => readSse(resp, delta, ctx, openAICompatibleStreamError),
     /safety limit/i,

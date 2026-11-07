@@ -4,6 +4,17 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Stream safety limits merged, tests repaired, i18n completed (v1.10.153)
+
+Release build for the merged pull request #1 (SEC-01 / SEC-02 hardening), plus the repairs its merge needed.
+
+- **Merged (SEC-02).** The SSE reader now enforces three per-request resource limits: 4 MB total upstream response (including SSE framing), 1,000,000 characters of user-visible text, and 256 KB per single SSE event (rejected before JSON.parse). Over the limit the request fails with a localized "safety limit" error and the permitted prefix stays on screen; limits are overridable per request through ctx for tests.
+- **Merged (SEC-01).** The image-fetch destination policy is fail-closed (url-safety destination checks tightened; regression tests added).
+- **Test repair.** The PR's three new SEC-02 tests wrote their SSE framing with double-escaped newlines (`\\n`), which made every stream parse as one malformed line and fail with the empty-response error - the suite was red as merged. The escaping is fixed; the tests now exercise the real limits (cap, byte bound, oversized line).
+- **i18n completion.** The PR added `bg_error_streamTooLarge` to three of the six languages; fr/ja/es filled in. And check-package's i18n reader now splits CRLF-tolerantly - on Windows (core.autocrlf=true) a fresh clone or hard reset checked the file out with CRLF and the validator false-failed with "could not find the English table" (a latent bug this release's build actually hit).
+- **Checked.** Full sweep (22 suites) + check-package green; real-Chrome 11/11; the extension-level E2E ran against the EXTRACTED shipped package (EXT_ROOT) - 31/31.
+- Build bumped to 1.10.153.
+
 ## Automatic web research is ON by default (v1.10.152)
 
 User decision: the "Automatically search the web when the page cannot answer a question" checkbox is now CHECKED by default.
