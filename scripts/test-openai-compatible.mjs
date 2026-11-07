@@ -60,8 +60,8 @@ const delta = (json) => json.choices?.[0]?.delta?.content ?? "";
   ]);
   await assert.rejects(
     () => readSse(resp, delta, ctx, openAICompatibleStreamError),
-    /safety limit/i,
-    "visible text is capped"
+    /1,000,000 characters safety limit/i,
+    "visible text is capped and its unit is explicit"
   );
   assert.equal(ctx.chunks.join(""), "abcde", "the permitted prefix is retained");
 }
@@ -72,8 +72,8 @@ const delta = (json) => json.choices?.[0]?.delta?.content ?? "";
   const { resp } = sse([`: ${"x".repeat(40)}\n\n`]);
   await assert.rejects(
     () => readSse(resp, delta, ctx, openAICompatibleStreamError),
-    /safety limit/i,
-    "total stream bytes are capped"
+    /4\.0 MiB safety limit/i,
+    "total stream bytes are capped and reported in MiB"
   );
 }
 {
@@ -83,8 +83,8 @@ const delta = (json) => json.choices?.[0]?.delta?.content ?? "";
   const { resp } = sse([`: ${"x".repeat(20)}\n\n`]);
   await assert.rejects(
     () => readSse(resp, delta, ctx, openAICompatibleStreamError),
-    /safety limit/i,
-    "oversized SSE lines are rejected before parsing"
+    /256,000 characters per SSE line safety limit/i,
+    "oversized SSE lines are rejected and reported in characters"
   );
 }
 
