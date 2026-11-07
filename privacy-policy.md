@@ -1,6 +1,6 @@
 Privacy Policy for AI Assistant
 
-Effective Date: October 21, 2026
+Effective Date: November 7, 2026
 
 AI Assistant ("the Extension") is a browser extension that provides AI assistance for webpages, selected webpage text, and user-provided files. This Privacy Policy explains what information the Extension processes, how it is used, and when it is shared with third-party services.
 
@@ -14,7 +14,7 @@ Custom prompts configured by the user
 Interface language and translation preferences
 Voice input language preference
 Locally saved conversation history
-Privacy filter, page screenshot and automatic web search preferences
+Privacy filter, page reading mode, Never send / Always allow site lists, page screenshot and automatic web search preferences
 Temporary information required to pass a user-initiated context-menu action to the Side Panel
 
 The Extension does not transmit these locally stored settings to the Extension developer's servers.
@@ -39,15 +39,17 @@ The Extension is designed to use the current active webpage and refresh its cont
 
 When the Read current page option is disabled, ordinary questions are not sent with the current webpage content as context.
 
-The quick actions (Summarize, Translate, Explain, Key Points and Fact Check) always read the current page, even when the Read current page option is unchecked, because they operate on that page. The Read current page option is on by default; if the user turns it off, that choice is remembered until they turn it back on. The side panel's context bar shows which page (title and site) would be sent with the next question.
+"Read current page" has three states - Off, Ask each time, and Always - chosen by the user on first use and changeable any time in the side panel. Until the user has made that choice (for example on a fresh install), nothing is read for ordinary questions, which is the same behavior as Off. When it is Ask each time, a confirmation dialog shows what would be sent (the page's title and site, and the selected model) before anything goes out; the user can send it, send the question without the page, or cancel. The side panel's context bar shows which page (title and site) would be sent with the next question.
 
-Webmail and online-banking/payment sites (for example Gmail, Outlook, Proton Mail, PayPal and major banks, plus self-hosted mail pages recognised by the extension's mail extractors) are treated as sensitive: for ordinary questions the page is not sent, even when Read current page is on, unless the user clicks "Allow this site (session)" in the context bar. That permission applies only to that site and only until the side panel is closed. The quick actions are explicit actions on the page and still read it. The site list is a heuristic and does not cover every mail or banking site.
+The quick actions (Summarize, Translate, Explain, Key Points and Fact Check) are explicit actions on the current page and run regardless of the "Read current page" mode.
+
+The Extension ships with a heuristic list of sensitive sites - webmail, online banking and payment, brokerages, crypto exchanges, password managers, sign-in and identity, tax/government and payment-dashboard pages (for example Gmail, Outlook, Proton Mail, PayPal and major banks, plus self-hosted mail pages recognised by the extension's mail extractors). On a sensitive site the page is sent only after the user confirms it in the dialog described above, or after the user clicks "Don't ask again for this site" - a permission that applies only to that site and only until the side panel is closed. On ordinary questions a sensitive page is not sent at all unless "Read current page" is Always. The user can add two editable lists in Settings, which take precedence over the built-in rules: a Never send list (nothing from such a site is sent; quick actions on it are refused outright) and an Always allow list (skips the sensitive-site confirmation and the Ask-each-time question, but not the Off mode). The built-in list is a heuristic and does not cover every mail or banking site.
 
 Page screenshot and images: only if the user turns on "Page screenshot and images" in Settings (off by default), the quick actions also capture a screenshot of the visible part of the current tab and up to a few of the page's images and send them to the selected AI provider. These images are sent as they appear, including any personal information visible on the page; the privacy filter described below cannot redact images. Images the user attaches themselves are sent as described in section 3.
 
 Automatic web search: only if the user turns on "Automatically search the web when the page cannot answer a question" in Settings (off by default) and has added a Tavily API key, the Extension sends the user's question text to Tavily whenever it judges that the current page cannot answer it (for example, the question mentions a year that the page does not contain). With this setting off, a question is sent to Tavily only when the user explicitly asks for a web search (for example "search the web"), uses the Explain quick action, or runs Fact Check. The privacy filter described below is applied to what is sent to Tavily, except that name placeholders are restored in the search query: a search about a person or a public fact is useless with the name blinded (every other kind of redacted text stays redacted).
 
-Privacy filter: unless the user turns it off in Settings (on by default), the Extension locally replaces recognisable personal and sensitive text (such as emails, phone numbers, card and ID numbers, IP addresses, API keys, tokens, passwords, session cookies, MAC addresses, street addresses, and names that follow a clear label such as "Name:" or "My name is") with numbered placeholders such as [EMAIL#1] before the question, page text, attachment text and conversation history are sent to an AI provider or to Tavily. Two deliberate exceptions keep searches and answers working: a Fact Check request is sent unfiltered (the verbatim claim - the text the user highlighted on the page, including any personal information it contains, since they selected it themselves - is what makes the web search work; when Fact Check is run without a highlight, candidate claims are taken from the page text with the privacy filter applied to them), and name placeholders are restored in web-search queries. The filter is pattern based and is a safety net, not a guarantee. The mapping between a placeholder and the original text is kept only in the Extension's memory for the duration of that one request and is never sent anywhere; it is used to put your original text back into the reply you see (for example in a translation). Locally stored history keeps the original text.
+Privacy filter: unless the user turns it off in Settings (on by default), the Extension locally replaces recognisable personal and sensitive text (such as emails, phone numbers, card and ID numbers, IP addresses, API keys, tokens, passwords, session cookies, MAC addresses, street addresses, and names that follow a clear label such as "Name:" or "My name is") with numbered placeholders such as [EMAIL#1] before the question, page text, attachment text and conversation history are sent to an AI provider or to Tavily. Two deliberate exceptions keep searches and answers working: a Fact Check request is sent unfiltered (the verbatim claim - the text the user highlighted on the page, including any personal information it contains, since they selected it themselves - is what makes the web search work; when Fact Check is run without a highlight, candidate claims are taken from the page text with the privacy filter applied to them), and name placeholders are restored in web-search queries. The filter is pattern based and is a safety net, not a guarantee. The mapping between a placeholder and the original text is kept in the Extension's memory for the duration of that one request, and it is never sent to any AI provider, search service or the Extension developer. An AI reply is stored locally in placeholder form together with the part of the mapping that reply uses, so the panel can put your original text back into what you see later (for example after reopening the side panel, or in a translation); the same mapping is included in locally exported backup ZIP files of the conversation history. It never leaves the browser.
 
 Images in AI replies: remote images that appear in an AI reply are not loaded automatically. They are fetched, through the Extension, only when the user clicks the placeholder.
 
@@ -120,12 +122,11 @@ When a user selects webpage text and explicitly chooses an AI action from the br
 
 Supported actions include:
 
-Summarize
-Translate
-Explain
-Fact Check
+Translate - the selected text is translated into the Preferred Translation Language chosen in Settings
 
 The selected text is used only for the user-requested operation. The Extension does not automatically process all webpage selections or monitor right-click activity. The selected text and the page URL are held only in the browser's in-memory session storage until the action runs (or for at most two minutes, whichever comes first); they are never written to disk.
+
+The site rules described in section 2 apply to this action as well: on a site the user has put on the Never send list the action is refused, and on a sensitive site the Extension asks for confirmation first (with a per-site "don't ask again" option). Only the text the user selected is sent - never the rest of the page.
 
 10. Data Sharing
 
@@ -153,7 +154,7 @@ However, when information is sent to a third-party AI provider, that provider's 
 
 13. User Control
 
-Users can control whether webpage content is included in ordinary AI requests through the Read current page setting.
+Users can control whether webpage content is included in ordinary AI requests through the Read current page setting, and can add sites to the Never send / Always allow lists in Settings.
 
 Users can also:
 

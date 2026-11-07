@@ -4,6 +4,19 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Policy accuracy, context-menu site gate, and history storage headroom (v1.10.146)
+
+Three review findings: an outdated privacy policy, a right-click path that bypassed the site lists, and a save path that could silently drop most of the history under storage-quota pressure.
+
+- **Problem 1.** The privacy policy still described the pre-v1.10.141 behavior: "Read current page" was said to be on by default (it is an explicit first-run choice, and until it is made nothing is read), the Ask-each-time mode with its confirmation dialog and the Never send / Always allow lists were absent (quick actions are refused on Never-send sites and confirmed on sensitive ones - the policy claimed they "still read it"), the placeholder mapping was said to live only in memory for one request (it is also stored with the local history - in placeholder form plus the map subset - and in exported backup ZIPs, so replies render correctly later), section 9 listed four context-menu actions of which only Translate exists, and the effective date predated the privacy round.
+- **Fix 1.** The policy now describes the three modes and the first-run default, the confirm dialog, both site lists and their precedence, the exact split of what the placeholder mapping is and where it lives (never leaves the browser), the actual Translate-only context menu, and carries today's date.
+- **Problem 2.** The context-menu Translate sent only the user's own selection - but the pending action's URL was carried along and never consulted, so a right-click translate on a site the user put on the Never send list ran anyway, and sensitive sites never saw the confirm the quick actions get.
+- **Fix 2.** The context-menu path now runs the same `decidePageSend({kind:"quick"})` gate: a Never-send site refuses the action (same notice as the quick actions), a sensitive site shows the per-site confirm with "Don't ask again for this site". The gate is decided before any running request is stopped, so a refused action changes nothing.
+- **Problem 3.** Without `unlimitedStorage`, chrome.storage.local enforces a ~10 MB quota, and the save path escalated under pressure by condensing previews and then dropping the oldest conversations - half per attempt, up to ~87.5% - with the notice shown only afterwards; the backup-restore path shared the escalation.
+- **Fix 3.** The manifest now declares `unlimitedStorage`, so the quota path becomes a last-resort safety net rather than a realistic scenario; the condense-then-halve escalation and its honest notice stay in place for both the save and the restore paths.
+- **Checked.** Full sweep (25 suites) + check-package green; real-Chrome 11/11. The context-menu gate reuses the pageDecision/resolvePageDecision flow the quick actions already use (same dialog, same per-site remember), so no new UI strings were needed.
+- Build bumped to 1.10.146.
+
 ## Fact Check: the highlighted claim actually reaches Tavily unfiltered now (v1.10.145)
 
 An external review found that the privacy policy's Fact Check exception was dead code as seen from the UI: the side panel never filled in the selection.

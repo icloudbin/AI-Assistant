@@ -3620,6 +3620,26 @@ async function getPreferredTranslationLanguage() {
 
 async function processContextAction(pending) {
   if (!pending?.action || !pending?.text) return;
+
+  // The same site gate the quick actions go through (v1.10.146). The selection
+  // is the user's own text, but a site on the Never-send list carries an
+  // explicit standing instruction about that site, so it wins and the action is
+  // refused; a sensitive site shows the same per-site confirm the quick actions
+  // show (with "Don't ask again for this site"). pending.url is the page the
+  // menu was opened on (background.js stores it with the pending action); it
+  // used to be carried along but never consulted, so a right-click translate
+  // silently bypassed both lists. Refuse/confirm are decided BEFORE any running
+  // request is stopped, so a refused action changes nothing.
+  const gate = pageDecision({ url: String(pending.url || ""), kind: "quick", lists: await readSiteLists() });
+  if (gate.action === "refuse") {
+    addBubble("notice", t(currentLang, "pageContext_neverRefused_template", { host: gate.host || shortenForDialog(pending.url, 60) }));
+    return;
+  }
+  if (gate.action === "confirm") {
+    const verdict = await resolvePageDecision(gate, { title: "", url: String(pending.url || ""), kind: "quick", selectedModel: getSelectedModel(), visuals: false, isCancelled: () => false });
+    if (verdict !== "send") return;
+  }
+
   if (isStreaming) stopActiveRequest();
 
   // The context menu has exactly one item ("Translate selected text", see
