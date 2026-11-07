@@ -91,7 +91,7 @@ pageVisualsToggle.addEventListener("change", () => {
 const autoWebResearchToggle = document.getElementById("autoWebResearchToggle");
 // Automatic web search (the question is sent to Tavily when the extension
 // guesses the page cannot answer it): OFF by default, saved immediately when toggled.
-chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY).then((s) => { autoWebResearchToggle.checked = s[AUTO_WEB_RESEARCH_KEY] === true; }).catch(() => {});
+chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY).then((s) => { autoWebResearchToggle.checked = s[AUTO_WEB_RESEARCH_KEY] !== false; }).catch(() => {});
 autoWebResearchToggle.addEventListener("change", () => {
   void persistToggle(AUTO_WEB_RESEARCH_KEY, autoWebResearchToggle);
 });
@@ -102,12 +102,12 @@ autoWebResearchToggle.addEventListener("change", () => {
 // toggles matter most: an import that disables the PII filter while the
 // checkbox still shows checked would leave the user believing redaction is
 // active when it is not. Defaults mirror the load-time reads above: the
-// privacy filter is ON unless explicitly false, page visuals are OFF unless
-// explicitly true.
+// privacy filter and automatic web research are ON unless explicitly
+// false, page visuals are OFF unless explicitly true.
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
   if (changes[AUTO_WEB_RESEARCH_KEY]) {
-    autoWebResearchToggle.checked = changes[AUTO_WEB_RESEARCH_KEY].newValue === true;
+    autoWebResearchToggle.checked = changes[AUTO_WEB_RESEARCH_KEY].newValue !== false;
   }
   if (changes.piiFilterEnabled) {
     piiFilterToggle.checked = changes.piiFilterEnabled.newValue !== false;

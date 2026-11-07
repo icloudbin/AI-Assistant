@@ -1144,7 +1144,10 @@ function pageResearchQuery(question, pageContext) {
 // (anything but a stored `true`, including a failed read, counts as off).
 async function autoWebResearchEnabled() {
   try {
-    return (await chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY))[AUTO_WEB_RESEARCH_KEY] === true;
+    // Checked by default: a stored false is an explicit opt-out, anything
+    // else (including a fresh profile) has automatic web research on. A
+    // storage failure stays conservative: no unexpected Tavily queries.
+    return (await chrome.storage.local.get(AUTO_WEB_RESEARCH_KEY))[AUTO_WEB_RESEARCH_KEY] !== false;
   } catch {
     return false;
   }

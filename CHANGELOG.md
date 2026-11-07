@@ -4,6 +4,15 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Automatic web research is ON by default (v1.10.152)
+
+User decision: the "Automatically search the web when the page cannot answer a question" checkbox is now CHECKED by default.
+
+- What that means: when the extension judges that the current page cannot answer an ordinary question (a year the page does not contain, low keyword overlap, or no page at all), the question goes to Tavily for web evidence before the model answers - provided a Tavily API key is configured (without one, the lookup is skipped silently and the model answers from the page). The explicit paths ("search the web", Explain, Fact Check) are unchanged, and unchecking the box stops the implicit lookups entirely.
+- The default flipped in all three places that matter: the Settings toggle (absent storage reads as checked), the background preflight gate (a stored false is the explicit opt-out; a storage failure stays conservative and does not research), and the settings-import review (re-storing the default needs no tick; importing FALSE over the default applies unasked, since it is more protective). The privacy policy now describes the default as ON.
+- Checked: `test-settings-import` (the hostile-file case no longer lists re-storing the default), `test-outbound-pii` (the "stays local" regressions re-pinned under the documented opt-out, plus a new default-ON case proving the implicit preflight queries Tavily), full sweep (22 suites) + check-package green; real-Chrome 11/11 + extension-level 31/31.
+- Build bumped to 1.10.152.
+
 ## Page reading simplified: a checkbox, no site lists, no confirmations (v1.10.151)
 
 User decision: the three-state page-reading control and the site-list machinery from v1.10.141 were more machinery than wanted. This release returns page reading to a plain checkbox and removes the rest of that layer.

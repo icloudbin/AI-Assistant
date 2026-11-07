@@ -328,6 +328,12 @@ tavilyReply = () => new Response(JSON.stringify({ results: [{ url: "https://e.co
 // verb and bare 联网 matched connectivity questions. Only a clear search
 // instruction may go out.
 {
+  // The "stays local" regressions date from when automatic web research was
+  // OFF by default; they describe the documented OPT-OUT behavior, so the
+  // switch is preset to off for this block. (v1.10.152: the checkbox is ON by
+  // default, and the implicit preflight may then research what the page
+  // cannot answer - asserted right after the block.)
+  store.autoWebResearchEnabled = false;
   const misfires = [
     "Search this web page for the pricing section",
     "Check the web page for spelling errors",
@@ -342,6 +348,11 @@ tavilyReply = () => new Response(JSON.stringify({ results: [{ url: "https://e.co
   check("genuine explicit request still goes to Tavily", r.sent.some((s) => s.url.includes("tavily")));
   r = await ask({ question: "What is the boiling point of water?", pageContext: null, includePageContext: false });
   check("ordinary question stays local", !r.sent.some((s) => s.url.includes("tavily")));
+  delete store.autoWebResearchEnabled;
+  // New default (auto research ON): the implicit preflight judges that the
+  // page (here: none) cannot answer and queries Tavily - that is the feature.
+  r = await ask({ question: "路由器联网失败是什么意思", pageContext: null, includePageContext: false });
+  check("auto research ON by default: implicit preflight queries Tavily", r.sent.some((s) => s.url.includes("tavily")));
 }
 
 // --- Web-search evidence rides inside an UNTRUSTED boundary (v1.10.129) ----

@@ -29,7 +29,9 @@ export const PROVIDER_NAMES = { apiKey: "DeepSeek", openrouterApiKey: "OpenRoute
 const PROTECTION_SWITCHES = {
   [PII_FILTER_STORAGE_KEY]: { isOn: (v) => v !== false, onIsProtective: true },
   [PAGE_VISUALS_STORAGE_KEY]: { isOn: (v) => v === true, onIsProtective: false },
-  [AUTO_WEB_RESEARCH_KEY]: { isOn: (v) => v === true, onIsProtective: false },
+  // Automatic web research is checked by default, so a stored false is the
+  // explicit opt-out and ABSENT reads as on.
+  [AUTO_WEB_RESEARCH_KEY]: { isOn: (v) => v !== false, onIsProtective: false },
 };
 
 // Over-long custom prompts are not imported (cutting a system prompt in the
