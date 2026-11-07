@@ -178,7 +178,7 @@ export function checkImageUrl(rawUrl, _pageUrl = '') {
   // explicitly written default port, and non-empty for every non-default port.
   if (url.port) return null;
 
-  const host = url.hostname.toLowerCase().replace(/\\.+$/, '');
+  const host = url.hostname.toLowerCase().replace(/\.+$/, '');
   if (isNonPublicHost(host)) return null;
   if (isPublicIpLiteral(host)) return url;
   if (TRUSTED_IMAGE_HOSTS.has(host)) return url;
