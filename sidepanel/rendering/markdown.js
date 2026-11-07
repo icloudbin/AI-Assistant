@@ -50,7 +50,11 @@ function decodeUrlEntities(s) {
 // >1.2s, amplified by the streaming re-renders. Excluding `[` matches
 // CommonMark (the inner link of "[a [b](url)" wins, the outer "[" is literal)
 // and makes every failed attempt O(1).
-const MD_LINK_URL = String.raw`((?:[^()\s]|\([^()\s]*\))+|[^)\s]+)`;
+// The URL class excludes `[` like the label class, with one exception: a
+// MATCHED bracket pair is allowed as a unit (http://[::1]:8080/x - an IPv6
+// literal host). With `[` free, "![a](" followed by a long "[" run made the
+// URL part consume to the end and backtrack one character at a time - O(n²).
+const MD_LINK_URL = String.raw`((?:[^()\[\s]|\([^()\[\s]*\)|\[[^\]\[\s]*\])+|[^)\[\s]+)`;
 const MD_IMAGE_RE = new RegExp(String.raw`!\[([^\]\[]*)\]\(` + MD_LINK_URL + String.raw`(?:\s+(?:"[^"]*"|&quot;[^"]*&quot;))?\)`, "g");
 const MD_LINK_RE = new RegExp(String.raw`\[([^\]\[]+)\]\(` + MD_LINK_URL + String.raw`(?:\s+(?:"[^"]*"|&quot;[^"]*&quot;))?\)`, "g");
 
@@ -88,14 +92,22 @@ function inlineMarkdownToHtml(text) {
   // ![image]([https://example.com/image.png](https://example.com/image.png))
   // or ![image]\(https://example.com/image.png\).
   // Normalize these common variants before parsing standard Markdown images.
-  s = s.replace(
-    /!\[([^\]]*)\]\(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)\)/gi,
-    (_, alt, _displayUrl, realUrl) => `![${alt}](${realUrl})`
-  );
-  s = s.replace(
-    /!\[([^\]]*)\]\\\((https?:\/\/[^\s)]+)\\\)/gi,
-    (_, alt, src) => `![${alt}](${src})`
-  );
+  // INSIDE the cheap-marker guard below and with `[` excluded from the alt
+  // class: the old forms ran unconditionally with `[^...]*` classes that
+  // allowed `[`, so 80 KB of "![" made the label consume to the end of the
+  // text and backtrack one character at a time - O(n²) per render (measured
+  // 2.4 s; "![a](" ×20k took 5.1 s).
+  const hasImageMarkers = s.includes("](") || s.includes("]\\(");
+  if (hasImageMarkers) {
+    s = s.replace(
+      /!\[([^\]\[]*)\]\(\[([^\]\[]+)\]\((https?:\/\/[^\s)]+)\)\)/gi,
+      (_, alt, _displayUrl, realUrl) => `![${alt}](${realUrl})`
+    );
+    s = s.replace(
+      /!\[([^\]\[]*)\]\\\((https?:\/\/[^\s)]+)\\\)/gi,
+      (_, alt, src) => `![${alt}](${src})`
+    );
+  }
 
   // Markdown images and links. Both rules require the literal sequence "](":
   // skipping them outright when it is absent keeps pathological input (40k "["
@@ -106,7 +118,7 @@ function inlineMarkdownToHtml(text) {
   // alt is NOT escaped again here: it was captured from text that already
   // went through escapeHtml() above, and escaping twice made alt text with
   // & " < > render as visible entities ("AT&amp;amp;T").
-  if (s.includes("](")) {
+  if (hasImageMarkers) {
     s = s.replace(MD_IMAGE_RE, (_, alt, src) => {
       const rawSrc = decodeUrlEntities(src);
       try {

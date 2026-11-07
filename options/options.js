@@ -702,9 +702,11 @@ async function readBackupFile(file) {
     throw new Error(t(currentLang, "zip_error_invalidJson"));
   }
 
+  // The format marker was renamed from the original "Brave AI Assistant ..."
+  // branding; BOTH markers are accepted so older backup files keep restoring.
   if (
     !backup ||
-    backup.format !== "Brave AI Assistant Conversation History Backup" ||
+    (backup.format !== HISTORY_BACKUP_FORMAT && backup.format !== LEGACY_HISTORY_BACKUP_FORMAT) ||
     !Array.isArray(backup.conversations)
   ) {
     throw new Error(t(currentLang, "zip_error_unsupportedFormat"));
@@ -787,7 +789,7 @@ function makeBackupEntries(conversations) {
   const sorted = [...conversations].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   const exportedAt = new Date().toISOString();
   const backup = {
-    format: "Brave AI Assistant Conversation History Backup",
+    format: HISTORY_BACKUP_FORMAT,
     version: 1,
     exportedAt,
     conversationCount: sorted.length,
@@ -802,7 +804,7 @@ function makeBackupEntries(conversations) {
     {
       name: "README.txt",
       data: [
-        "Brave AI Assistant Conversation History Backup",
+        HISTORY_BACKUP_FORMAT,
         "",
         `Exported: ${exportedAt}`,
         `Conversations: ${sorted.length}`,
@@ -942,7 +944,7 @@ async function backupHistory() {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const a = document.createElement("a");
     a.href = url;
-    a.download = `brave-ai-assistant-history-${stamp}.zip`;
+    a.download = `ai-assistant-history-${stamp}.zip`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1128,7 +1130,13 @@ const SETTINGS_BACKUP_PLAIN_KEYS = [
   COMPOSER_HEIGHT_STORAGE_KEY,
 ];
 const SETTINGS_BACKUP_KEYS = [...SETTINGS_BACKUP_SECRET_KEYS, ...SETTINGS_BACKUP_PLAIN_KEYS];
-const SETTINGS_BACKUP_FORMAT = "Brave AI Assistant Settings Backup";
+// Format markers of the two backup kinds. Renamed from the original
+// "Brave AI Assistant ..." branding; restore accepts BOTH markers (see the
+// LEGACY_* constants), new exports write the current one.
+const HISTORY_BACKUP_FORMAT = "AI Assistant Conversation History Backup";
+const LEGACY_HISTORY_BACKUP_FORMAT = "Brave AI Assistant Conversation History Backup";
+const SETTINGS_BACKUP_FORMAT = "AI Assistant Settings Backup";
+const LEGACY_SETTINGS_BACKUP_FORMAT = "Brave AI Assistant Settings Backup";
 const SETTINGS_BACKUP_MAX_BYTES = 1024 * 1024;
 
 const exportSettingsBtn = document.getElementById("exportSettings");
@@ -1216,7 +1224,7 @@ async function exportSettings() {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const a = document.createElement("a");
     a.href = url;
-    a.download = `brave-ai-assistant-settings-${stamp}.json`;
+    a.download = `ai-assistant-settings-${stamp}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1359,7 +1367,7 @@ async function importSettings() {
     } catch {
       throw new Error(t(currentLang, "settingsBackup_error_invalidJson"));
     }
-    if (backup?.format !== SETTINGS_BACKUP_FORMAT || !backup.settings || typeof backup.settings !== "object") {
+    if ((backup?.format !== SETTINGS_BACKUP_FORMAT && backup?.format !== LEGACY_SETTINGS_BACKUP_FORMAT) || !backup.settings || typeof backup.settings !== "object") {
       throw new Error(t(currentLang, "settingsBackup_error_notSettingsBackup"));
     }
 

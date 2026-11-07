@@ -40,6 +40,22 @@ const MUST = [
   ["Ship to 10 Downing Street, London SW1A 2AA", "SW1A 2AA", "[POSTAL_CODE]"],
   ["地址：北京市朝阳区建国路88号3号楼502室", "建国路88号", "[ADDRESS]"],
   ["From: John Smith <john@x.com>", "John Smith", "[NAME]"],
+  // v1.10.147 (review round #10): shapes the 95-sample missed-detection probe caught.
+  ["Call 0049 171 1234567 today", "0049 171 1234567", "[PHONE]"],
+  ["Ring 03-1234-5678 now", "03-1234-5678", "[PHONE]"],
+  ["id 0312345678 here", "0312345678", "[PHONE]"],
+  ["Social Security Number: 123456789", "123456789", "[SSN]"],
+  ["SSN 123 45 6789", "123 45 6789", "[SSN]"],
+  // The webhook URLs are assembled from parts: a contiguous literal would
+  // trip GitHub push protection (they are fake, but scanners cannot know).
+  ["webhook " + ["https://", "hooks.slack.com", "/services/T00000000/B00000000/", "X".repeat(24)].join("") + " end",
+    ["hooks.slack.com", "/services/T00000000/B00000000/", "X".repeat(24)].join(""), "[API_KEY]"],
+  ["see " + ["https://", "discord.com", "/api/webhooks/123456789012345678/", "A".repeat(40)].join("") + " end",
+    ["discord.com", "/api/webhooks/123456789012345678/", "A".repeat(40)].join(""), "[API_KEY]"],
+  [`key SG.${"A".repeat(22)}.${"B".repeat(43)} end`, `SG.${"A".repeat(22)}.${"B".repeat(43)}`, "[API_KEY]"],
+  [`bot 1234567890:${"Z".repeat(35)} here`, `1234567890:${"Z".repeat(35)}`, "[API_KEY]"],
+  ["KR id 900101-1234567", "900101-1234567", "[ID_NUMBER]"],
+  ["Passport No. E12345678", "E12345678", "[ID_NUMBER]"],
 ];
 for (const [input, secret, ph] of MUST) {
   const out = R(input);
@@ -206,6 +222,14 @@ check("4111 sample is one [CREDIT_CARD], not [ID_NUMBER] + 1111", R("card 4111 1
 // change it, and a Spanish mobile must stay a [PHONE] (rule order untouched).
 check("valid SIN still redacted as [SIN]", R("my sin 046 454 286") === "my sin [SIN]", JSON.stringify(R("my sin 046 454 286")));
 check("Spanish mobile is still [PHONE], not [SIN]", R("612 345 678") === "[PHONE]", R("612 345 678"));
+
+// ---- v1.10.147 (review round #10): false positives must stay ----
+check('"Name: Python" stays (technology word)', R("Name: Python") === "Name: Python", JSON.stringify(R("Name: Python")));
+check('"Client: Acme Corp" stays (organization suffix)', R("Client: Acme Corp") === "Client: Acme Corp", JSON.stringify(R("Client: Acme Corp")));
+check('"Dr. Pepper" stays (brand)', R("Dr. Pepper") === "Dr. Pepper", JSON.stringify(R("Dr. Pepper")));
+check("solid uncued Luhn-valid 9-digit stays (not a SIN)", R("ref 046454286 here") === "ref 046454286 here", JSON.stringify(R("ref 046454286 here")));
+check("solid cued 9-digit redacts as [SIN]", R("SIN: 046454286") === "SIN: [SIN]", JSON.stringify(R("SIN: 046454286")));
+check("grouped SIN still redacts without a cue", R("call 046 454 286") === "call [SIN]", JSON.stringify(R("call 046 454 286")));
 
 // ---- restoreNamePlaceholders: names only, other placeholders untouched ----// ---- restoreNamePlaceholders: names only, other placeholders untouched ----
 {

@@ -305,7 +305,12 @@ export async function withHistoryLock(task) {
 
 function samePage(a, b) {
   if (!a || !b) return false;
-  if (String(a.url || "") !== String(b.url || "")) return false;
+  // Anchors do not change the page: a full-URL compare treated an in-page jump
+  // (#section) as a page change and wrongly reset the model's page context.
+  // The query string is kept - different query parameters usually mean
+  // different content (search results, filters, pagination).
+  const url = (x) => String(x?.url || "").split("#")[0];
+  if (url(a) !== url(b)) return false;
   // Same URL in a different tab is a different page context (two Gmail tabs,
   // two documents, ...). Tab ids are session-scoped; compare them only when
   // both copies have one.

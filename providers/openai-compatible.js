@@ -15,10 +15,29 @@ import { buildMessages } from "./messages.js";
 // the chat; keep only a bounded excerpt. JSON bodies (all three providers'
 // error format) are unwrapped to their human-readable message so the user
 // sees "You have uploaded an unsupported image…" instead of the raw JSON.
+// Reads at most ~maxChars characters of an error body. Gateway error pages can
+// be megabytes of HTML; the message below is capped at 500 characters anyway,
+// so an unbounded resp.text() just buffered the whole page for nothing. Falls
+// back to resp.text() for the synthetic responses the unit tests pass (no body
+// stream).
+async function readBoundedText(resp, maxChars = 4000) {
+  const reader = resp.body?.getReader?.();
+  if (!reader) return await resp.text();
+  const decoder = new TextDecoder();
+  let out = "";
+  while (out.length < maxChars) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out += decoder.decode(value, { stream: true });
+  }
+  try { reader.cancel(); } catch {}
+  return out;
+}
+
 async function providerHttpError(resp, lang) {
   let body = "";
   try {
-    body = (await resp.text()).replace(/\s+/g, " ").trim();
+    body = (await readBoundedText(resp)).replace(/\s+/g, " ").trim();
   } catch {
     // Unreadable body: the status code alone is still useful.
   }

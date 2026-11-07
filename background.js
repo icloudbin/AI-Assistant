@@ -70,9 +70,11 @@ function rebuildContextMenus() {
   return contextMenuRebuild;
 }
 
+// The top-level call runs on EVERY service-worker start (which is how the
+// worker comes to life for install, browser startup and any event alike), so
+// the onInstalled/onStartup registrations that used to sit here rebuilt the
+// same menu two more times on those wakes for nothing.
 rebuildContextMenus().catch((err) => console.warn("[AI Assistant] context menu rebuild failed", err));
-chrome.runtime.onInstalled.addListener(() => rebuildContextMenus().catch((err) => console.warn("[AI Assistant] context menu rebuild failed", err)));
-chrome.runtime.onStartup.addListener(() => rebuildContextMenus().catch((err) => console.warn("[AI Assistant] context menu rebuild failed", err)));
 // Live re-translate the menu when the display language is changed on the
 // Settings page (same chrome.storage.onChanged sync pattern the side panel
 // uses for language changes - see the header comment in i18n.js).
@@ -138,6 +140,11 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     }).catch((err) => {
       console.warn("[AI Assistant] Unable to store context action:", err);
     });
+    // Best-effort push to an ALREADY-open panel (the short delay gives the
+    // sidePanel.open() above a moment to register the panel's listener). A
+    // panel that is still opening may miss this message - that is harmless:
+    // the action is in storage.session above, and the panel pulls it on init
+    // (see consumePendingContextAction in sidepanel.js).
     setTimeout(() => {
       chrome.runtime.sendMessage({ type: "CONTEXT_ACTION", pending }).catch(() => {});
     }, 200);

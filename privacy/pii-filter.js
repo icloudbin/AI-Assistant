@@ -146,7 +146,17 @@ const GENERIC_NAME_WORDS = new Set([
   "info", "billing", "customer", "customers", "noreply", "no-reply", "notifications", "notification",
   "department", "dept", "office", "staff", "hr", "marketing", "accounts", "account", "security", "press",
   "newsletter", "updates", "system", "robot", "bot", "group", "committee", "company", "inc", "ltd", "llc",
+  // Organization suffixes ("Client: Acme Corp") and technology words
+  // ("Name: Python") introduce a company or a product, not a person.
+  "corp", "corporation", "gmbh", "co",
+  "python", "java", "javascript", "typescript", "ruby", "rust", "golang", "swift", "kotlin", "perl", "php",
+  "linux", "unix", "windows", "macos", "android", "docker", "kubernetes", "terraform", "react", "vue",
+  "angular", "node", "html", "css", "sql", "mongodb", "postgresql", "mysql", "sqlite", "redis",
 ]);
+// Famous "title + word" phrases that are brands or films, not people. Checked
+// on the FIRST word after the title only, and bounded on purpose: "Dr. Smith"
+// must keep redacting.
+const TITLE_BRAND_WORDS = new Set(["pepper", "who", "no"]);
 // Words that precede a name in running text but are not part of it.
 const NAME_LEAD_WORDS = new Set([
   "please", "contact", "email", "e-mail", "mail", "from", "to", "cc", "bcc", "send", "sent", "reply", "ask",
@@ -288,6 +298,12 @@ const RULES = [
   [/\bsk-(?:ant-|or-v1-|proj-)?[A-Za-z0-9_-]{20,}\b/g, "[API_KEY]"],
   [/\bgsk_[A-Za-z0-9]{20,}\b/g, "[API_KEY]"],
   [/\btvly-[A-Za-z0-9_-]{16,}\b/g, "[API_KEY]"],
+  // Service-specific credentials with canonical shapes: Slack and Discord
+  // incoming-webhook URLs, a SendGrid API key, a Telegram bot token.
+  [/https:\/\/hooks\.slack\.com\/services\/T[A-Za-z0-9]+\/B[A-Za-z0-9]+\/[A-Za-z0-9]+/g, "[API_KEY]"],
+  [/https:\/\/discord(?:app)?\.com\/api(?:\/v\d+)?\/webhooks\/\d{5,25}\/[A-Za-z0-9_-]{20,}/g, "[API_KEY]"],
+  [/\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b/g, "[API_KEY]"],
+  [/\b\d{8,10}:[A-Za-z0-9_-]{35}\b/g, "[API_KEY]"],
   [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{16,}/gi, "$1 [TOKEN]"],
   // Cookie headers carry session ids: the whole header value is a credential.
   // Skipped when the value already contains a numbered placeholder from an
@@ -341,8 +357,23 @@ const RULES = [
     const body = m.slice(0, -1).replace(/[- ]/g, "");
     return dniValid(body, m.at(-1)) && /\d{8}|[XYZ]\d{7}/.test(body) ? "[ID_NUMBER]" : m;
   }],
-  [/\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b/g, "[SSN]"],
+  // US SSN, dashed or space-grouped ("123-45-6789", "123 45 6789"). The SOLID
+  // form is redacted only behind a cue ("SSN: 123456789", "Social Security
+  // Number: ...") - an uncued solid 9-digit run is an order or reference
+  // number far more often than an SSN, and it is exactly the SIN rule's shape.
+  [/\b(?!000|666|9\d\d)\d{3}[- ](?!00)\d{2}[- ](?!0000)\d{4}\b/g, "[SSN]"],
+  [/\b(?:SSN|social security(?: number)?)\s*[:：#-]?\s*(?!000|666|9\d\d)\d{3}(?!00)\d{2}(?!0000)\d{4}\b/gi, "[SSN]"],
   [/\b[A-Z]{2}\d{2}[ ]?(?:[A-Z0-9]{4}[ ]?){2,7}[A-Z0-9]{1,4}\b/g, (m) => (m.replace(/\s/g, "").length >= 15 ? "[IBAN]" : m)],
+  // International numbers in the "00" dial-out form ("0049 171 1234567",
+  // solid or grouped; the "+" form is the separate rule below). BEFORE the
+  // card rule: the solid form has 11-15 digits and ~10% of those pass Luhn,
+  // which would mislabel them as cards.
+  [/(?<![\w+])00[1-9]\d{1,2}(?:[ -]?\d){7,10}(?!\d)/g, "[PHONE]"],
+  // South Korean resident registration number ("900101-1234567"): a valid
+  // birth date, a separator, then a century/gender digit 1-4 and six more.
+  // Also before the card rule (13 digits, ~10% pass Luhn); the date and
+  // gender checks keep ordinary date-prefixed numbers out.
+  [/(?<![\d])\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])[- ][1-4]\d{6}(?!\d)/g, "[ID_NUMBER]"],
   // credit / debit cards: 13-19 digits, optional space/dash separators, Luhn-checked.
   // Runs BEFORE the 12-digit Aadhaar / My Number rules below: those shapes also
   // match the FIRST 12 digits of a grouped card ("4539 1488 0343" of
@@ -363,6 +394,10 @@ const RULES = [
   // Japanese My Number: 12 digits + official check digit (solid or 4-4-4).
   // After the card rule (see there), for the same prefix-match reason.
   [/(?<![\w.])(?:\d{4}[ -]?){2}\d{4}(?!\w)/g, (m) => (myNumberValid(m.replace(/[ -]/g, "")) ? "[ID_NUMBER]" : m)],
+  // Passport number, only behind a cue ("Passport No. E12345678", "护照号
+  // E12345678"): the shapes vary by country, so an uncued alphanumeric run
+  // would over-mask ordinary reference codes.
+  [/((?:\bpassport\s*(?:no\.?|number|#)?|护照号码|护照号)\s*[:：#]?\s*)([A-Z]{1,2}\d{6,9}\b)/gi, "$1[ID_NUMBER]"],
   [/((?:cvv|cvc|cid|security code|安全码)\s*[:=：#]?\s*)\d{3,4}\b/gi, "$1[CVV]"],
   // Canadian Business Number with its GST/HST program account ("123456789 RT0001").
   // Must run before the SIN rule so the 9-digit part is not handled on its own.
@@ -386,6 +421,11 @@ const RULES = [
   // UI's six languages. These run before the SIN rule (see below), so a
   // Spanish mobile is a [PHONE], not a [SIN].
   [/(?<![\w.])0[1-9](?:[ .-]\d{2}){4}(?!\d)/g, "[PHONE]"],
+  // Japanese landline (03-1234-5678, 06 1234 5678, solid 0312345678): the two
+  // 2-digit area codes 03/06, then 4+4 (10 digits total). Overlaps with the UK
+  // and other shapes are harmless - everything matching a phone shape becomes
+  // [PHONE].
+  [/(?<![\w.])0[36][ -]?\d{4}[ -]?\d{4}(?!\d)/g, "[PHONE]"],
   [/(?<![\w.])0[789]0[- ]?\d{4}[- ]?\d{4}(?!\d)/g, "[PHONE]"],
   [/(?<![\w.])09\d{2}[- ]?\d{3}[- ]?\d{3}(?!\d)/g, "[PHONE]"],
   [/(?<![\w.])[67]\d{2}[- ]?\d{3}[- ]?\d{3}(?!\d)/g, "[PHONE]"],
@@ -397,8 +437,14 @@ const RULES = [
   // Runs AFTER the phone rules: a Spanish mobile (640 123 456) has the same
   // shape and must be a [PHONE], not a [SIN]. Digits directly after a "/" are
   // a URL path segment, not a SIN.
-  [/(?<![\w.])\d{3}([ \xa0-]?)\d{3}\1\d{3}(?!\w|\.\d)/g, (m, offset, whole) => {
+  [/(?<![\w.])\d{3}([ \xa0-]?)\d{3}\1\d{3}(?!\w|\.\d)/g, (m, sep, offset, whole) => {
     if (offset > 0 && whole[offset - 1] === "/") return m;
+    // The grouped 3-3-3 form is how a SIN is written. A SOLID 9-digit run that
+    // passes Luhn is ~10% of all solid 9-digit runs (order and reference
+    // numbers), so it only redacts behind a cue ("SIN: 046454286"). (The
+    // parameter names used to be wrong - with the capture group the second
+    // argument IS the separator, so the URL guard above never fired.)
+    if (!sep && !/\b(?:sin|social insurance(?: number)?)\s*[:：#]?\s*$/i.test(whole.slice(Math.max(0, offset - 40), offset))) return m;
     return luhnValid(m.replace(/\D/g, "")) ? "[SIN]" : m;
   }],
 
@@ -440,7 +486,9 @@ const RULES = [
     splitNameSeq(seq) && !NON_PERSON_LABEL_RE.test(whole.slice(Math.max(0, offset - NON_PERSON_LABEL_WINDOW), offset)) ? `${head}[NAME]` : m
   )],
   [new RegExp(`(\\b(?:Dear|Hi|Hello|Hey|Regards,|Sincerely,|Best,|Thanks,|Cheers,)\\s+)(${NAME_SEQ_SHORT})`, "g"), (m, cue, name) => (isGenericTarget(name.split(/\s+/)[0]) ? m : `${cue}[NAME]`)],
-  [new RegExp(`(\\b(?:Mr|Mrs|Ms|Miss|Dr|Prof)\\.?\\s+)${NAME_SEQ}`, "g"), "$1[NAME]"],
+  [new RegExp(`(\\b(?:Mr|Mrs|Ms|Miss|Dr|Prof)\\.?\\s+)(${NAME_SEQ})`, "g"), (m, title, name) => (
+    TITLE_BRAND_WORDS.has(name.split(/\s+/)[0].toLowerCase()) ? m : `${title}[NAME]`
+  )],
   [/((?:姓名|名字|联系人|收件人|寄件人|持卡人|客户|申请人|患者|用户名)\s*[:：]\s*)[一-龥·]{2,5}/g, "$1[NAME]"],
   [/((?:我叫|我的名字是|本人)\s*)[一-龥·]{2,4}/g, "$1[NAME]"],
   [new RegExp(`[${CN_SURNAMES}][一-龥]?(?=先生|女士|小姐)`, "g"), "[NAME]"],

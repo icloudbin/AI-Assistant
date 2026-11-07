@@ -1054,7 +1054,13 @@ function mdInlineList(nodes, pre, depth = 0) {
     else if (tag === 'code' || tag === 'kbd' || tag === 'samp') out += inner.trim() ? `\`${inner.trim().replace(/`/g, "'")}\`` : inner;
     else if (tag === 'a') {
       const href = mdAbsUrl(c.getAttribute('href') || '');
-      const label = inner.replace(/[\[\]]/g, '').trim();
+      // A link whose label is an image ("[![alt](src)](href)") must keep the
+      // image Markdown intact: stripping brackets from it produced
+      // "[!alt_(src)](href)", which renders as literal text instead of the
+      // image inside the link. Ordinary text labels keep the bracket strip
+      // (round-trip safety for stray brackets in the label).
+      const hasImage = /!\[[^\]\[]*\]\([^()\s]+\)/.test(inner);
+      const label = hasImage ? inner.trim() : inner.replace(/[\[\]]/g, '').trim();
       out += href && label && !label.includes('\n') ? `${inner.match(/^\s*/)[0]}[${label}](${href})${inner.match(/\s*$/)[0]}` : inner;
     } else if (mdIsBlock(c)) out += ` ${inner} `;
     else out += inner;
