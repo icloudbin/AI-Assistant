@@ -325,6 +325,7 @@ const translations = {
     model_preview_suffix: `preview`,
     bg_error_noResponse: `The provider did not respond within {seconds} s.`,
     bg_error_streamTimeout: `The AI service stopped responding before finishing the reply. The partial reply is shown; please try again.`,
+    bg_error_streamTooLarge: `The reply exceeded the {limit}-character safety limit. The partial reply is shown; please shorten the request or split it into smaller parts.`,
     bg_error_piiFilter: `The privacy filter failed; the request was not sent.`,
   },
 
@@ -594,6 +595,7 @@ const translations = {
     model_preview_suffix: `预览`,
     bg_error_noResponse: `{seconds} 秒内未收到服务商的响应。`,
     bg_error_streamTimeout: `AI 服务在完成回复前停止响应。已显示部分回复，请重试。`,
+    bg_error_streamTooLarge: `回复超过 {limit} 个字符的安全上限。已显示部分回复；请缩短请求或将内容拆分成更小的部分。`,
     bg_error_piiFilter: `隐私过滤失败，请求未发送。`,
   },
 
@@ -863,6 +865,7 @@ const translations = {
     model_preview_suffix: `預覽`,
     bg_error_noResponse: `{seconds} 秒內未收到服務商的回應。`,
     bg_error_streamTimeout: `AI 服務在完成回覆前停止回應。已顯示部分回覆，請重試。`,
+    bg_error_streamTooLarge: `回覆超過 {limit} 個字元的安全上限。已顯示部分回覆；請縮短請求或將內容拆分成較小的部分。`,
     bg_error_piiFilter: `隱私過濾失敗，請求未送出。`,
   },
 
