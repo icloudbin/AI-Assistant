@@ -8,7 +8,7 @@ import { checkImageUrl } from "./url-safety.js";
 import { redactOutbound, createRedactionSession, restoreNamePlaceholders, placeholderMapFromSession, PII_FILTER_STORAGE_KEY } from "./privacy/pii-filter.js";
 import { prepareLineTranslation, numberedBatches, LineTranslator } from "./translate-lines.js";
 import { chooseTranslationSelection } from "./translation-selection.js";
-import { streamDeepSeek, streamGroq, streamOpenRouter } from "./providers/openai-compatible.js";
+import { streamDeepSeek, streamGroq, streamOpenRouter, classifyProviderFailure } from "./providers/openai-compatible.js";
 import { factCheckLanguageInstruction, untrustedBoundary, newBoundaryId } from "./providers/messages.js";
 import { normalizeAttachments } from "./attachments.js";
 
@@ -846,13 +846,20 @@ chrome.runtime.onConnect.addListener((port) => {
       // it sent STOP, without waiting for background.js to confirm.
       if (err?.name === "AbortError") return;
       let errorText = err?.message || String(err);
-      // Clear hint when a page-sized request is refused or rate limited.
-      // Tavily errors are excluded: a Tavily 429/5xx ("rate limit exceeded" in
-      // its body) has nothing to do with the page size, and the hint would be
-      // misleading. Translations are excluded too: they send a bounded batch,
-      // so a 429 on one batch does not mean the page is too large.
-      if (!requestWasTranslation && pageSentChars > 0 && !/^Tavily\b/i.test(errorText) && /^HTTP (413|429)\b|too large|rate.?limit|context.?length|maximum context|tokens? per (minute|day)|\bTPM\b|reduce the length/i.test(errorText)) {
-        errorText += `\n\n${t(await getStoredLanguage().catch(() => "en"), "bg_hint_pageTooLarge")}`;
+      // Two different hints for two different failures (F4) - one combined
+      // regex used to send every refusal to the "page too large" advice, but
+      // Groq's OTPM 429 BEGINS "Request too large" and a bare OpenRouter quota
+      // 429 has nothing to do with the page. classifyProviderFailure() sorts
+      // provider errors into "rate" (wait a minute / wait for the quota reset,
+      // or switch models - valid for translations too: their bounded batches
+      // can still hit the limiter after their own retries) and "size" (send
+      // less page - only meaningful when a page was actually sent, and never
+      // for translations' bounded batches). Tavily errors are excluded from
+      // both: a Tavily 429/5xx ("rate limit exceeded" in its body) is about
+      // the search service, not the model, and neither hint would fit.
+      const failureClass = /^Tavily\b/i.test(errorText) ? null : classifyProviderFailure(errorText);
+      if (failureClass === "rate" || (failureClass === "size" && !requestWasTranslation && pageSentChars > 0)) {
+        errorText += `\n\n${t(await getStoredLanguage().catch(() => "en"), failureClass === "rate" ? "bg_hint_rateLimited" : "bg_hint_pageTooLarge")}`;
       }
       safePost({ type: "ERROR", error: errorText, requestId });
     } finally {

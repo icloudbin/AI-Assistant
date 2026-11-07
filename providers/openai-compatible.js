@@ -53,6 +53,32 @@ export function isModelUnavailableError(text) {
   return typeof text === "string" && MODEL_UNAVAILABLE_RE.test(text);
 }
 
+// ---------------------------------------------------------------------------
+// Error-text classification for background.js's catch-all advice (F4). One
+// combined regex used to send EVERY refusal to the "page too large" hint, but
+// Groq's output-token admission limit sends HTTP 429 with a body that BEGINS
+// "Request too large ... on output tokens per minute (OTPM)" - shrinking the
+// page cannot help there, the model's per-minute OUTPUT budget is the binding
+// constraint. Three classes:
+//   "rate" - the provider's budget: bare HTTP 429 (OpenRouter free daily
+//            quota), "rate limit", quotas, and OUTPUT-token limits (OTPM).
+//   "size" - the request itself: HTTP 413, context-window overflow, INPUT
+//            tokens-per-minute refusals (a long page inflates the input),
+//            explicit "reduce the length".
+//    null  - anything else (no hint).
+const PROVIDER_OUTPUT_RATE_RE = /\boutput tokens? per (?:minute|day)\b|\bOTPM\b|\bOTPD\b/i;
+const PROVIDER_RATE_RE = /^HTTP 429\b|\brate.?limit\b|\bquota\b|\btokens? per day\b|\bTPD\b|resource_exhausted/i;
+const PROVIDER_SIZE_RE = /^HTTP 413\b|\btoo large\b|context.?length|maximum context|context window|reduce the length|tokens? per minute|\bTPM\b/i;
+
+export function classifyProviderFailure(errorText) {
+  if (typeof errorText !== "string") return null;
+  // OUTPUT-rate first: the OTPM message also matches the size patterns
+  // ("Request too large", "tokens per minute").
+  if (PROVIDER_OUTPUT_RATE_RE.test(errorText) || PROVIDER_RATE_RE.test(errorText)) return "rate";
+  if (PROVIDER_SIZE_RE.test(errorText)) return "size";
+  return null;
+}
+
 // First-byte watchdog: the stream idle/total timers only start once the
 // response HEADERS have arrived - a provider (or middlebox) that accepts
 // the connection and then never answers used to hang fetch() forever,
@@ -139,24 +165,41 @@ async function streamGroq(model, question, pageContext, history, images, ctx) {
   const customPrompt = stored.customPrompt || "";
   if (!groqApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "Groq" }));
 
-  const resp = await fetchWithHeadersTimeout("https://api.groq.com/openai/v1/chat/completions", {
+  const body = {
+    model: model.apiModel,
+    messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang, ctx.translateMode, { boundaryId: ctx.boundaryId, attachments: ctx.attachments }),
+    stream: true,
+    // Catalog-level output cap (see maxOutputTokens in models.js): without
+    // it Groq stops the reply at its small per-model default (probed live
+    // 2026-11-07: 2048-3072 tokens, finish_reason "length" mid-essay).
+    // Models without the field (qwen3.8-27b) must send NOTHING here - its
+    // free tier rejects any declared cap above 1000 with HTTP 429 OTPM.
+    ...(model.maxOutputTokens ? { max_completion_tokens: model.maxOutputTokens } : {}),
+  };
+  const init = {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${groqApiKey}`,
     },
-    body: JSON.stringify({
-      model: model.apiModel,
-      messages: buildMessages(question, pageContext, history, customPrompt, images, ctx.lang, ctx.translateMode, { boundaryId: ctx.boundaryId, attachments: ctx.attachments }),
-      stream: true,
-      // Catalog-level output cap (see maxOutputTokens in models.js): without
-      // it Groq stops the reply at its small per-model default (probed live
-      // 2026-11-07: 2048-3072 tokens, finish_reason "length" mid-essay).
-      // Models without the field (qwen3.8-27b) must send NOTHING here - its
-      // free tier rejects any declared cap above 1000 with HTTP 429 OTPM.
-      ...(model.maxOutputTokens ? { max_completion_tokens: model.maxOutputTokens } : {}),
-    }),
-  }, ctx);
+  };
+  let resp = await fetchWithHeadersTimeout("https://api.groq.com/openai/v1/chat/completions", { ...init, body: JSON.stringify(body) }, ctx);
+  // A DECLARED output cap is itself admission-checked against the account's
+  // output-tokens-per-minute limit (Groq OTPM): on an account whose limit is
+  // below the catalog cap, EVERY request would 429 where the uncapped default
+  // passed (probe: qwen with a declared 2048 vs an OTPM of 1000; uncapped, the
+  // same request ran to 2048 actual output tokens). Fall back ONCE to the
+  // uncapped body - the reply may then stop at Groq's small default cap
+  // (finish_reason "length", surfaced as usual), which still beats refusing
+  // outright. A plain rate-limit 429 and capless models never retry here.
+  if (!resp.ok && resp.status === 429 && body.max_completion_tokens) {
+    const text = await resp.text().catch(() => "");
+    if (PROVIDER_OUTPUT_RATE_RE.test(text)) {
+      const uncapped = { ...body };
+      delete uncapped.max_completion_tokens;
+      resp = await fetchWithHeadersTimeout("https://api.groq.com/openai/v1/chat/completions", { ...init, body: JSON.stringify(uncapped) }, ctx);
+    }
+  }
   if (!resp.ok) throw new Error(await providerHttpError(resp, ctx.lang));
 
   await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);

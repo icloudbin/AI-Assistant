@@ -416,10 +416,20 @@ tavilyReply = () => new Response(JSON.stringify({ error: "rate limit exceeded" }
 r = await ask({ question: "search the web for unreliable test facts", pageContext: { tabId: 1, title: "P", url: "https://e.com/p", text: "Some page text worth more than nothing." }, forceWebResearch: true });
 check("Tavily 429 error carries no page-too-large hint", r.final.type === "ERROR" && /Tavily HTTP 429/.test(r.final.error) && !/Read current page/i.test(r.final.error), r.final.error || "");
 tavilyReply = () => new Response(JSON.stringify({ results: [{ url: "https://e.com/a", title: "T", content: "evidence", score: 1 }] }), { status: 200 });
-// The hint still fires for a PROVIDER 429 on a page-sized request.
+// A PROVIDER 429 is a rate failure (F4): it gets the rate-limit hint, not the
+// page-too-large advice - shrinking the page cannot clear a quota.
 providerReply = () => new Response(JSON.stringify({ error: { message: "rate limit exceeded" } }), { status: 429 });
 r = await ask({ question: "summarize", pageContext: { tabId: 1, title: "P", url: "https://e.com/p", text: "Some page text worth more than nothing." }, noWebResearch: true });
-check("provider 429 still gets the page-too-large hint", r.final.type === "ERROR" && /Read current page/i.test(r.final.error), r.final.error || "");
+check("provider 429 gets the rate-limit hint (not the page hint)", r.final.type === "ERROR" && /rate.limiting/i.test(r.final.error) && !/Read current page/i.test(r.final.error), r.final.error || "");
+// Groq's OTPM admission 429 BEGINS "Request too large", which the old combined
+// regex classified as page size; it must land in the rate class too.
+providerReply = () => new Response(JSON.stringify({ error: { message: "Request too large for model `deepseek-flash` in organization `o` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Requested 2048." } }), { status: 429 });
+r = await ask({ question: "summarize", pageContext: { tabId: 1, title: "P", url: "https://e.com/p", text: "Some page text worth more than nothing." }, noWebResearch: true });
+check("OTPM 429 gets the rate-limit hint (not the page hint)", r.final.type === "ERROR" && /rate.limiting/i.test(r.final.error) && !/Read current page/i.test(r.final.error), r.final.error || "");
+// A genuine size refusal still gets the page-too-large hint (and only that).
+providerReply = () => new Response(JSON.stringify({ error: { message: "This model's maximum context length is 8192 tokens, however 12000 tokens were requested" } }), { status: 400 });
+r = await ask({ question: "summarize", pageContext: { tabId: 1, title: "P", url: "https://e.com/p", text: "Some page text worth more than nothing." }, noWebResearch: true });
+check("context-length refusal still gets the page-too-large hint", r.final.type === "ERROR" && /Read current page/i.test(r.final.error) && !/rate.limiting/i.test(r.final.error), r.final.error || "");
 providerReply = () => 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
 
 // Filter off: the same data must pass through unchanged (proves the test can detect leaks).

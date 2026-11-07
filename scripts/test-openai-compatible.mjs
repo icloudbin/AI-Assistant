@@ -4,7 +4,7 @@
 // integration-tested in the browser; here the shared machinery is driven
 // with synthetic Response bodies. Run:  node scripts/test-openai-compatible.mjs
 import assert from "node:assert/strict";
-import { readSse, openAICompatibleStreamError, providerHttpError, extractOpenAIDelta, fetchWithHeadersTimeout, streamGroq, isModelUnavailableError } from "../providers/openai-compatible.js";
+import { readSse, openAICompatibleStreamError, providerHttpError, extractOpenAIDelta, fetchWithHeadersTimeout, streamGroq, isModelUnavailableError, classifyProviderFailure } from "../providers/openai-compatible.js";
 import { MODELS, findKnownModel } from "../models.js";
 
 const encoder = new TextEncoder();
@@ -420,5 +420,87 @@ assert.equal(openAICompatibleStreamError({ error: { code: 500 } }), '{"code":500
   }
 }
 
-console.log("OK: openai-compatible — SSE reassembly, in-stream error release, empty-stream guard, stream-cut detection, stream timeout, JSON error body, content-part arrays, error mapping, Groq output-cap passthrough, retired-model error mapping.");
+// ---------- classifyProviderFailure: rate vs size (background.js hint) ----------
+// One combined hint regex used to send every refusal to the "page too large"
+// advice; Groq's OTPM 429 BEGINS "Request too large" and a bare OpenRouter
+// quota 429 has nothing to do with the page, so the classes are split.
+{
+  assert.equal(
+    classifyProviderFailure('HTTP 429 Request too large for model `qwen/qwen3.8-27b` in organization `o` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Requested 2048.'),
+    "rate",
+    "Groq OTPM 429 is a rate failure (NOT page size, despite beginning with 'Request too large')"
+  );
+  assert.equal(classifyProviderFailure("HTTP 429 Rate limit exceeded"), "rate", "bare provider 429");
+  assert.equal(classifyProviderFailure("HTTP 429 You have exceeded your monthly quota"), "rate", "quota wording");
+  assert.equal(classifyProviderFailure("HTTP 413 Request too large for model `x` on tokens per minute (TPM): Limit 6000, Requested 12000"), "size", "Groq INPUT-TPM refusal keeps the page-size advice");
+  assert.equal(classifyProviderFailure("HTTP 413 Request Entity Too Large"), "size", "plain 413");
+  assert.equal(classifyProviderFailure("This model's maximum context length is 8192 tokens, however 9000 tokens were requested"), "size", "context-length overflow");
+  assert.equal(classifyProviderFailure("Please reduce the length of the messages"), "size", "explicit reduce-the-length");
+  assert.equal(classifyProviderFailure("HTTP 500 internal server error"), null, "server errors get no hint");
+  assert.equal(classifyProviderFailure(undefined), null, "non-string gets no hint");
+  // The localized unavailable message is self-contained: no extra hint on top.
+  assert.equal(classifyProviderFailure("The selected model is currently unavailable - the provider may have retired it."), null, "already-actionable unavailable text gets no extra hint");
+}
+
+// ---------- streamGroq: OTPM 429 on a declared cap falls back ONCE, uncapped ----------
+// A declared max_completion_tokens is itself admission-checked against the
+// account's OTPM; on an account whose limit is below the catalog cap every
+// request would 429 where the uncapped default passed (probe: qwen, declared
+// 2048 vs OTPM 1000; uncapped, the same request ran to 2048 real tokens).
+{
+  const originalFetch = globalThis.fetch;
+  const originalChrome = globalThis.chrome;
+  const calls = [];
+  const okSse = () => {
+    const { resp } = sse(['data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n']);
+    return { ...resp, ok: true, status: 200, headers: { get: () => "text/event-stream" } };
+  };
+  globalThis.chrome = { storage: { local: { get: async () => ({ groqApiKey: "gsk_test_key" }) } } };
+  try {
+    // OTPM 429: exactly one uncapped retry, then success.
+    globalThis.fetch = async (url, init) => {
+      calls.push(JSON.parse(init.body));
+      if (calls.length === 1) {
+        return { ok: false, status: 429, headers: { get: () => "application/json" }, text: async () => '{"error":{"message":"Request too large for model `openai/gpt-oss-120b` in organization `o` service tier `on_demand` on output tokens per minute (OTPM): Limit 30000, Requested 65536. The request\'s expected output tokens exceed the enforced limit; reduce max_tokens (or the request\'s expected output) and try again."}}' };
+      }
+      return okSse();
+    };
+    const ctx = makeCtx();
+    await streamGroq(findKnownModel("groq-gpt-oss-120b"), "question", null, [], [], ctx);
+    assert.equal(calls.length, 2, "OTPM 429 retried exactly once");
+    assert.equal(calls[0].max_completion_tokens, 65536, "first attempt declares the catalog cap");
+    assert.equal(calls[1].max_completion_tokens, undefined, "the fallback drops the cap");
+    // A plain rate-limit 429 (input TPM) does NOT retry - dropping the cap
+    // cannot help, so the error surfaces immediately.
+    calls.length = 0;
+    globalThis.fetch = async (url, init) => {
+      calls.push(JSON.parse(init.body));
+      return { ok: false, status: 429, headers: { get: () => "application/json" }, text: async () => '{"error":{"message":"Rate limit reached for model `openai/gpt-oss-120b` on tokens per minute (TPM): Limit 6000, Requested 12000."}}' };
+    };
+    await assert.rejects(
+      () => streamGroq(findKnownModel("groq-gpt-oss-120b"), "question", null, [], [], makeCtx()),
+      /HTTP 429/,
+      "a plain rate-limit 429 is not retried"
+    );
+    assert.equal(calls.length, 1, "no retry for a non-OTPM 429");
+    // qwen declares no cap, so there is nothing to drop: an OTPM 429 on it is
+    // surfaced as-is (its free tier genuinely cannot serve a larger output).
+    calls.length = 0;
+    globalThis.fetch = async (url, init) => {
+      calls.push(JSON.parse(init.body));
+      return { ok: false, status: 429, headers: { get: () => "application/json" }, text: async () => '{"error":{"message":"Request too large for model `qwen/qwen3.8-27b` in organization `o` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Requested 2048. The request\'s expected output tokens exceed the enforced limit; reduce max_tokens and try again."}}' };
+    };
+    await assert.rejects(
+      () => streamGroq(findKnownModel("groq-qwen3.8-27b"), "question", null, [], [], makeCtx()),
+      /HTTP 429/,
+      "a capless model (qwen) is not retried even on an OTPM 429"
+    );
+    assert.equal(calls.length, 1, "no retry when no cap was declared");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalChrome === undefined) delete globalThis.chrome; else globalThis.chrome = originalChrome;
+  }
+}
+
+console.log("OK: openai-compatible — SSE reassembly, in-stream error release, empty-stream guard, stream-cut detection, stream timeout, JSON error body, content-part arrays, error mapping, Groq output-cap passthrough, retired-model error mapping, failure classification, OTPM cap fallback.");
 process.exit(0);

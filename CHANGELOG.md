@@ -4,6 +4,17 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Provider errors: rate limits and page-size refusals get separate advice; Groq output-cap admission fallback (v1.10.143)
+
+Follow-up to the model-catalog round (v1.10.142): the same live probes showed that Groq's output-token admission limit (OTPM) sends HTTP 429 with a body that BEGINS "Request too large", and the error-hint logic could not tell it from a genuinely oversized page.
+
+- **Problem 1.** One combined hint regex sent every refusal to the "page too large" advice: Groq's OTPM 429 (where shrinking the page cannot possibly help - the model's per-minute OUTPUT budget is the binding constraint, not the input), a bare OpenRouter free-quota 429, and genuine context-length 413s all got the same text.
+- **Fix 1.** `classifyProviderFailure()` (providers/openai-compatible.js) sorts provider errors into "rate" (wait a minute / wait for the quota reset, or switch models) and "size" (send less page - only when a page was actually sent, and never for translations' bounded batches). The new advice is localized in all six UI languages (`bg_hint_rateLimited`); the rate advice now also applies to translation batches, which can legitimately hit the limiter after their own retries, and to requests without page context. Tavily errors stay excluded from both hints.
+- **Problem 2.** The v1.10.142 output cap is itself admission-checked: on an account whose OTPM is below the catalog cap, EVERY GPT-OSS request would 429 where the uncapped default passed (probe: qwen with a declared 2048 vs an OTPM of 1000; uncapped, the same request ran to 2048 actual output tokens).
+- **Fix 2.** `streamGroq` falls back ONCE to the uncapped request body on an OTPM 429 - the reply may then stop at Groq's small default cap (surfaced as usual by the truncation notice), which still beats refusing outright. A plain rate-limit 429 and capless models never retry.
+- **Checked.** Classification unit tests (OTPM→rate despite "Request too large", input-TPM 413→size, bare 429/quota→rate, context-length→size, 5xx→null); streamGroq fallback tests (retry exactly once with the cap dropped; a non-OTPM 429 and capless qwen never retry); the outbound-PII harness's hint assertions re-pinned (a provider 429 now expects the rate hint) plus OTPM and context-length cases. Full sweep (25 suites) + check-package green; real-Chrome 11/11.
+- Build bumped to 1.10.143.
+
 ## Model catalog: live-probed Groq output caps, Qwen 3.8 27B vision and preview labelling (v1.10.142)
 
 A deep review of the connected models against the providers' current documentation; every claim below was verified against the live API with a real key on 2026-11-07.
