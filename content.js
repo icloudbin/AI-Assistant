@@ -1323,7 +1323,7 @@ if (globalThis.__aiAssistantMessageListener) {
   try { chrome.runtime.onMessage.removeListener(globalThis.__aiAssistantMessageListener); } catch (err) { /* orphaned context: nothing to remove */ }
 }
 globalThis.__aiAssistantMessageListener = (msg, sender, sendResponse) => {
-  if (msg?.type !== "EXTRACT_PAGE_CONTENT") return false;
+  if (msg?.type !== "EXTRACT_PAGE_CONTENT" && msg?.type !== "EXTRACT_SELECTION") return false;
   // Only the extension's own pages (side panel) may request page text. Reject
   // other extensions, and anything carrying a tab (another content script)
   // or a non-extension URL. Web pages cannot reach this listener at all.
@@ -1334,6 +1334,20 @@ globalThis.__aiAssistantMessageListener = (msg, sender, sendResponse) => {
     typeof sender.url !== "string" ||
     !sender.url.startsWith(chrome.runtime.getURL(""))
   ) {
+    return false;
+  }
+  if (msg.type === "EXTRACT_SELECTION") {
+    // A selection read clones only the selected range (no whole-DOM walk), so
+    // it answers synchronously instead of going through the idle-slot path
+    // below. Used by the Fact Check quick action: the claim is the user's own
+    // highlighted text - the documented unfiltered-claim exception - and it
+    // cannot be derived from the redacted page text (see
+    // getActivePageSelection in sidepanel.js). data is null with no selection.
+    try {
+      sendResponse({ ok: true, data: globalThis.__aiAssistantPageExtractor().extractSelectionMarkdown() });
+    } catch (err) {
+      sendResponse({ ok: false, error: String(err?.message || err) });
+    }
     return false;
   }
   // Always answer: an exception inside the extractor used to leave the sender

@@ -4,6 +4,16 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Fact Check: the highlighted claim actually reaches Tavily unfiltered now (v1.10.145)
+
+An external review found that the privacy policy's Fact Check exception was dead code as seen from the UI: the side panel never filled in the selection.
+
+- **Problem.** The policy (and the filter's own file header) promise that a Fact Check request is sent unfiltered - the verbatim highlighted claim, because a redacted one ("[NAME#1] won 6 championships") is unsearchable and unanswerable. background.js implements exactly that: the outbound filter runs first, then the raw question and factCheck payload are restored for fact-check requests. But the Fact Check quick action hardcoded an empty selection in its handleSubmit call, so the exception never had anything to pass through: every search mined its claims from the REDACTED page text, where a Luhn-valid 9-digit group became [SIN#n] and a 10-digit run like 2024051811 became [PHONE#n] - unsearchable noise, and the docs were untrue. The outbound-PII suite could not catch it: it drives background.js directly with the selection in the payload, bypassing the panel.
+- **Fix.** The Fact Check button now captures the page's current selection (a new EXTRACT_SELECTION message to the content script's existing Markdown selection extractor - a range-only clone answered synchronously, same sender guard as the page capture) and passes it as the claim. An empty selection (nothing highlighted, or the page unreachable) still sends "" and background falls back to claims from the redacted page text - the privacy posture is unchanged there.
+- **Docs.** privacy-policy.md and docs/features.md now state the precise split: a highlighted claim goes to Tavily verbatim, including any personal information in it (the user selected it themselves); claims mined from the page without a highlight stay filtered.
+- **Checked.** The background-side exception stays covered end-to-end by `test-outbound-pii.mjs` (verbatim claim to Tavily and the model, page context redacted, the user's own PII inside a selection verbatim), plus a new explicit case pinning the no-selection fallback (raw page PII never reaches Tavily even as claims). Full sweep (25 suites) + check-package green; real-Chrome 11/11. The panel-to-content wiring reuses the browser-proven page-capture messaging pattern (top frame, one re-injection, bounded timeout).
+- Build bumped to 1.10.145.
+
 ## Privacy filter: Luhn check ran backwards for even-length cards, and 12-digit ID rules ate card numbers (v1.10.144)
 
 Two related defects found by an external review of the card-redaction path and confirmed by a 3000-samples-per-length probe against the live filter.

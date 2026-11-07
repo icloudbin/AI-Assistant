@@ -287,6 +287,20 @@ tavilyReply = () => new Response(JSON.stringify({ results: [{ url: "https://e.co
   });
   check("fact-check selected text: verbatim claim is the documented exception", r.sent.some((s) => s.body.includes("jane.doe@example.com")), r.sent.map((s) => s.body.includes("jane.doe@example.com")).join(","));
 }
+{
+  // The OTHER half of the split (v1.10.145 docs): WITHOUT a selection the UI
+  // sends "" and background mines candidate claims from the page text, which
+  // stays FILTERED - the Tavily query may carry placeholder noise ([SIN#1],
+  // [PHONE#1]) but never raw page PII. (The selection path above is the
+  // exception; this fallback is the rule.)
+  r = await ask({
+    question: "Check this",
+    pageContext: { tabId: 1, title: "P", url: "https://e.com/p", text: `${piiText} The company was founded in 1998 in Berlin.` },
+    factCheck: { enabled: true, selectedText: "" },
+  });
+  const tavBody = r.sent.filter((s) => s.url.includes("tavily")).map((s) => s.body).join(" ");
+  check("fact-check without a selection: Tavily sees no raw page PII", !tavBody.includes("jane.doe@example.com") && !tavBody.includes("4111 1111"), tavBody.slice(0, 140));
+}
 
 // --- Web-research queries carry real names, the model input stays redacted --
 // The question redacts cued names ("My name is ..." -> [NAME#1]); the Tavily

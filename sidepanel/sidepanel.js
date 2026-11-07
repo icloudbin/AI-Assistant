@@ -3754,6 +3754,42 @@ chatForm.addEventListener("submit", handleSubmit);
 // "Read current page" mode - but not past the site rules: on a sensitive site they
 // ask first, and on a site the user put on the never-send list they do not run
 // (see decidePageSend in page-context-policy.js).
+// The page's current selection as Markdown ("" when nothing is selected or the
+// page is unreachable). Used by the Fact Check quick action: the claim is the
+// user's own highlighted text - the documented unfiltered-claim exception
+// (privacy-policy.md, pii-filter.js header) - and it cannot be derived from the
+// redacted page text, where placeholders like [SIN#1] or [PHONE#1] make the
+// search useless. Same messaging as getActivePageContext: top frame only, one
+// content-script re-injection when none is reachable, bounded timeout. Any
+// failure returns "", so Fact Check falls back to claims from the (redacted)
+// page text exactly as before.
+async function getActivePageSelection() {
+  let tab = null;
+  try { tab = await getCurrentActiveTab(); } catch { return ""; }
+  if (!tab?.id) return "";
+  const askOnce = () => new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), 5000);
+    chrome.tabs.sendMessage(tab.id, { type: "EXTRACT_SELECTION" }, { frameId: 0 }, (value) => {
+      clearTimeout(timer);
+      if (chrome.runtime.lastError) { resolve(null); return; }
+      resolve(value || null);
+    });
+  });
+  let response = await askOnce();
+  if (!response?.ok || !response.data?.text?.trim()) {
+    // No reachable content script: inject it once and ask again (the same
+    // recovery getActivePageContext uses).
+    if (!/^https?:\/\//i.test(String(tab.url || ""))) return "";
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
+    } catch {
+      return "";
+    }
+    response = await askOnce();
+  }
+  return String(response?.data?.text || "").trim();
+}
+
 async function runQuickPageAction(apiPromptKey, displayPromptKey, factCheck = false, forceWebResearch = false, translateMode = false) {
   if (isStreaming) return;
   const lang = currentLang || await getStoredLanguage();
@@ -3764,7 +3800,13 @@ async function runQuickPageAction(apiPromptKey, displayPromptKey, factCheck = fa
   const displayPrompt = t(lang, displayPromptKey, vars.display);
   // Fact Check keeps its dedicated Tavily path. Explain performs Tavily
   // research for supporting context; the remaining quick actions stay local.
-  await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck, "", !factCheck && !forceWebResearch, true, forceWebResearch, translateMode);
+  // The fact-check claim is the user's current page selection: this argument
+  // used to be hardcoded "", so the documented unfiltered-claim exception in
+  // the background ASK handler (see there) never had anything to pass through
+  // and every search ran on claims mined from the REDACTED page text. An empty
+  // selection still sends "" - background then falls back to page claims.
+  const factCheckSelectedText = factCheck ? await getActivePageSelection() : "";
+  await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck, factCheckSelectedText, !factCheck && !forceWebResearch, true, forceWebResearch, translateMode);
 }
 
 quickSummarizeBtn?.addEventListener("click", () => {
