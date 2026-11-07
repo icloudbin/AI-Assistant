@@ -29,8 +29,8 @@ export const COMPOSER_HEIGHT_STORAGE_KEY = "composerHeight";
 // ends): a right-click selection must never persist on disk.
 export const PENDING_CONTEXT_ACTION_KEY = "pendingContextAction";
 export const PREFERRED_TRANSLATION_LANGUAGE_KEY = "preferredTranslationLanguage";
-// "Automatically search the web" (Settings > Web Research). Boolean, OFF unless
-// it is exactly true. Read by background.js, written by options.js.
+// "Automatically search the web" (Settings > Web Research). Boolean, ON unless
+// explicitly false. Read by background.js, written by options.js.
 export const AUTO_WEB_RESEARCH_KEY = "autoWebResearchEnabled";
 
 // Upper bound on saved conversations kept in chrome.storage.local. Shared by
