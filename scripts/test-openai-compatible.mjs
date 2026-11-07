@@ -52,24 +52,33 @@ const delta = (json) => json.choices?.[0]?.delta?.content ?? "";
 
 // ---------- bounded response resources (SEC-02) ----------
 {
+  // The DEFAULT cap (1,000,000 visible characters) with unit-explicit wording.
+  // The content arrives as many small SSE events, each under the per-line cap.
   const ctx = makeCtx();
-  ctx.streamMaxContentChars = 5;
-  const { resp } = sse([
-    'data: {"choices":[{"delta":{"content":"abcdefgh"}}]}\n\n',
-    "data: [DONE]\n\n",
-  ]);
+  const chunkBody = "a".repeat(5000);
+  const chunks = [];
+  for (let i = 0; i < 210; i++) {
+    chunks.push(`data: {"choices":[{"delta":{"content":"${chunkBody}"}}]}\n\n`);
+  }
+  chunks.push("data: [DONE]\n\n");
+  const { resp } = sse(chunks);
   await assert.rejects(
     () => readSse(resp, delta, ctx, openAICompatibleStreamError),
     /1,000,000 characters safety limit/i,
     "visible text is capped and its unit is explicit"
   );
-  assert.equal(ctx.chunks.join(""), "abcde", "the permitted prefix is retained");
+  const visible = ctx.chunks.join("");
+  assert.ok(visible.length <= 1000000 && visible.length > 990000, `prefix retained: ${visible.length} chars`);
 }
 {
+  // A 4 MiB byte cap, exceeded by many lines that each stay under the
+  // per-line cap: the error reports the limit in MiB.
   const ctx = makeCtx();
-  ctx.streamMaxBytes = 32;
-  ctx.streamMaxSseLineChars = 128;
-  const { resp } = sse([`: ${"x".repeat(40)}\n\n`]);
+  ctx.streamMaxBytes = 4 * 1024 * 1024;
+  ctx.streamMaxSseLineChars = 256 * 1024;
+  const lines = [];
+  for (let i = 0; i < 20; i++) lines.push(`: ${"x".repeat(220 * 1024)}\n\n`);
+  const { resp } = sse(lines);
   await assert.rejects(
     () => readSse(resp, delta, ctx, openAICompatibleStreamError),
     /4\.0 MiB safety limit/i,
@@ -83,7 +92,7 @@ const delta = (json) => json.choices?.[0]?.delta?.content ?? "";
   const { resp } = sse([`: ${"x".repeat(20)}\n\n`]);
   await assert.rejects(
     () => readSse(resp, delta, ctx, openAICompatibleStreamError),
-    /256,000 characters per SSE line safety limit/i,
+    /16 characters per SSE line safety limit/i,
     "oversized SSE lines are rejected and reported in characters"
   );
 }

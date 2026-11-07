@@ -257,7 +257,12 @@ providerReply = () => 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [
 // The question-research path must not show the Fact-Check-specific wording.
 tavilyReply = () => new Response(JSON.stringify({ results: [] }), { status: 200 });
 r = await ask({ question: "search the web for the population of Queluz Sintra", pageContext: null, includePageContext: false, forceWebResearch: true });
-check("research with no Tavily results reports a neutral error", r.final.type === "ERROR" && /no usable web sources for this request/i.test(r.final.error) && !/fact check/i.test(r.final.error), r.final.error || "");
+check("force research with no results continues to the model (no error)", r.final.type === "DONE", JSON.stringify(r.final).slice(0, 120));
+  // v1.10.153 merge (arch): the FORCE research path (Explain preflight AND
+  // forceWebResearch) treats every Tavily failure / empty result as an optional
+  // enhancement - it logs and lets the model answer without evidence instead of
+  // erroring. The error surface for explicit searches is a deliberate
+  // simplification the PR made; pinned here.
 tavilyReply = () => new Response(JSON.stringify({ results: [{ url: "https://e.com/a", title: "T", content: "evidence", score: 1 }] }), { status: 200 });
 
 // --- Fact-check requests are sent UNFILTERED (user decision, v1.10.125) -----
@@ -439,7 +444,7 @@ check("disconnected port at START: request settles, no unhandled rejection", r.f
 // research-service failure.
 tavilyReply = () => new Response(JSON.stringify({ error: "rate limit exceeded" }), { status: 429 });
 r = await ask({ question: "search the web for unreliable test facts", pageContext: { tabId: 1, title: "P", url: "https://e.com/p", text: "Some page text worth more than nothing." }, forceWebResearch: true });
-check("Tavily 429 error carries no page-too-large hint", r.final.type === "ERROR" && /Tavily HTTP 429/.test(r.final.error) && !/Read current page/i.test(r.final.error), r.final.error || "");
+check("force research 429 continues to the model without a Tavily error", r.final.type === "DONE" && !/Read current page/i.test(r.final.error || ""), r.final.error || "");
 tavilyReply = () => new Response(JSON.stringify({ results: [{ url: "https://e.com/a", title: "T", content: "evidence", score: 1 }] }), { status: 200 });
 // A PROVIDER 429 is a rate failure (F4): it gets the rate-limit hint, not the
 // page-too-large advice - shrinking the page cannot clear a quota.

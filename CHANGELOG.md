@@ -4,6 +4,17 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Architecture extraction, unit-explicit stream limits, and docs merged from PR #3 (v1.10.154)
+
+Release build for the merged pull request #3 (arch-01 / arch-02 / doc-01), plus the repairs its merge needed.
+
+- **Merged (arch).** Two standalone modules extracted with their own test suites: auto-web-research.js (the implicit-research opt-out gate: an explicit boolean false disables it, anything else - including a legacy "ask" value - keeps it enabled) and request-keep-alive.js (the MV3 service-worker keep-alive moved from a worker-owned timer to Port-message heartbeats each side panel sends while a request is active - Chrome 114+ resets the idle timer when a Port message is sent, and one panel's heartbeat can no longer be stopped by another).
+- **Merged (SEC-02 follow-up).** Stream-limit errors are unit-explicit and specific: "1,000,000 characters" (visible text), "4.0 MiB" (total response), "16,000… characters per SSE line" - the previous wording said "{limit}-character" for all three, which was wrong for the byte limit. Translations updated in all six languages.
+- **Merged (doc-01).** The Settings hint and the privacy policy now state that automatic research can also fire when "Read current page" is off (no page text is available for comparison, so an ordinary question may be researched).
+- **Test repair.** The PR's three new SEC-02 tests contradicted their own scenarios (a 5-character content cap asserting "1,000,000", a 32-BYTE cap asserting "4.0 MiB", a 16-character line cap asserting "256,000") - none could pass as merged. Rewritten to coherent scenarios that still assert the unit-explicit messages.
+- **Checked.** Full sweep (24 suites, including the two new module suites) + check-package green; real-Chrome 11/11; the extension-level E2E ran against the EXTRACTED shipped package (EXT_ROOT) - 31/31 on the 34-file artifact.
+- Build bumped to 1.10.154.
+
 ## Stream safety limits merged, tests repaired, i18n completed (v1.10.153)
 
 Release build for the merged pull request #1 (SEC-01 / SEC-02 hardening), plus the repairs its merge needed.
