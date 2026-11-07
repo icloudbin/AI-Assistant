@@ -6,16 +6,31 @@ None of these are loaded by the extension (they are not referenced from `manifes
 
 | Command | Covers |
 | --- | --- |
-| `node scripts/test-stop-streaming.mjs` | B-02: STOP aborts an already-started stream (`fetchWithHeadersTimeout` + `readSse`), and the timeout paths that must not change |
-| `node scripts/test-translate-replay.mjs` | B-03: a replayed single-batch translation keeps the document's trailing static lines (drives the real `background.js` ASK handler with a mocked `chrome`) |
-| `node scripts/test-markdown-heading.mjs` | B-05: `parseAtxHeading` equals the old heading regex on every short string of an adversarial alphabet, plus performance regression checks |
-| `node scripts/test-pii-name-perf.mjs` | B-06: the PII "Name:" rule stays linear, and its behaviour is unchanged |
-| `node scripts/test-untrusted-boundary.mjs` | S-01 / S-02 / S-04: one random id per request, shared by page data, attached files and search evidence and named in the trusted instruction; attachments are structured, quarantined and condensed on the structure; Explain's Tavily query keeps names hidden (drives the real `background.js` ASK handler with a mocked `chrome` and provider) |
-| `node scripts/test-pii-restore.mjs` | S-03: placeholders are restored in the text of a rendered reply only, never in a link target or image URL |
-| `node scripts/test-settings-import.mjs` | S-06 / S-05: which differences a settings file makes and which need explicit confirmation (privacy switches, the "Read current page" mode, the never-send / always-allow site lists, custom prompt, API keys); custom-prompt length limit |
-| `node scripts/test-sensitive-sites.mjs` | S-05: the built-in sensitive-site rules (the sites the review named - outlook.com, exmail.qq.com, accounts.google.com, exchanges, brokers, password managers, irs.gov, ... - are flagged; `river-bank.com` is not; a tab label counts only when it is the whole label), host-list parsing and normalisation, and the never > allowed > sensitive > normal precedence |
-| `node scripts/test-page-context-policy.mjs` | S-05: the whole decision table - mode (off / ask / always / not chosen yet) x request kind (typed question / quick action) x site policy - plus the stored-value mapping and the context-bar state derived from the same decision |
-| `node scripts/test-conversation-store.mjs` | B-04: two copies of one conversation merge by message id and are ordered by time in whole turns (no scrambled order, identical messages not folded); old messages get deterministic ids; a quota-shortened attachment preview sticks without a flag |
+| `node scripts/test-auto-web-research.mjs` | ARCH-02: missing values default to ON; only an explicit `false` opts out |
+| `node scripts/test-request-keep-alive.mjs` | ARCH-01: immediate heartbeat, shared reference holds, serialized calls, retry after failure, and idempotent release |
+| `node scripts/test-stop-streaming.mjs` | B-02: STOP aborts an already-started stream (`fetchWithHeadersTimeout` + `readSse`), and timeout paths that must not change |
+| `node scripts/test-translate-replay.mjs` | B-03: replayed single-batch translation keeps trailing static lines |
+| `node scripts/test-markdown-heading.mjs` | B-05: heading parser matches the old regex over adversarial short strings and passes performance checks |
+| `node scripts/test-markdown-render.mjs` | Markdown rendering and sanitization regression cases |
+| `node scripts/test-pii-name-perf.mjs` | B-06: PII name rule remains linear and behavior-compatible |
+| `node scripts/test-untrusted-boundary.mjs` | S-01 / S-02 / S-04: request boundary ids, structured attachments, and privacy-safe Explain research |
+| `node scripts/test-pii-restore.mjs` | S-03: PII placeholders are restored in text only, never in link targets or image URLs |
+| `node scripts/test-pii-filter.mjs` | PII redaction rules and edge cases |
+| `node scripts/test-outbound-pii.mjs` | Outbound request redaction behavior |
+| `node scripts/test-settings-import.mjs` | S-06 / S-05: settings-import review and risk confirmation |
+| `node scripts/test-settings-crypto.mjs` | Settings backup secret encryption/decryption |
+| `node scripts/test-settings-storage-keys.mjs` | Settings key/default behavior |
+| `node scripts/test-options-backup.mjs` | Options page backup/restore behavior |
+| `node scripts/test-conversation-store.mjs` | B-04: multi-window merge ordering and stable message ids |
+| `node scripts/test-history-manager.mjs` | History serialization, migration and quota handling |
+| `node scripts/test-attachment-budget.mjs` | Attachment size and count budgets |
+| `node scripts/test-content-visibility.mjs` | Page content extraction visibility rules |
+| `node scripts/test-translation-paragraphs.mjs` | Translation paragraph and formatting preservation |
+| `node scripts/test-providers-messages.mjs` | Provider message construction and untrusted boundaries |
+| `node scripts/test-models.mjs` | Model catalog and model selection behavior |
+| `node scripts/test-openai-compatible.mjs` | OpenAI-compatible SSE parsing, timeouts, cancellation and response limits |
+| `node scripts/test-url-safety.mjs` | Remote image URL and SSRF destination policy |
+| `python scripts/test-sidepanel-context.py` | Side-panel page-context policy checks |
 
 ## Real-browser tests (need `playwright` with Chromium; the chat-flow test also needs `openssl`)
 
@@ -32,7 +47,12 @@ They load this folder as an unpacked extension in headless Chromium.
 | `node scripts/e2e-import-settings.mjs [folder]` | S-06: a hostile settings file shows a review dialog, risky items start unticked, Cancel changes nothing, only ticked items are applied; S-05: a file that weakens page reading or the site lists needs its own ticks, a file that only tightens needs none, a bogus mode or list is ignored |
 | `node scripts/e2e-page-privacy.mjs [folder]` | S-05 / S-08: the first-run question (Esc = undecided); ask-each-time (Cancel keeps the draft and saves nothing, send without the page, "don't ask again" per site); sensitive sites (stronger wording, blocked in always-read mode, "Allow" for the session); quick actions on sensitive and never-send sites; the always-allow list; a tab switch while a question is open; a webmail that only the page extractor recognises (second question, and Cancel takes the question back out of the saved history); the Settings site lists; the one-time voice-input and image notices. Every "was the page sent?" check looks for a marker in the request the fake provider actually received. `ONLY=<regex>` runs matching tests only |
 | `node scripts/e2e-tabs-permission.mjs` | S-07: loads the extension with and without the `tabs` permission and compares what the panel needs (tab url/title of web pages, scripting, captureVisibleTab, tabs.onUpdated) |
+| `node scripts/test-extension-e2e.mjs` | End-to-end test of the real unpacked extension, service worker, options page, side panel, storage and image-fetch handler (Chrome 125+ with Extensions CDP support) |
 
 `[folder]` runs the same test against another copy of the extension (for example the original package) as a control.
+
+## Standalone Chrome/CDP test
+
+`node scripts/test-chrome-browser.mjs` runs the separate locally installed Chrome/CDP browser suite. It expects Chrome at `C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe`; adjust `CHROME_PATH` in the script or environment when using a different installation.
 
 Each script exits non-zero if an assertion fails.
