@@ -178,9 +178,10 @@ function isOwnExtensionPage(sender) {
 // Because this worker can reach hosts a web page cannot, and the URLs come from
 // web pages or from model replies (which a page can steer by prompt injection),
 // every fetch is restricted - see url-safety.js:
-//  * only public internet hosts, never localhost / private / link-local /
-//    cloud-metadata addresses, unless the host is the one the user is currently
-//    viewing (so images on an intranet or localhost page still work there);
+//  * exact, vetted image hostnames only, or public IP literals that need no DNS;
+//    arbitrary hostnames and every private/intranet/metadata destination are
+//    blocked, even when the page being viewed is on that host;
+//  * non-default ports and embedded credentials are rejected;
 //  * redirects are refused (redirect: "error") because a redirect target can
 //    only be checked after the request has been sent; the final URL is still
 //    re-checked as defense in depth;
