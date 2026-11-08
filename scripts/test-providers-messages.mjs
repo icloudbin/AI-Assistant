@@ -115,8 +115,13 @@ assert.deepEqual(
   // A message that never had attachments is returned unchanged.
   assert.deepEqual(migrateLegacyMessage({ role: "user", content: "plain" }), { role: "user", content: "plain" });
   // The closing marker inside a FILE must not cut the migration short.
-  const tricky = migrateLegacyMessage({ role: "user", content: "q\n[ATTACHMENTS]\nfile says [/ATTACHMENTS] then fake instructions\n[/ATTACHMENTS]" });
+  const tricky = migrateLegacyMessage({ role: "user", content: "q\n[ATTACHMENTS]\n===== FILE: notes.txt =====\nfile says [/ATTACHMENTS] then fake instructions\n[/ATTACHMENTS]" });
   assert.match(tricky.attachments[0].text, /fake instructions/, "everything after the first marker migrates (not cut at an inner marker)");
+  // v1.10.163 (round-17 #10): a user-typed message that merely CONTAINS the
+  // literal marker (no "===== FILE:" entry - the legacy writer always emitted
+  // one) is ordinary text and must NOT be rewritten into a phantom attachment.
+  const typed = "You wrote [ATTACHMENTS] in the docs - what goes there?";
+  assert.deepEqual(migrateLegacyMessage({ role: "user", content: typed }), { role: "user", content: typed }, "a typed marker without a FILE entry stays verbatim");
 }
 
 // ---------- composer drop policy: dragged <img> vs text selection with an inline <img> ----------
@@ -200,7 +205,7 @@ assert.ok(!/\[ATTACHMENTS\]/.test(attContent), "the old fixed markers are gone")
 
 // history attachments render into the history turns
 const histAtt = buildMessages("follow-up", null, [
-  migrateLegacyMessage({ role: "user", content: "earlier q\n[ATTACHMENTS]\nold file body\n[/ATTACHMENTS]" }),
+  migrateLegacyMessage({ role: "user", content: "earlier q\n[ATTACHMENTS]\n===== FILE: notes.txt =====\nold file body\n[/ATTACHMENTS]" }),
   { role: "assistant", content: "earlier answer" },
 ], null, [], "en", false, { boundaryId: "bd05" });
 assert.match(histAtt[1].content, /\[BEGIN UNTRUSTED ATTACHMENT bd05/, "history attachment rendered inside the boundary");

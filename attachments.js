@@ -170,6 +170,16 @@ export function condenseAttachments(list, maxChars) {
 // ---------------------------------------------------------------------------
 const LEGACY_OPEN = /\[ATTACHMENTS\]/i;
 const LEGACY_CLOSE_AT_END = /\s*\[\/ATTACHMENTS\]\s*$/i;
+// The legacy writer (attachmentContextText, verified against the pre-1.10.140
+// code) always emitted at least one entry after the marker: a
+// "===== FILE: name =====" header per text attachment, or the
+// "Images attached (image data sent with this request):" list for image-only
+// messages. A user typing the literal marker today - discussing this
+// extension or quoting format docs - produces neither and must NOT have their
+// message rewritten into a phantom attachment whose text is never rendered in
+// the restored view (round-17 #10).
+const LEGACY_FILE_ENTRY = /={3,}\s*FILE:/i;
+const LEGACY_IMAGE_LIST = /^Images attached \(image data sent with this request\):/m;
 
 export function migrateLegacyMessage(message) {
   if (!message || typeof message !== "object") return message;
@@ -177,6 +187,8 @@ export function migrateLegacyMessage(message) {
   if (Array.isArray(message.attachments)) return { ...message, attachments: normalizeAttachments(message.attachments) };
   const open = message.content.search(LEGACY_OPEN);
   if (open < 0) return message;
+  const afterMarker = message.content.slice(open);
+  if (!LEGACY_FILE_ENTRY.test(afterMarker) && !LEGACY_IMAGE_LIST.test(afterMarker)) return message;
   const question = message.content.slice(0, open).trimEnd();
   const block = message.content.slice(open + "[ATTACHMENTS]".length).replace(LEGACY_CLOSE_AT_END, "").trim();
   const attachments = block

@@ -59,6 +59,14 @@ function assertNoOrphanReply(messages) {
 }
 
 // ---------------------------------------------------------------------------
+await test("sortedByNewest sorts a COPY: the caller's list is not reordered (round-17 #22)", () => {
+  const list = [{ id: "old", updatedAt: 100 }, { id: "new", updatedAt: 200 }];
+  const snapshot = [...list];
+  const sorted = cs.sortedByNewest(list);
+  assert.deepEqual(list, snapshot, "the input array is not mutated");
+  assert.deepEqual(sorted.map((m) => m.id), ["new", "old"], "the returned copy is newest-first");
+});
+
 await test("two windows continue one conversation: each window's turns land where they happened, whichever saves first", () => {
   const base = [U("u1", "Q1", 10), A("a1", "A1", 11)];
   const winA = convo([...base, U("u2", "Q2", 100), A("a2", "A2", 110)], 110);

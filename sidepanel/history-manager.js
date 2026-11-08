@@ -79,10 +79,17 @@ function toStoredMessage(message) {
     ...(displayContent !== content ? { displayContent } : {}),
     modelLabel: message.modelLabel || "",
     modelId: message.modelId || "",
-    // Which page (title/url/tab only - never the page text itself) was used
-    // for this message, if any. Read back on the next submission to tell the
+    // Which page (title/url only - never the page text itself) was used for
+    // this message, if any. Read back on the next submission to tell the
     // model explicitly when the page has changed - see handleSubmit() below.
-    pageContext: message.pageContext || null,
+    // tabId is deliberately NOT persisted: it is session-scoped and lives
+    // only in the in-memory history (two same-URL tabs are a page change
+    // within a session, where both copies carry one). Persisting it made the
+    // first follow-up after a browser restart wrongly reset the context
+    // epoch on the same page (round-17 #9).
+    pageContext: message.pageContext
+      ? (({ tabId: _tabId, ...rest }) => rest)(message.pageContext)
+      : null,
     // Page-context epoch: a page change starts a new epoch, and every later
     // request sends only turns from the current epoch. Persisting it is what
     // keeps the reset in force on the FOLLOW-UP after a page change, not just

@@ -1220,6 +1220,22 @@ async function getCurrentActiveTab() {
   return null;
 }
 
+// chrome.scripting.executeScript has no timeout of its own: a frozen renderer
+// parks the await forever, and every caller here sits inside the submit path
+// with the composer locked. The tab-MESSAGE side of page capture is raced
+// against a deadline (askExtractor / askOnce); race every injection the same
+// way (round-17 #7). The underlying injection is NOT cancelled - its ignored
+// result or error settles whenever the tab recovers or dies.
+function withDeadline(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`executeScript deadline (${ms}ms)`)), ms);
+    Promise.resolve(promise).then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); }
+    );
+  });
+}
+
 async function getActivePageContext(retryCount = 0, format = null) {
   const tab = await getCurrentActiveTab();
   if (!tab?.id) return null;
@@ -1289,10 +1305,10 @@ async function getActivePageContext(retryCount = 0, format = null) {
       // written to be safely re-injectable, see its file-header note.
       if (!/^https?:\/\//i.test(initialUrl)) return null;
       try {
-        await chrome.scripting.executeScript({
+        await withDeadline(chrome.scripting.executeScript({
           target: { tabId: initialTabId },
           files: ["content.js"],
-        });
+        }), EXTRACTOR_TIMEOUT_MS);
       } catch (err) {
         console.debug("[AI Assistant] Unable to inject page extractor:", err);
         return null;
@@ -1324,10 +1340,10 @@ async function getActivePageContext(retryCount = 0, format = null) {
     // falls through immediately.
     let readyState = "";
     try {
-      const probe = await chrome.scripting.executeScript({
+      const probe = await withDeadline(chrome.scripting.executeScript({
         target: { tabId: initialTabId },
         func: () => document.readyState,
-      });
+      }), EXTRACTOR_TIMEOUT_MS);
       readyState = String(probe?.[0]?.result || "");
     } catch (err) {
       console.debug("[AI Assistant] Unable to probe page readiness:", err);
@@ -1353,11 +1369,11 @@ async function fetchPageImages(imageUrls, tabId) {
     // The overall deadline is handed to the page: a slow image host cannot
     // outlive the budget even though a running executeScript is not
     // cancellable from here.
-    const injection = await chrome.scripting.executeScript({
+    const injection = await withDeadline(chrome.scripting.executeScript({
       target: { tabId },
       func: fetchImagesInPage,
       args: [requested, PAGE_IMAGE_FETCH_TIMEOUT_MS, Date.now() + PAGE_IMAGE_TOTAL_BUDGET_MS, PAGE_IMAGE_MAX_BYTES],
-    });
+    }), 10000);
     return collectPageImageResults(requested, injection?.[0]?.result);
   } catch (err) {
     // Restricted pages (chrome://, the Web Store) refuse script injection.
@@ -2479,6 +2495,10 @@ async function processFile(file) {
         reader.readAsDataURL(imageBlob);
       });
       if (!dataUrl.startsWith("data:image/")) throw new Error(t(currentLang, "attachment_error_unableToEncodeImage"));
+      // A 0-byte file still gets an image MIME type and reads as an empty
+      // "data:image/...;base64," payload; the empty image part reached the
+      // provider and came back as a confusing 400 (round-17 #8).
+      if (dataUrlByteLength(dataUrl) === 0) throw new Error(t(currentLang, "attachment_error_unableToEncodeImage"));
       if (!fitsImageBudget(others(), dataUrlByteLength(dataUrl))) {
         throw new Error(t(currentLang, "attachment_error_totalImageLimit_template", {
           mb: String(Math.round(MAX_TOTAL_ATTACHMENT_IMAGE_BYTES / (1024 * 1024))),
@@ -3682,7 +3702,8 @@ async function getActivePageSelection() {
     // recovery getActivePageContext uses).
     if (!/^https?:\/\//i.test(String(tab.url || ""))) return "";
     try {
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
+      // Same 5 s bound as the askOnce message race below.
+      await withDeadline(chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] }), 5000);
     } catch {
       return "";
     }

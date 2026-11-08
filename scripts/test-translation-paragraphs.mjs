@@ -25,6 +25,24 @@ assert.equal(
   "line translator must retain all blank-line paragraph separators"
 );
 
+// v1.10.163 (round-17 #16): a model that DROPS its batch tag and whose reply
+// text itself starts with "[n]" (the source line began with a citation
+// marker) must not have that reply silently skipped. The third reply drops
+// its "[3]" tag - the text is kept as the held line's continuation.
+{
+  const numbered = prepareLineTranslation("First line.\nSecond line.\nSee [1] docs again");
+  assert.ok(numbered, "numbered source prepares");
+  let out = "";
+  const t = new LineTranslator(numbered, (d) => { out += d; });
+  t.push("[1] 第一行。\n[2] 第二行。\n[1] 参见文档");
+  t.finish();
+  // The dropped-tag reply is KEPT (appended to the held line) instead of
+  // silently skipped; the last line itself falls back to its original.
+  assert.ok(out.includes("参见文档"), "a dropped-tag reply is not silently skipped");
+  assert.ok(out.includes("第二行。"), "the held line's own translation is kept");
+  assert.ok(out.includes("See [1] docs again"), "the line whose tag was dropped falls back to its original");
+}
+
 // content.js represents each author-visible <br> in long-form page text as a
 // blank-line paragraph separator before it enters the numbered protocol. The
 // output must keep those separators so the side-panel Markdown renderer creates

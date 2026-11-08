@@ -115,11 +115,11 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (changes[AUTO_WEB_RESEARCH_KEY]) {
     autoWebResearchToggle.checked = isAutoWebResearchEnabled(changes[AUTO_WEB_RESEARCH_KEY].newValue);
   }
-  if (changes.piiFilterEnabled) {
-    piiFilterToggle.checked = changes.piiFilterEnabled.newValue !== false;
+  if (changes[PII_FILTER_STORAGE_KEY]) {
+    piiFilterToggle.checked = changes[PII_FILTER_STORAGE_KEY].newValue !== false;
   }
-  if (changes.pageVisualsEnabled) {
-    pageVisualsToggle.checked = changes.pageVisualsEnabled.newValue === true;
+  if (changes[PAGE_VISUALS_STORAGE_KEY]) {
+    pageVisualsToggle.checked = changes[PAGE_VISUALS_STORAGE_KEY].newValue === true;
   }
 });
 const backupHistoryBtn = document.getElementById("backupHistory");
@@ -698,7 +698,10 @@ function normalizeRestoredConversation(conversation, index) {
   const fallbackId = `restored-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
   return {
     id: String(conversation.id || fallbackId),
-    title: String(conversation.title || "").trim() || makeRestoredTopicTitle(messages),
+    // Same 80-character cap as the live title path (makeTopicTitle) - an
+    // uncapped restored title persisted into chrome.storage.local and was
+    // re-serialized and rendered on every load (round-17 #21).
+    title: cutAtCodePointBoundary(String(conversation.title || "").trim(), 80).trim() || makeRestoredTopicTitle(messages),
     // Ids last, after the legacy-attachment migration above: they are derived
     // from the text, exactly as the side panel derives them for old storage.
     messages: withMessageIds(messages),
@@ -1180,6 +1183,16 @@ const IMPORT_SWITCH_LABEL_KEYS = {
   [PAGE_VISUALS_STORAGE_KEY]: "pageVisuals_label",
   [AUTO_WEB_RESEARCH_KEY]: "autoWebResearch_toggle",
 };
+// Localized names for the keys the review dialog applies WITHOUT a checkbox:
+// raw storage key names were technical noise in every language (round-17 #20).
+const IMPORT_PLAIN_LABEL_KEYS = {
+  themePreference: "theme_label",
+  languagePreference: "language_label",
+  preferredTranslationLanguage: "preferredTranslationLanguage_label",
+  selectedModelId: "modelSelect_title",
+  micRecognitionLang: "micRecognitionLang_label",
+  composerHeight: "composerHeight_label",
+};
 
 function excerpt(text, max = 600) {
   const chars = Array.from(String(text || ""));
@@ -1209,7 +1222,13 @@ function confirmSettingsImport(items, restored) {
     const onOff = (v) => t(currentLang, v ? "settingsImport_on" : "settingsImport_off");
     for (const item of items) {
       if (item.kind === "plain" || (item.kind === "secret" && !item.needsConfirm)) {
-        others.push(item.kind === "secret" ? `${PROVIDER_NAMES[item.key]} API key` : item.key);
+        // Localized names: raw storage key names were technical noise in every
+        // language, and the English "API key" suffix was untranslated
+        // (round-17 #20). An unmapped future key falls back to its raw name
+        // via t()'s missing-key behavior.
+        others.push(item.kind === "secret"
+          ? t(currentLang, "settingsImport_plainApiKey_template", { provider: PROVIDER_NAMES[item.key] })
+          : t(currentLang, IMPORT_PLAIN_LABEL_KEYS[item.key] || ""));
         continue;
       }
       const row = add(dialog, "label", undefined, `import-row${item.needsConfirm ? " risky" : ""}`);

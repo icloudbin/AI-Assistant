@@ -34,6 +34,22 @@ assert.equal(
   "attachment text never leaks into the title"
 );
 
+// ---------- toStoredMessage: pageContext keeps title/url, drops the tabId ----------
+// tabId is session-scoped; persisting it made the first follow-up after a
+// browser restart wrongly reset the context epoch on the same page
+// (round-17 #9). The live in-memory history keeps the tabId.
+{
+  const stored = toStoredMessage({
+    role: "user",
+    content: "q",
+    pageContext: { title: "T", url: "https://x/", tabId: 42 },
+  });
+  assert.equal(stored.pageContext.title, "T", "title survives the storage projection");
+  assert.equal(stored.pageContext.url, "https://x/", "url survives the storage projection");
+  assert.ok(!("tabId" in stored.pageContext), "tabId is not persisted");
+  assert.deepEqual(toStoredMessage({ role: "user", content: "q" }).pageContext, null, "no pageContext stays null");
+}
+
 // ---------- surrogate safety at the attachment caps ----------
 const LONE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 {

@@ -109,6 +109,7 @@ function startServer() {
       <p>Another paragraph with more useful content for the extraction test, including measurement and baking instructions.</p>
       <div class="cookie-banner">COOKIE_BANNER_TEXT</div>
       <details><summary>Summary line</summary><div>SECRET_DETAIL_TEXT</div></details>
+      <div role="dialog" aria-modal="true" style="position:fixed;top:0;left:0">CONSENT_BAR_TEXT</div>
       ${nested}
       </article></body></html>`,
     "/proton": `<!doctype html><html><head><title>Proton</title></head><body>
@@ -359,6 +360,9 @@ check("table keeps extra cells", table.includes("<td>3</td>") && table.includes(
     check("P3-3 legitimate cookie-recipe content survives", mdText.includes("Cookie recipe") && mdText.includes("bake cookies"), mdText.slice(0, 300));
     check("P3-3 cookie banner is skipped", !mdText.includes("COOKIE_BANNER_TEXT"), mdText.slice(0, 300));
     check("P3-3 closed details content is skipped", !mdText.includes("SECRET_DETAIL_TEXT"), mdText.slice(0, 300));
+    // Round-17 #18: an unnamed fixed modal overlay (consent bar) is chrome -
+    // its text used to leak into the extraction.
+    check("modal consent overlay text is skipped", !mdText.includes("CONSENT_BAR_TEXT"), mdText.slice(0, 300));
     const protonPage = await extract(`http://127.0.0.1:${webPort}/proton`, null);
     check("P3-2 Proton extraction source", protonPage?.data?.source === "proton-mail", JSON.stringify(protonPage?.data?.source));
     check("P3-2 Proton text capped and flagged", protonPage?.data?.text?.length <= 120000 && protonPage?.data?.truncated === true, `len=${protonPage?.data?.text?.length} truncated=${protonPage?.data?.truncated}`);

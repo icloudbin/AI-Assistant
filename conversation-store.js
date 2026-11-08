@@ -8,7 +8,9 @@
 import { attachmentCharCount } from "./attachments.js";
 
 export function sortedByNewest(list) {
-  return list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  // Pure helper: sort a COPY. Callers pass arrays they own, and an in-place
+  // sort here silently reordered the caller's list (round-17 #22).
+  return [...list].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
 
 // ---------------------------------------------------------------------------

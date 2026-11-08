@@ -241,9 +241,29 @@ check('"Customer Name: John Smith" still redacts (person-plausible qualifier)', 
   const red = R("Set-Cookie: sid=abc123456]", s);
   check("cookie value ending in ] is numbered", red === "Set-Cookie: [COOKIE#1]", red);
   check("... and restores the original value", restorePlaceholders(red, s) === "Set-Cookie: sid=abc123456]");
-  const red2 = R("Cookie:[9", s);
-  check("value starting at a literal [ is numbered", red2 === "Cookie:[COOKIE#2]", red2);
-  check("... and restores", restorePlaceholders(red2, s) === "Cookie:[9");
+  const red2 = R("Cookie: sid=[9", s);
+  check("value starting at a literal [ is numbered", red2 === "Cookie: [COOKIE#2]", red2);
+  check("... and restores", restorePlaceholders(red2, s) === "Cookie: sid=[9");
+}
+
+// ---- round-17 #11/#12/#13: cookie-value shape gate, numeric session ids, 15-digit IDs ----
+{
+  // A Cookie: header is blanked only when the value is actually cookie-shaped
+  // (name=value pairs); prose stays ordinary text.
+  check("prose after Cookie: is kept", R("Cookie: This dough needs chilling") === "Cookie: This dough needs chilling", R("Cookie: This dough needs chilling"));
+  check("Set-Cookie attribute tail still blanks", R("Set-Cookie: JSESSIONID=ABCDEF1234567890; Path=/; HttpOnly") === "Set-Cookie: [COOKIE]", R("Set-Cookie: JSESSIONID=ABCDEF1234567890; Path=/; HttpOnly"));
+  // A pure-digit session id is a credential (it has no letter, so the
+  // looksLikeSecret gate alone let it through).
+  check("numeric sessionid is redacted", R("sessionid=123456789012") === "sessionid=[COOKIE]", R("sessionid=123456789012"));
+  check("numeric csrf token is redacted", R("csrftoken: 987654321098") === "csrftoken: [COOKIE]", R("csrftoken: 987654321098"));
+  check("short numeric value stays text", R("sid=1234567") === "sid=1234567", R("sid=1234567"));
+
+  // Legacy (pre-2000) 15-digit resident IDs: month/day shape only (no
+  // checksum exists in the old format).
+  check("15-digit legacy CN ID is redacted", R("old id 110105491231002 here") === "old id [ID_NUMBER] here", R("old id 110105491231002 here"));
+  // A 15-digit credit card (AmEx shape) must NOT be mislabeled as an ID.
+  check("15-digit AmEx stays a card", R("card 378282246310005 charge") === "card [CREDIT_CARD] charge", R("card 378282246310005 charge"));
+  check("invalid month 15-digit run stays text", R("ref 990123456789012") === "ref 990123456789012", R("ref 990123456789012"));
 }
 
 // ---- v1.10.131: worst-case timing + coverage (field report round 8) ----

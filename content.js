@@ -359,6 +359,12 @@ function readerModeNameWords(signature) {
 }
 
 function readerModeClassifyNoise(el) {
+  // A modal overlay (consent bar, sign-in prompt) is chrome unless it holds
+  // most of the page's text - unnamed fixed overlays leaked their text into
+  // the extraction (round-17 #18). Same rule as <form> below.
+  if (el.getAttribute?.('role') === 'dialog' || el.getAttribute?.('aria-modal') === 'true') {
+    return !readerModeHoldsMostOfPage(el);
+  }
   if (el.localName === 'form') {
     // A site-search box is chrome; any other form is chrome unless it is the
     // page (a form-wrapped page, or a form that is the main content).
@@ -671,6 +677,7 @@ function extractRedditArticle() {
   // and never let comment content participate in main-post selection.
   const comments = [];
   const seen = new Set();
+  let commentChars = 0;
   for (const comment of Array.from(document.querySelectorAll('shreddit-comment'))) {
     if (seen.has(comment)) continue;
     seen.add(comment);
@@ -692,7 +699,15 @@ function extractRedditArticle() {
     const text = (commentBody?.innerText || commentBody?.textContent || '')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
-    if (text) comments.push(text);
+    if (text) {
+      // Stop collecting at the page cap: the layout-forcing innerText pass
+      // ran for EVERY rendered comment while the result was cut at the cap
+      // anyway - multi-second jank on large threads for thrown-away work
+      // (round-17 #15).
+      comments.push(text);
+      commentChars += text.length;
+      if (commentChars >= PAGE_CONTEXT_CHAR_LIMIT) break;
+    }
   }
 
   if (comments.length) {
@@ -986,6 +1001,9 @@ function mdSkip(el) {
   // <form> is skipped like other chrome, except a form that holds most of the
   // page's text (form-wrapped pages) - same rule as readerModeIsNoise().
   if (el.localName === 'form' && readerModeIsNoise(el)) return true;
+  // A modal overlay (consent bar, sign-in prompt) is chrome unless it holds
+  // most of the page's text - same rule as readerModeIsNoise() (round-17 #18).
+  if ((el.getAttribute?.('role') === 'dialog' || el.getAttribute?.('aria-modal') === 'true') && !readerModeHoldsMostOfPage(el)) return true;
   if (el.hasAttribute('hidden')) return true;
   if (mdDisplay(el) === 'none') return true;
   // visibility:hidden/collapse text is invisible to the reader but was still
@@ -1234,6 +1252,16 @@ function extractSelectionMarkdown() {
     // and keep document order via the ranges' own order per fragment.
     if (i > 0) holder.appendChild(document.createTextNode('\n\n'));
     holder.appendChild(sel.getRangeAt(i).cloneContents());
+  }
+  // A selection is explicit user intent: the whole-page chrome heuristics
+  // (banner/aside/footer names on the ORIGINAL elements, preserved in the
+  // fragment) must not drop parts of it without a word (round-17 #17). The
+  // fragments are a detached clone, so clearing id/class only disables the
+  // name-based noise checks for this extraction - script/style/template
+  // elements are still skipped by tag, and the live page is never touched.
+  for (const el of holder.querySelectorAll('[id],[class]')) {
+    el.removeAttribute('id');
+    el.removeAttribute('class');
   }
   const text = mdCut(mdBlocksOf(holder).join('\n\n'));
   if (!text) return null;

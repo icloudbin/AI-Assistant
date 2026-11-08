@@ -204,12 +204,36 @@ export class LineTranslator {
     this.heldText = "";
   }
 
+  // Append a wrapped-continuation chunk to the held line's translation. CJK
+  // scripts write no spaces between words: a model wrapping a long
+  // Chinese/Japanese/Korean line must be re-joined WITHOUT the inserted
+  // space (你好世 + 界 -> 你好世界); spaced scripts keep it.
+  holdContinuation(t) {
+    const cjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+    const sep = cjk.test(this.heldText.slice(-1)) && cjk.test(t[0]) ? "" : " ";
+    this.heldText += sep + t;
+  }
+
   handleLine(line) {
     const m = line.match(TAG_RE);
     if (m) {
       const id = Number(m[1]) - 1;
+      const pendingPreFlush = id >= this.next && id < this.lines.length && this.lines[id].translatable;
+      if (!pendingPreFlush && this.heldId >= 0 && !this.skipping && line.trim()) {
+        // A tag that does not name a pending line, while a translation is
+        // being collected: the model DROPPED its batch tag and the text
+        // itself happens to start with "[n]" (e.g. the source line began
+        // with a citation marker). Treating it as a tag silently skipped the
+        // text; keep the whole line as the held line's continuation - the
+        // token and echo checks below still guard what is kept. Residual
+        // ambiguity (it could be the NEXT line's full reply) is accepted:
+        // the text is preserved either way (round-17 #16).
+        this.holdContinuation(line.trim());
+        return;
+      }
       this.flushHeld();
-      if (id >= this.next && id < this.lines.length && this.lines[id].translatable) {
+      const pending = id >= this.next && id < this.lines.length && this.lines[id].translatable;
+      if (pending) {
         this.heldId = id;
         this.heldText = m[2];
         this.skipping = false;
@@ -219,14 +243,8 @@ export class LineTranslator {
       return;
     }
     // Untagged text: treat as a wrapped continuation of the current line.
-    // CJK scripts write no spaces between words: a model wrapping a long
-    // Chinese/Japanese/Korean line must be re-joined WITHOUT the inserted
-    // space (你好世 + 界 -> 你好世界); spaced scripts keep it.
     if (this.heldId >= 0 && !this.skipping && line.trim()) {
-      const t = line.trim();
-      const cjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
-      const sep = cjk.test(this.heldText.slice(-1)) && cjk.test(t[0]) ? "" : " ";
-      this.heldText += sep + t;
+      this.holdContinuation(line.trim());
     }
   }
 

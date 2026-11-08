@@ -245,6 +245,11 @@ function redactSecretKeyValue(m, key, sep, dq, sq, bare) {
 // Session cookies and CSRF values are credentials too.
 const COOKIE_NAME = String.raw`(?:PHPSESSID|JSESSIONID|ASP\.NET_SessionId|connect\.sid|session[_-]?id|sess[_-]?id|session[_-]?token|session|sid|csrf[_-]?token|csrftoken|xsrf[_-]?token|remember[_-]?(?:me|token)|__Host-[\w-]+|__Secure-[\w-]+)`;
 const COOKIE_KV_RE = new RegExp(`((?<![\\w.-])${COOKIE_NAME}\\s*[=:]\\s*["']?)([A-Za-z0-9%._~+/=-]{8,})`, "gi");
+// A Cookie(-2)/Set-Cookie header VALUE is credential-shaped when it is one or
+// more name=value pairs ("; "-separated, Set-Cookie's attribute tail without
+// an "=" allowed): a prose line like "Cookie: This dough needs chilling" has
+// no pair and must stay ordinary text (round-17 #11).
+const COOKIE_VALUE_SHAPE_RE = /^\s*[^;\s=]+=[^;]*(?:;\s*[^;\s=]+(?:=[^;]*)?)*\s*$/;
 
 // IPv6 (any text shape: full, ::-compressed, with an IPv4 tail or zone id).
 const IPV6_CANDIDATE_RE = /(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}(?:[0-9A-Fa-f]{1,4}|(?:\d{1,3}\.){3}\d{1,3})?(?:%[\w.-]+)?(?![\w:]|\.\d)/g;
@@ -337,9 +342,14 @@ const RULES = [
   // earlier rule: blanking the whole header with an unnumbered [COOKIE] would
   // sever that placeholder's mapping (its value became unrecoverable) - the
   // earlier rule already redacted exactly the sensitive part.
-  [/^([ \t]*(?:Set-)?Cookie2?[ \t]*:[ \t]*)(?!\[COOKIE)(?![^:\n]*\[[A-Z_]+(?:#\d+)?\])(\S.*)$/gim, (m, head, value) => (/^\[[A-Z_]+(?:#\d+)?\]$/.test(value.trim()) ? m : `${head}[COOKIE]`)],
+  [/^([ \t]*(?:Set-)?Cookie2?[ \t]*:[ \t]*)(?!\[COOKIE)(?![^:\n]*\[[A-Z_]+(?:#\d+)?\])(\S.*)$/gim, (m, head, value) => {
+    if (/^\[[A-Z_]+(?:#\d+)?\]$/.test(value.trim())) return m;
+    return COOKIE_VALUE_SHAPE_RE.test(value) ? `${head}[COOKIE]` : m;
+  }],
   // Session cookie / CSRF values outside a Cookie header (sessionid=..., csrftoken=...).
-  [COOKIE_KV_RE, (m, head, value) => (looksLikeSecret(value, false) ? `${head}[COOKIE]` : m)],
+  // A pure-digit value of 8+ characters is a session credential too - it has
+  // no letter, so looksLikeSecret alone let it through (round-17 #12).
+  [COOKIE_KV_RE, (m, head, value) => (looksLikeSecret(value, false) || /^\d{8,}$/.test(value) ? `${head}[COOKIE]` : m)],
   // key = value where the key NAME contains secret / token / password / api key
   // (SECRET_KEY=..., AWS_SECRET_ACCESS_KEY=..., "password": "...") and the value
   // looks like a secret: "Password: required" and "max token: 4096" stay.
@@ -376,6 +386,11 @@ const RULES = [
 
   // --- government / financial ids ---
   [/(?<![\d])[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx](?![\d])/g, "[ID_NUMBER]"],
+  // Legacy (pre-2000) 15-digit resident ID: 6 region + YYMMDD + 3 sequence.
+  // No checksum exists, so month/day shape only; without this rule ~90% of
+  // these leaked in plaintext and ~10% passed the card rule's Luhn and were
+  // mislabeled [CREDIT_CARD] (round-17 #13). Placed before the card rule.
+  [/(?<![\d])[1-9]\d{5}\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}(?![\d])/g, "[ID_NUMBER]"],
   // French NIR (INSEE): 15 digits, sex 1/2, month 01-12/20/62/63, key = 97 - body mod 97.
   [/(?<![\d.])(?:[12]\d{14})(?!\d)/g, (m) => (nirValid(m) ? "[ID_NUMBER]" : m)],
   // UK National Insurance number: no checksum exists, so only the canonical
