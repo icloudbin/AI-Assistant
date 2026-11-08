@@ -246,19 +246,12 @@ async function readBodyCapped(resp, maxBytes) {
   return out;
 }
 
-async function fetchImageDataUrl(rawUrl, maxBytes, allowedTypes, { timeoutMs = IMAGE_FETCH_TIMEOUT_MS, signal } = {}) {
+async function fetchImageDataUrl(rawUrl, maxBytes, allowedTypes) {
   const url = checkImageUrl(rawUrl);
   if (!url) throw new Error("blocked");
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  // An external signal (the page-image total budget) aborts this fetch the
-  // same way the per-image timeout does.
-  const onExternalAbort = () => controller.abort();
-  if (signal) {
-    if (signal.aborted) controller.abort();
-    else signal.addEventListener("abort", onExternalAbort, { once: true });
-  }
+  const timer = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
   try {
     const resp = await fetch(url.href, {
       method: "GET",
@@ -297,7 +290,6 @@ async function fetchImageDataUrl(rawUrl, maxBytes, allowedTypes, { timeoutMs = I
     return `data:image/${kind};base64,${btoa(binary)}`;
   } finally {
     clearTimeout(timer);
-    if (signal) signal.removeEventListener("abort", onExternalAbort);
   }
 }
 
@@ -331,16 +323,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // BATCH_MAX_RETRIES times with exponential backoff (3 s, then 6 s) before the
 // translation is stopped there.
 //
-// Only a refusal that arrives before the reply starts is retried: providerHttpError()
-// is thrown on a non-2xx response, before readSse() has pushed a single line to the
-// LineTranslator, so a retry cannot duplicate or reorder already-translated lines.
-// A failure in the middle of a stream has a different message and is not retried.
+// Only a refusal that arrives before the reply starts is retried: the
+// `!resp.ok` throws in providers/openai-compatible.js happen before readSse()
+// has pushed a single line to the LineTranslator, and each error carries its
+// HTTP status in `httpStatus` (preStreamHttpError there). Matching that
+// structured tag - not the message text - is load-bearing: a mid-stream
+// provider error chunk can carry the very same "HTTP 429 ..." text (the
+// stream-error extraction passes provider text through verbatim), and
+// retrying it would feed the failed attempt's leftover translator state into
+// the retry, garbling the first line and dropping the retried ones
+// (round-17 review #1). The old text-based gate enforced its "mid-stream
+// failures are not retried" invariant only by message wording.
 const BATCH_MAX_RETRIES = 2;
 const BATCH_RETRY_BASE_MS = 3000;
-const RETRYABLE_HTTP_ERROR_RE = /^HTTP (429|5\d\d)\b/;
 
 function retryableHttpStatus(err) {
-  return String(err?.message || "").match(RETRYABLE_HTTP_ERROR_RE)?.[1] || null;
+  const status = String(err?.httpStatus || "");
+  return /^(?:429|5\d\d)$/.test(status) ? status : null;
 }
 
 // setTimeout that ends with an AbortError as soon as the request is aborted
@@ -445,6 +444,11 @@ chrome.runtime.onConnect.addListener((port) => {
       return;
     }
     if (msg?.type !== "ASK") return;
+    // A malformed ASK (payload missing or not an object) is rejected before
+    // anything else - in particular before the second-ASK abort below, so a
+    // malformed message cannot kill a live request. The destructure further
+    // down would otherwise throw a raw TypeError (round-17 review #6).
+    if (typeof msg.payload !== "object" || msg.payload === null) return;
 
     const requestId = msg.payload?.requestId ?? null;
     // A second ASK on this port while a request is still running must not leave
@@ -802,8 +806,12 @@ const FACT_CHECK_RESULTS_PER_CLAIM = 4;
 const FACT_CHECK_MAX_EVIDENCE_CHARS = 18000;
 
 // Collapse whitespace and bound the length of a piece of research text.
+// cutAtCodePointBoundary, not a raw slice: a cap landing inside an astral
+// character must not send a lone surrogate to Tavily or the model prompt
+// (some backends 400/500) - the same rule as every other text cap
+// (round-17 review #3).
 function cleanResearchText(value, max = 800) {
-  return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+  return cutAtCodePointBoundary(String(value || "").replace(/\s+/g, " ").trim(), max);
 }
 
 function candidateFactClaims(text, title = "") {
@@ -1081,7 +1089,11 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
   // are not affected by that setting.
   if (trigger === 'implicit' && !(await autoWebResearchEnabled())) return null;
 
-  const stored = await chrome.storage.local.get(['tavilyApiKey']);
+  // storage.local can transiently reject; research is optional, so an
+  // unreadable key is treated exactly like a missing key - this read sits
+  // BEFORE the graceful-degradation guards below and must not escape them
+  // (round-17 review #5).
+  const stored = await chrome.storage.local.get(['tavilyApiKey']).catch(() => ({}));
   const apiKey = String(stored.tavilyApiKey || '').trim();
   if (!apiKey) {
     // Research is optional. If Tavily is not configured, continue directly
@@ -1205,7 +1217,9 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
 }
 
 async function runTavilyFactCheckResearch({ question, pageContext, ctx, selectedText = "" }) {
-  const stored = await chrome.storage.local.get(["tavilyApiKey"]);
+  // Unreadable storage = missing key (a clean localized error), not a raw
+  // rejection (round-17 review #5).
+  const stored = await chrome.storage.local.get(["tavilyApiKey"]).catch(() => ({}));
   const apiKey = String(stored.tavilyApiKey || "").trim();
   if (!apiKey) throw new Error(t(ctx.lang, "bg_error_tavilyKeyMissing"));
 

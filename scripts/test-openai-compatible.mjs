@@ -38,16 +38,36 @@ function makeCtx() {
 }
 const delta = (json) => json.choices?.[0]?.delta?.content ?? "";
 
-// ---------- happy path: chunks reassembled, [DONE] ignored, final line without newline flushed ----------
+// ---------- happy path: chunks reassembled, unterminated final line flushed ----------
+// v1.10.162 (round-17 #2): [DONE] now ENDS the read - a connection held open
+// after the terminal event used to hang until the 90 s idle timeout and then
+// report the provably complete answer as a failure. Post-[DONE] content is
+// therefore deliberately NOT read anymore; the unterminated-final-line flush
+// is pinned with the terminal reason carried on that unterminated line.
 {
   const ctx = makeCtx();
   const { resp } = sse([
     'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n',
-    'data: {"choices":[{"delta":{"content":"lo"}}]}\n\ndata: [DONE]\n\n',
-    'data: {"choices":[{"delta":{"content":"!"}}]}',
+    'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}]}',
   ]);
   await readSse(resp, delta, ctx, openAICompatibleStreamError);
-  assert.equal(ctx.chunks.join(""), "Hello!", "chunks reassembled; unterminated final line flushed; [DONE] ignored");
+  assert.equal(ctx.chunks.join(""), "Hello!", "chunks reassembled; unterminated final line flushed");
+}
+
+// ---------- [DONE] ends the read even when the connection stays open (v1.10.162) ----------
+{
+  const ctx = makeCtx();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\ndata: [DONE]\n\n'));
+      // Never closes, never errors: a proxy holding the connection open.
+    },
+  });
+  const started = Date.now();
+  await readSse({ body: stream }, delta, ctx, openAICompatibleStreamError);
+  assert.equal(ctx.chunks.join(""), "Hi", "the complete answer is delivered");
+  assert.ok(Date.now() - started < 5000, `did not wait for the idle timeout (${Date.now() - started}ms)`);
 }
 
 // ---------- bounded response resources (SEC-02) ----------

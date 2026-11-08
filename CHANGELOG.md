@@ -4,6 +4,19 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Streaming/research background fixes: round-17 #1-#6 (v1.10.162)
+
+Six P3 findings from the round-17 review, all in the network/background layer.
+
+- **Translation batch retry gate is structural now (#1).** The gate matched the error MESSAGE against `/^HTTP (429|5xx)/` - but a mid-stream provider error chunk can carry the very same "HTTP 429 ..." text (the stream-error extraction passes provider text through verbatim), and retrying such a failure fed the failed attempt's leftover LineTranslator state (its partial line buffer and held line) into the retry: one garbled translation plus silently untranslated lines. The four pre-stream `!resp.ok` throws in [providers/openai-compatible.js](providers/openai-compatible.js) now tag their errors with `httpStatus` (`preStreamHttpError`), and `retryableHttpStatus` matches only that tag - mid-stream failures are excluded by construction, not by message wording.
+- **[DONE] ends the read (#2).** After the terminal event (`[DONE]` or a `finish_reason`), the SSE reader kept waiting for EOF: a connection held open by the provider or a proxy (SSE keep-alive comments, buffering) hung the provably complete answer until the 90 s idle timeout fired and reported it as a failure. The reader now stops at the terminal event and cancels the stream. Behavior change, deliberate: content arriving AFTER [DONE] is no longer read (no known provider sends any; the old test's tolerance was speculative - re-pinned, with a new regression test that holds the connection open and asserts a prompt, successful completion).
+- **`cleanResearchText` is surrogate-safe (#3).** The research text cap used a raw `slice`, so a cap landing inside an astral character could send a lone surrogate to Tavily or the model prompt (some backends 400/500); it now uses the same `cutAtCodePointBoundary` as every other text cap.
+- **Dead `signal` option removed from `fetchImageDataUrl` (#4).** Page images are fetched in the page's own context since v1.10.157; the option and its comment described an external-abort contract nothing used anymore.
+- **Tavily key reads cannot escape the graceful-degradation guards (#5).** A transient `chrome.storage.local` rejection turned Explain/automatic-research into a failed request; both key reads (question research and fact-check research) now treat an unreadable key exactly like a missing key.
+- **A malformed ASK cannot kill a live request (#6).** `{type:"ASK"}` without a payload object crashed the destructure with a raw TypeError AFTER the second-ASK abort had already aborted the running request; the payload is now validated first, before anything is aborted.
+- Checked: check-package green; 25 Node suites exit 0 (test-openai-compatible re-pinned + 1 new held-open regression case); real-Chrome 11/11; extension E2E 37/37.
+- Build bumped to 1.10.162.
+
 ## A typed question is capped; one giant paste no longer poisons the conversation (v1.10.161)
 
 - **Found by the round-17 review (P2).** The typed question was the one input path with no size budget: no `maxlength` on the input, no cut at submit. An oversized paste was stored verbatim in the saved history (`unlimitedStorage` never refuses) and replayed IN FULL by every follow-up request inside the 16-message history window - each of those requests carried the multi-megabyte string through the PII redaction and to the provider, which rejected it; recovery required New Topic.

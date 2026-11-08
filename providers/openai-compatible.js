@@ -38,6 +38,22 @@ export async function readBoundedText(resp, maxChars = 4000) {
 // fallback reads the 429 body to decide whether to retry, and a consumed body
 // cannot be read again (the retry-less path would otherwise lose the error
 // detail and degrade to the bare status).
+// Builds the error thrown for a pre-stream non-2xx response, tagged with its
+// HTTP status. The tag is load-bearing: the translation batch retry gate
+// (retryableHttpStatus in background.js) retries ONLY these pre-stream
+// refusals - they are thrown before readSse() has pushed a single line to the
+// LineTranslator, so a retry cannot duplicate or garble already-translated
+// lines. Matching the structured tag - not the message text - is deliberate:
+// a mid-stream provider error chunk can carry the very same "HTTP 429 ..."
+// text (openAICompatibleStreamError passes provider text through verbatim),
+// and retrying that would feed the failed attempt's leftover translator state
+// into the retry (round-17 review #1).
+function preStreamHttpError(message, status) {
+  const err = new Error(message);
+  err.httpStatus = String(status);
+  return err;
+}
+
 async function providerHttpError(resp, lang, preReadText = null) {
   let body = "";
   try {
@@ -173,7 +189,7 @@ async function streamDeepSeek(model, question, pageContext, history, images, ctx
       ...(model.reasoningEffort ? { reasoning_effort: model.reasoningEffort } : {}),
     }),
   }, ctx);
-  if (!resp.ok) throw new Error(await providerHttpError(resp, ctx.lang));
+  if (!resp.ok) throw preStreamHttpError(await providerHttpError(resp, ctx.lang), resp.status);
 
   await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
 }
@@ -224,10 +240,10 @@ async function streamGroq(model, question, pageContext, history, images, ctx) {
     } else {
       // A plain rate-limit 429: no retry. The body was already consumed for
       // the check, so hand it to the error builder instead of re-reading.
-      throw new Error(await providerHttpError(resp, ctx.lang, preRead));
+      throw preStreamHttpError(await providerHttpError(resp, ctx.lang, preRead), resp.status);
     }
   }
-  if (!resp.ok) throw new Error(await providerHttpError(resp, ctx.lang));
+  if (!resp.ok) throw preStreamHttpError(await providerHttpError(resp, ctx.lang), resp.status);
 
   await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
 }
@@ -258,7 +274,7 @@ async function streamOpenRouter(model, question, pageContext, history, images, c
       stream: true,
     }),
   }, ctx);
-  if (!resp.ok) throw new Error(await providerHttpError(resp, ctx.lang));
+  if (!resp.ok) throw preStreamHttpError(await providerHttpError(resp, ctx.lang), resp.status);
 
   await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
 }
@@ -455,16 +471,29 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
         handleLine(line);
       }
       if (buffer.length > maxSseLineChars) throw streamLimitError(ctx.lang, `${Number(maxSseLineChars).toLocaleString()} characters per SSE line`);
+      // The terminal event ([DONE] or a finish_reason) ends the reply by
+      // definition. Stop reading even if the connection stays open (SSE
+      // keep-alive comments, proxy buffering): previously the idle timeout
+      // then fired on a provably complete answer and reported it as a
+      // failure after 90 s (round-17 review #2).
+      if (sawTerminal) {
+        reader.cancel().catch(() => {});
+        break;
+      }
     }
     if (timedOut) throw timeoutError();
     throwIfStopped();
     // Flush whatever is left: a final "data:" line that is not newline-terminated
-    // used to be dropped, silently truncating the end of the answer.
-    const tail = decoder.decode();
-    if (jsonText !== null) jsonText += tail;
-    buffer += tail;
-    if (buffer.length > maxSseLineChars) throw streamLimitError(ctx.lang, `${Number(maxSseLineChars).toLocaleString()} characters per SSE line`);
-    if (buffer.trim()) handleLine(buffer);
+    // used to be dropped, silently truncating the end of the answer. Skipped
+    // after a terminal event: the reply is complete and trailing bytes carry
+    // no content - they must not fail the answer.
+    if (!sawTerminal) {
+      const tail = decoder.decode();
+      if (jsonText !== null) jsonText += tail;
+      buffer += tail;
+      if (buffer.length > maxSseLineChars) throw streamLimitError(ctx.lang, `${Number(maxSseLineChars).toLocaleString()} characters per SSE line`);
+      if (buffer.trim()) handleLine(buffer);
+    }
   } catch (err) {
     reader.cancel().catch(() => {});
     if (timedOut) throw timeoutError();
