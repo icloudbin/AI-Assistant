@@ -189,3 +189,21 @@ export function migrateLegacyConversations(list) {
   if (!Array.isArray(list)) return list;
   return list.map((c) => (c && Array.isArray(c.messages) ? { ...c, messages: c.messages.map(migrateLegacyMessage) } : c));
 }
+
+// Composer drop policy (pure, tested): is a text/html drag payload a DRAGGED
+// IMAGE (attach the image), or a TEXT SELECTION that happens to contain an
+// inline <img> (insert the selection's text instead - dropping a paragraph and
+// silently losing it for an unrequested image attach was a round-17 review
+// finding)? Chrome serializes a dragged <img> as text/html plus the image's
+// URL in text/plain - often the ONLY plain-text content - while a selection
+// carries its own prose there: an article paragraph with an inline image has
+// multi-line or non-URL text.
+export function isImageDropPayload(hasHtmlImg, plain) {
+  if (!hasHtmlImg) return false;
+  const p = String(plain || "").trim();
+  if (!p) return true; // the payload is just the image
+  if (p.includes("\n")) return false; // multi-line: a text selection
+  // Single line: a dragged <img> carries its URL as the whole line. Prose that
+  // merely mentions a URL has words around it and fails the whole-line match.
+  return /^(?:https?:\/\/\S+|data:image\/\S+)$/i.test(p);
+}

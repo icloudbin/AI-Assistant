@@ -246,6 +246,45 @@ async function main() {
     })()`);
     check("composer layout intact (row is flex)", await page.eval("getComputedStyle(document.querySelector('.composer-row')).display") === "flex");
 check("drop-target highlight style applies", await page.eval("(() => { const f = document.getElementById('chatForm'); f.classList.add('drop-target'); const o = getComputedStyle(f).outlineStyle; f.classList.remove('drop-target'); return o; })()") === "dashed");
+
+    // Round-17 P2-3, through the REAL drop handler with synthetic payloads:
+    // a text selection that happens to contain an inline <img> must insert
+    // its TEXT (it used to attach the image and silently discard the text),
+    // while a dragged <img> (text/plain = its URL, or empty) must attach.
+    const tinyPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const selectionDrop = await page.eval(`(async () => {
+      const q = document.getElementById('questionInput');
+      q.value = ''; q.dispatchEvent(new Event('input', { bubbles: true }));
+      const dt = new DataTransfer();
+      dt.setData('text/html', '<p>selected prose with <img src="https://127.0.0.1:${webPort}/corsimg.png"> inline</p>');
+      dt.setData('text/plain', 'selected prose with  inline');
+      document.getElementById('chatForm').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      await new Promise((r) => setTimeout(r, 150));
+      return { text: q.value, chips: document.querySelectorAll('#attachmentList .attachment').length };
+    })()`);
+    check("drop of a selection with an inline image keeps the TEXT, attaches nothing",
+      selectionDrop?.text?.includes("selected prose") === true && selectionDrop?.chips === 0, JSON.stringify(selectionDrop));
+    const imageDrop = await page.eval(`(async () => {
+      const q = document.getElementById('questionInput');
+      q.value = ''; q.dispatchEvent(new Event('input', { bubbles: true }));
+      const dt = new DataTransfer();
+      dt.setData('text/html', '<img src="${tinyPng}">');
+      document.getElementById('chatForm').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      // The one-time S-08 image notice may be up: confirm it so the attach finishes.
+      for (let i = 0; i < 30; i++) {
+        const confirm = document.getElementById('imageNoticeDialogConfirm');
+        if (confirm) { confirm.click(); break; }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      await new Promise((r) => setTimeout(r, 500));
+      return { chips: document.querySelectorAll('#attachmentList .attachment').length, text: q.value };
+    })()`);
+    check("drop of a dragged <img> attaches the image", imageDrop?.chips === 1 && !imageDrop.text, JSON.stringify(imageDrop));
+    // Clean up so later checks submit without an attachment.
+    await page.eval("document.querySelector('#attachmentList .remove-attachment')?.click()");
+    await page.eval(`(() => { const q = document.getElementById('questionInput'); q.value = ''; q.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+    await sleep(200);
+
 check("table keeps extra cells", table.includes("<td>3</td>") && table.includes("<td>4</td>"), table.slice(0, 200));
     check("table preserves alignment", table.includes('align="left"') && table.includes('align="right"'), table.slice(0, 200));
 

@@ -27,7 +27,7 @@ import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-s
 import { mergeConversationLists, sortedByNewest, resolveContextEpoch, withHistoryLock, withNamedLock, CONTEXT_ACTION_LOCK, createMessage, withMessageIds, migrateConversationIds } from "../conversation-store.js";
 import { markdownToHtml } from "./rendering/markdown.js";
 import { makeTopicTitle, toStoredMessage, compressForQuota } from "./history-manager.js";
-import { sanitizeAttachmentName, normalizeAttachments, migrateLegacyConversations } from "../attachments.js";
+import { sanitizeAttachmentName, normalizeAttachments, migrateLegacyConversations, isImageDropPayload } from "../attachments.js";
 // Page images are fetched in the page's own context (no worker privilege) -
 // see page-images.js for why the worker's image-host allowlist does not apply.
 import { fetchImagesInPage, collectPageImageResults, PAGE_IMAGE_MAX_BYTES, PAGE_IMAGE_MAX_COUNT, PAGE_IMAGE_FETCH_TIMEOUT_MS, PAGE_IMAGE_TOTAL_BUDGET_MS } from "../page-images.js";
@@ -2582,8 +2582,11 @@ function looksLikeImageUrl(url) {
 // First image URL carried by a page drag, or "" when the drag is not an
 // image drop:
 //   - the <img src> of a text/html payload (the browser serializes dragged
-//     images with absolute src). A text/html payload WITHOUT an image is a
-//     rich text selection - its text flavors are never scanned for URLs;
+//     images with absolute src) - but only when the payload has NO PROSE in
+//     text/plain (see isImageDropPayload): a text selection that happens to
+//     contain an inline <img> is its text, not the image. A text/html payload
+//     WITHOUT an image is a rich text selection - its text flavors are never
+//     scanned for URLs;
 //   - the first non-comment http(s) line of the uri-list (dragged links),
 //     when it looks like an attachable image;
 //   - text/plain only when the WHOLE payload is a single http(s) URL (a
@@ -2592,12 +2595,17 @@ function looksLikeImageUrl(url) {
 function firstImageUrlFromDrop(dataTransfer) {
   const html = dataTransfer.getData("text/html");
   if (html) {
-    try {
-      const img = new DOMParser().parseFromString(html, "text/html").querySelector("img[src]");
-      const src = img?.getAttribute("src") || "";
-      if (src) return src;
-    } catch { /* malformed fragment: try the other flavors */ }
-    return ""; // a selection without an image is never a URL drop
+    // An <img> in a text/html payload is only an image drop when text/plain
+    // carries no prose: dropping a text selection must not silently discard
+    // the selected text and attach an unrequested image.
+    if (isImageDropPayload(true, dataTransfer.getData("text/plain"))) {
+      try {
+        const img = new DOMParser().parseFromString(html, "text/html").querySelector("img[src]");
+        const src = img?.getAttribute("src") || "";
+        if (src) return src;
+      } catch { /* malformed fragment: try the other flavors */ }
+    }
+    return ""; // a text selection (or a payload without an image) is never a URL drop
   }
   const list = (dataTransfer.getData("text/uri-list") || "").trim();
   for (const line of list.split("\n")) {

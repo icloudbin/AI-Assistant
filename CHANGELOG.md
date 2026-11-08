@@ -4,6 +4,14 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Dropping a text selection keeps the text, even when it contains an image (v1.10.160)
+
+- **Found by the round-17 review (P2).** Dragging a selected paragraph that happens to contain an inline `<img>` (extremely common on news and documentation pages) attached the image and silently discarded the selected text: `firstImageUrlFromDrop` returned the payload's first `<img src>` unconditionally, and a successful attach ended the drop before the text flavors were read. The user's intended input was thrown away and an image they did not ask for rode into the next request.
+- **Fix.** The payload is treated as an image drop only when text/plain carries no prose - a dragged `<img>` serializes as text/html plus just its URL (or nothing) in text/plain, while a selection carries its own text there. The policy lives in the new pure `isImageDropPayload()` ([attachments.js](attachments.js)): image drop iff text/plain is empty or the WHOLE single line is the image's URL (http(s) or a `data:image/` payload); multi-line or prose-bearing text/plain is a text selection and falls through to the normal text insertion.
+- **Tests.** 9 policy cases in `test-providers-messages.mjs`; two end-to-end checks in `test-extension-e2e.mjs` dispatch synthetic drops at the real composer - a selection with an inline image inserts the text and attaches nothing, a dragged `<img>` attaches (and is removed again so later checks are unaffected).
+- Checked: check-package green; 25 Node suites exit 0; real-Chrome 11/11; extension E2E 35/35.
+- Build bumped to 1.10.160.
+
 ## Privacy filter catches five more vendor-prefixed token families (v1.10.159)
 
 - **Found by the round-17 review (P2).** Bare pastes of several current vendor tokens leaked in plaintext: Shopify (`shpat_` admin API plus the `shpss_`/`shpca_`/`shppa_`/`shpvt_` shapes, all 32 hex), Supabase secret keys (`sb_secret_…`), Notion integration tokens (legacy `secret_…`, current `ntn_…`), Linear (`lin_api_…`) and Square (`EAAA…`). The existing rules could not catch them: SECRET_KV needs a `key:`/`key=` context, the URL rule needs `?name=`, and the Bearer rule needs its prefix.

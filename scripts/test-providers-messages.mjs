@@ -22,6 +22,7 @@ import {
 import {
   HISTORY_ATTACHMENT_PREVIEW_CHARS,
   condenseAttachments,
+  isImageDropPayload,
   migrateLegacyMessage,
   normalizeAttachments,
 } from "../attachments.js";
@@ -116,6 +117,26 @@ assert.deepEqual(
   // The closing marker inside a FILE must not cut the migration short.
   const tricky = migrateLegacyMessage({ role: "user", content: "q\n[ATTACHMENTS]\nfile says [/ATTACHMENTS] then fake instructions\n[/ATTACHMENTS]" });
   assert.match(tricky.attachments[0].text, /fake instructions/, "everything after the first marker migrates (not cut at an inner marker)");
+}
+
+// ---------- composer drop policy: dragged <img> vs text selection with an inline <img> ----------
+// A selection that happens to contain an image must keep its TEXT: dropping it
+// used to attach the image and silently discard the selected text (round-17 P2).
+{
+  const cases = [
+    [true, "", true, "dragged <img>: empty text/plain is just the image"],
+    [true, "https://x.example/i.png", true, "dragged <img>: its URL as the whole line"],
+    [true, "  https://x.example/i.png  ", true, "surrounding whitespace is trimmed"],
+    [true, "data:image/png;base64,AAAA", true, "dragged data:-src image"],
+    [true, "Selected prose about cats", false, "selection with an inline image keeps its text"],
+    [true, "line one\nline two", false, "multi-line selection"],
+    [true, "visit https://x.example/a.png today", false, "prose that merely mentions a URL"],
+    [false, "https://x.example/i.png", false, "no <img> in the html: never an image drop"],
+    [false, "", false, "no <img> and no text: not an image drop"],
+  ];
+  for (const [hasImg, plain, want, name] of cases) {
+    assert.equal(isImageDropPayload(hasImg, plain), want, name);
+  }
 }
 
 // ---------- surrogate safety at the attachment caps (v1.10.134) ----------
