@@ -125,5 +125,19 @@ assert.ok(anchored.includes("alpha nested entry") && anchored.includes("plain si
   assert.ok(!html.includes("<a "), "no link in bracket soup");
 }
 
+{
+  // The table width was measured with `Math.max(headers.length, ...rows.map(...))`:
+  // a spread throws RangeError ("Maximum call stack size exceeded") once the
+  // row count passes V8's call-argument limit (~125k) - reachable inside the
+  // 1M-char reply cap, and the streaming render has no catch, so one huge
+  // table killed every remaining chunk of the reply. Measured by a loop now.
+  const rowStrings = [];
+  for (let i = 0; i < 200000; i++) rowStrings.push(`| r${i} | x |`);
+  const huge = markdownToHtml(`| a | b |\n| --- | --- |\n${rowStrings.join("\n")}`);
+  assert.ok(huge.includes("<table>"), "a 200k-row table renders instead of throwing");
+  assert.ok(huge.includes("<td>r199999</td>"), "the last huge-table row survived");
+  assert.ok(huge.includes("<td>x</td>"), "extra cells beyond the header kept");
+}
+
 console.log("OK: rendering/markdown.js — escaping order, titled links/images, URL policy, fences, nested/loose lists, tables.");
 process.exit(0);

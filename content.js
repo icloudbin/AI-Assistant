@@ -1087,7 +1087,10 @@ function mdTable(el) {
     if (cells.length) rows.push(cells);
   }
   if (!rows.length) return '';
-  const width = Math.max(...rows.map((r) => r.length));
+  // Loop, not a spread: a page table larger than V8's call-argument limit
+  // (~125k rows) must not throw RangeError here and abort the whole page
+  // extraction (the listener turns any throw into {ok:false}).
+  const width = rows.reduce((max, r) => Math.max(max, r.length), 0);
   const lines = rows.map((r) => `| ${Array.from({ length: width }, (_, i) => r[i] || '').join(' | ')} |`);
   lines.splice(1, 0, `| ${Array(width).fill('---').join(' | ')} |`);
   return lines.join('\n');

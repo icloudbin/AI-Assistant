@@ -440,8 +440,12 @@ function markdownToHtml(markdown) {
         i++;
       }
       // GFM allows data rows with more cells than the header; keep them
-      // instead of silently dropping the extras.
-      const width = Math.max(headers.length, ...rows.map((row) => row.length));
+      // instead of silently dropping the extras. Measured with a loop on
+      // purpose: a spread (`Math.max(...rows.map(...))`) throws RangeError
+      // once the row count passes V8's call-argument limit (~125k rows,
+      // reachable within the 1M-char reply cap), and the streaming render has
+      // no catch - one huge table killed the whole reply.
+      const width = rows.reduce((max, row) => Math.max(max, row.length), headers.length);
       const pad = (row) => Array.from({ length: width }, (_, index) => row[index] || "");
       const cell = (tag, value, index) =>
         `<${tag}${aligns[index] ? ` align="${aligns[index]}"` : ""}>${inlineMarkdownToHtml(value)}</${tag}>`;
