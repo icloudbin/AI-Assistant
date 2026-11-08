@@ -113,6 +113,16 @@ for (const input of KEEP) check(`unchanged: ${input.slice(0, 60)}`, R(input) ===
     ["Perplexity pplx-", "pplx-", alnum(48)],
     ["DigitalOcean dop_v1_", "dop_v1_", hex(64)],
     ["Mailgun key-", "key-", hex(32)],
+    // Round-17 review: bare pastes of these leaked (SECRET_KV needs a "key:" /
+    // "key=" context, the URL rule needs "?name=", Bearer needs its prefix).
+    ["Shopify shpat_", "shpat_", hex(32)],
+    ["Shopify shpss_", "shpss_", hex(32)],
+    ["Shopify shpvt_", "shpvt_", hex(32)],
+    ["Supabase sb_secret_", "sb_secret_", urlsafe(40)],
+    ["Notion legacy secret_", "secret_", alnum(32)],
+    ["Notion current ntn_", "ntn_", alnum(34)],
+    ["Linear lin_api_", "lin_api_", alnum(32)],
+    ["Square EAAA", "EAAA", alnum(40)],
   ];
   for (const [name, prefix, body] of TOKENS) {
     const out = R(`the value is ${prefix}${body} here`);
@@ -126,6 +136,12 @@ for (const input of KEEP) check(`unchanged: ${input.slice(0, 60)}`, R(input) ===
     `hf_${alnum(12)}`, "hf_hub_download(repo_id)", "npm_config_cache=/tmp/npm", `r8_${alnum(12)}`,
     "xai-core and pplx-api are product names", "pypi-mirror", "a key-value store", `dop_v1_${hex(10)}`,
     `monkey-${hex(32)}`, // no word boundary before "key-"
+    `shpat_${hex(10)}`, // too short for the Shopify shape
+    `sb_secret_${urlsafe(10)}`, // too short for the Supabase shape
+    `secret_${alnum(29)}`, // one char below the Notion gate
+    "secret_recipe_of_the_house", // underscores break the alnum run
+    "the EAAAs are awarded yearly", // no long alnum run after the prefix
+    `EAAA${alnum(10)}`, // too short for the Square shape
   ]) check(`unchanged: ${keep.slice(0, 50)}`, R(keep) === keep, `-> ${R(keep)}`);
 
   // Numbered placeholders round-trip for the new rules too.

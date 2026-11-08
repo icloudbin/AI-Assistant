@@ -4,6 +4,14 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Privacy filter catches five more vendor-prefixed token families (v1.10.159)
+
+- **Found by the round-17 review (P2).** Bare pastes of several current vendor tokens leaked in plaintext: Shopify (`shpat_` admin API plus the `shpss_`/`shpca_`/`shppa_`/`shpvt_` shapes, all 32 hex), Supabase secret keys (`sb_secret_…`), Notion integration tokens (legacy `secret_…`, current `ntn_…`), Linear (`lin_api_…`) and Square (`EAAA…`). The existing rules could not catch them: SECRET_KV needs a `key:`/`key=` context, the URL rule needs `?name=`, and the Bearer rule needs its prefix.
+- **Fix.** Six prefixed rules alongside the other fixed-prefix tokens ([pii-filter.js](privacy/pii-filter.js)), all case-sensitive like the existing prefixes and with length gates so prose stays ordinary text ("secret_recipe_of_the_house", "the EAAAs are awarded yearly", a 29-character run after `secret_`). `sb_publishable_` keys are deliberately NOT redacted - they are public by design.
+- **Tests.** 8 new redaction cases + 6 new false-positive guards in `test-pii-filter.mjs` (241 checks).
+- Checked: check-package green; 25 Node suites exit 0; real-Chrome 11/11; extension E2E 33/33.
+- Build bumped to 1.10.159.
+
 ## One huge table can no longer kill the whole reply (v1.10.158)
 
 - **Found by the round-17 review (P2).** The GFM table width was measured with `Math.max(headers.length, ...rows.map((row) => row.length))`. A spread throws `RangeError: Maximum call stack size exceeded` once the argument count passes V8's call-argument limit (~125k) - and the 1M-char reply cap (sidepanel.js:405) admits tables of 250k+ rows. Neither `setBubbleContent` (sidepanel.js:908) nor the streaming renderer has a try/catch, so every remaining chunk of that reply threw again: the bubble stayed empty and the composer sat through the whole stream. The same spread in the page extractor ([content.js:1090](content.js)) aborted the ENTIRE page extraction (the listener turns any throw into `{ok:false}`) instead of degrading to plain text.

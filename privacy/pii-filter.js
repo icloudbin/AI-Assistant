@@ -312,6 +312,19 @@ const RULES = [
   [/\b(?:xai|pplx)-[A-Za-z0-9]{30,}\b/g, "[API_KEY]"],
   [/\bdop_v1_[a-f0-9]{64}\b/g, "[API_KEY]"],
   [/\bkey-[0-9a-f]{32}\b/g, "[API_KEY]"],
+  // More vendor-prefixed tokens (round-17 review, bare-paste leak report):
+  // Shopify (shpat_ admin API, shpss_, shpca_, shppa_, shpvt_ - all 32 hex),
+  // Supabase secret keys (sb_secret_; the sb_publishable_ keys are public by
+  // design), Notion integration tokens (legacy secret_ + 30+ alnum, current
+  // ntn_), Linear API keys (lin_api_) and Square access tokens (EAAA + base62).
+  // Case-sensitive on purpose, like the prefixes above; the length gates keep
+  // prose like "secret_recipe_of_the_house" or "EAAAs" ordinary text.
+  [/\bshp(?:at|ss|ca|pa|vt)_[0-9a-f]{32}\b/g, "[API_KEY]"],
+  [/\bsb_secret_[A-Za-z0-9_-]{20,}\b/g, "[API_KEY]"],
+  [/\bsecret_[A-Za-z0-9]{30,}\b/g, "[API_KEY]"],
+  [/\bntn_[A-Za-z0-9]{30,}\b/g, "[API_KEY]"],
+  [/\blin_api_[A-Za-z0-9]{32,}\b/g, "[API_KEY]"],
+  [/\bEAAA[a-zA-Z0-9_-]{30,}\b/g, "[API_KEY]"],
   // Service-specific credentials with canonical shapes: Slack and Discord
   // incoming-webhook URLs, a SendGrid API key, a Telegram bot token.
   [/https:\/\/hooks\.slack\.com\/services\/T[A-Za-z0-9]+\/B[A-Za-z0-9]+\/[A-Za-z0-9]+/g, "[API_KEY]"],
