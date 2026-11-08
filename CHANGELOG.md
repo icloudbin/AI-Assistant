@@ -4,7 +4,7 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
-## Unreleased: privacy filter - more credentials caught, no real names in automatic searches
+## Privacy filter: more credential shapes, no real names in automatic searches; tooltip fix (v1.10.155)
 
 ### Automatic web search no longer sends real names to Tavily
 
@@ -22,6 +22,8 @@ Field report: with synthetic data, several common credential shapes were sent to
 - **URL query parameters.** The parameter-name match now allows a vendor prefix, so a presigned URL's `X-Amz-Signature=`, `X-Amz-Security-Token=`, `X-Amz-Credential=`, `X-Goog-Signature=` and `x-api-key=` are redacted (the old rule needed `sig` / `signature` right after `?` or `&`). The bare names `key` and `auth` are kept anchored right after `?` / `&`: dropping them from the list would have stopped redacting `?key=…` and `&auth=…`, and letting them take a prefix would catch ordinary parameters such as `turkey=`.
 - **Documented gap.** A bare 40-character AWS secret access key (no label, no prefix) cannot be detected without redacting every 40-character identifier, so it is not; a labelled one (`AWS_SECRET_ACCESS_KEY=…`) still is. See "Privacy filter: credential coverage and known gaps" in [docs/features.md](docs/features.md).
 - **Tests.** 38 new cases in `test-pii-filter.mjs` (189 → 227): every new prefix, look-alikes that must stay unchanged, numbered-placeholder round-trip, presigned URLs, the `key` / `auth` regression guard, and a linear-time guard for the lazy prefix. Test tokens are assembled from parts so GitHub push protection does not trip on them. Fifteen of the new cases fail against the previous `pii-filter.js`.
+- **UI copy.** The "Read current page" tooltip in the side panel described the removed Off / Ask each time / Always select; it now reads "When checked, questions include the current page; quick actions always read it" in all six languages, and the stale `readCurrentPage_off` string is gone.
+- Build bumped to 1.10.155.
 
 ## Architecture extraction, unit-explicit stream limits, and docs merged from PR #3 (v1.10.154)
 
