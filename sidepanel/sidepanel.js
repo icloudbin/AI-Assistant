@@ -1363,7 +1363,8 @@ async function fetchPageImages(imageUrls, tabId) {
 // above), so the image-byte accounting has one definition.
 
 // URL-based extraction cannot cover CSS backgrounds, blob: URLs, or hosts
-// that reject an extension-origin download. A bounded screenshot of the
+// whose images the page itself may not read cross-origin (no CORS header: page
+// images are fetched in the page's own context). A bounded screenshot of the
 // visible page gives quick actions a reliable visual input in those cases.
 async function compressPageScreenshot(dataUrl) {
   return new Promise((resolve) => {
