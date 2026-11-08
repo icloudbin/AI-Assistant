@@ -11,8 +11,9 @@ import path from "node:path";
 import os from "node:os";
 import { spawn } from "node:child_process";
 import assert from "node:assert/strict";
+import { resolveChromePath } from "./chrome-path.mjs";
 
-const CHROME_PATH = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+const CHROME_PATH = await resolveChromePath();
 const ROOT = path.resolve(".");
 const DEBUG_PORT = 9229;
 const isVisual = process.argv.includes("--show") || process.argv.includes("--visual");

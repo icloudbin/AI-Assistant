@@ -16,8 +16,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveChromePath } from "./chrome-path.mjs";
 
-const CHROME = process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+const CHROME = await resolveChromePath();
 // Point EXT_ROOT at an extracted package to validate the shipped artifact
 // instead of the working tree.
 const ROOT = process.env.EXT_ROOT
