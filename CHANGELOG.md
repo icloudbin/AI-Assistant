@@ -4,7 +4,17 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
-## Unreleased: privacy filter catches more credentials
+## Unreleased: privacy filter - more credentials caught, no real names in automatic searches
+
+### Automatic web search no longer sends real names to Tavily
+
+Field report: "Automatically search the web" is ON by default and fires by itself whenever the page cannot answer. For a question such as "我叫张三，帮我看看这份报税材料" (or "My name is ...") the Tavily query had the name restored, so a name the user gave as context reached a third-party search service although nobody asked for a search. The old comment justified it with "the user is asking about a public fact", which only holds for an explicit search.
+
+- **Fix (background.js, `runTavilyQuestionResearch`).** Names are restored only when the search is explicit (the user wrote "search the web ..."). An automatic lookup never restores a name: when the question holds a name placeholder the lookup is skipped (it is an optional extra), otherwise the remaining placeholder tokens are dropped from the query. A question that is only placeholders (the user pasted just an address) no longer sends an empty `[EMAIL#1]` query either. The name check tolerates the unnumbered and backslash-escaped spellings of the placeholder. Explain and Fact Check are unchanged.
+- **Policy and comments.** privacy-policy.md (the Automatic web search and Privacy filter paragraphs) and the comments in pii-filter.js said names are restored in web-search queries; they now say only for an explicitly requested search.
+- **Tests.** 11 new end-to-end cases in `test-outbound-pii.mjs` (58 → 69), run against the real background.js with a stubbed Tavily: a name-bearing question in Chinese and English sends nothing to Tavily and still reaches the model with the name redacted; a name-free question still triggers the lookup; other placeholders are stripped and their values never sent; a placeholders-only question sends nothing; OFF stays local; an explicit search still restores the name. Six of them fail against the previous background.js.
+
+### Privacy filter catches more credentials
 
 Field report: with synthetic data, several common credential shapes were sent to the model unredacted.
 

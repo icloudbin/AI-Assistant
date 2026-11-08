@@ -326,6 +326,59 @@ tavilyReply = () => new Response(JSON.stringify({ results: [{ url: "https://e.co
   check("model still sees the redacted name", !modelBodies.includes("Jane Doe") && modelBodies.includes("[NAME#1]"));
 }
 
+// --- Automatic (implicit) lookups never carry a real name (field report #3) -
+// "Automatically search the web" is ON by default and fires by itself when the
+// page cannot answer. A name the user wrote in passing ("I am ..., please
+// review my tax papers") is not a public fact they asked to look up: restoring
+// it for Tavily sent it to a third party nobody asked to search. Only an
+// EXPLICIT search request (block above) may restore names; an automatic lookup
+// never does, and skips itself when the question holds a name placeholder.
+{
+  delete store.autoWebResearchEnabled; // default: ON
+  const tavily = (res) => res.sent.filter((s) => s.url.includes("tavily"));
+  const tavBody = (res) => tavily(res).map((s) => s.body).join(" ");
+  const modelBody = (res) => res.sent.filter((s) => !s.url.includes("tavily")).map((s) => s.body).join(" ");
+
+  // Control: the implicit path does fire for a name-free question, so the cases
+  // below exercise the gate rather than a path that never ran.
+  r = await ask({ question: "路由器联网失败是什么意思", pageContext: null, includePageContext: false });
+  check("implicit lookup still fires for a name-free question", tavily(r).length > 0);
+
+  for (const [label, question, name] of [
+    ["zh", "我叫张三，帮我看看这份报税材料有没有问题", "张三"],
+    ["en", "My name is Jane Doe. Can you review my tax documents for errors?", "Jane Doe"],
+  ]) {
+    r = await ask({ question, pageContext: null, includePageContext: false });
+    check(`implicit lookup [${label}]: a question holding a name is not sent to Tavily`, tavily(r).length === 0, tavBody(r).slice(0, 140));
+    check(`implicit lookup [${label}]: the name is in no Tavily body`, !tavBody(r).includes(name), tavBody(r).slice(0, 140));
+    check(`implicit lookup [${label}]: the request still reaches the model, name redacted`,
+      r.final.type === "DONE" && !modelBody(r).includes(name) && modelBody(r).includes("[NAME#1]"), `final=${r.final.type}`);
+  }
+
+  // Another kind of placeholder in an implicit query: the token is dropped
+  // (noise to a search engine) and the value behind it is never sent.
+  r = await ask({ question: "My email is jane.doe@example.com. 路由器联网失败是什么意思", pageContext: null, includePageContext: false });
+  check("implicit lookup: another placeholder is stripped, its value not sent",
+    tavily(r).length > 0 && !tavBody(r).includes("jane.doe@example.com") && !/\[[A-Z_]+(?:#\d+)?\]/.test(tavBody(r)) && tavBody(r).includes("路由器"), tavBody(r).slice(0, 140));
+
+  // A question that is nothing but a placeholder ("[EMAIL#1]": the user pasted
+  // just an address) has nothing left to search for once the token is dropped.
+  r = await ask({ question: "jane.doe@example.com", pageContext: null, includePageContext: false });
+  check("implicit lookup: a placeholders-only question sends no empty query", tavily(r).length === 0 && r.final.type === "DONE", tavBody(r).slice(0, 140));
+
+  // With the opt-out setting off, nothing automatic goes out whatever the question holds.
+  store.autoWebResearchEnabled = false;
+  r = await ask({ question: "我叫张三，帮我看看这份报税材料有没有问题", pageContext: null, includePageContext: false });
+  check("auto research OFF: a name-bearing question stays local too", tavily(r).length === 0);
+  delete store.autoWebResearchEnabled;
+
+  // The documented exception is unchanged: a search the user explicitly asked
+  // for still restores the name (the block above pins that for English; this
+  // pins it for Chinese with a Chinese search instruction).
+  r = await ask({ question: "我叫张三。请联网搜索张三的公开论文", pageContext: null, includePageContext: false });
+  check("explicit search request still restores the name", tavBody(r).includes("张三") && !tavBody(r).includes("[NAME#"), tavBody(r).slice(0, 140));
+}
+
 // --- "Explicit web search" pattern must not misfire on ordinary questions ---
 // User field report: with "Automatically search the web" OFF and a Tavily key
 // configured, these questions were judged explicit (the verbatim question was

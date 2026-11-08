@@ -13,8 +13,10 @@
 // Two deliberate exceptions (both needed for search / answers to work):
 //   - A fact-check request goes out UNFILTERED: redacting the claim makes it
 //     unsearchable and unanswerable (background.js skips question + selectedText).
-//   - Web-research queries carry real names (restoreNamePlaceholders): a search
-//     for a public fact is useless with the name blinded. Every other field,
+//   - A web search the user EXPLICITLY asked for ("search the web ...") carries
+//     real names (restoreNamePlaceholders): a search for a public fact is
+//     useless with the name blinded. An AUTOMATIC lookup never does - it is
+//     skipped when the question holds a name placeholder. Every other field,
 //     and every other kind of PII, stays redacted.
 
 import { parseIPv6 } from "../url-safety.js";
@@ -635,10 +637,13 @@ export function restorePlaceholders(text, session) {
   return out;
 }
 
-// Restores ONLY [NAME#n] placeholders. Used for web-research queries: a search
-// about a public figure is useless with the name blinded, while every other
-// redaction stays in place. A fact-check request is handled differently - the
-// whole claim is sent unfiltered (see background.js).
+// Restores ONLY [NAME#n] placeholders. Used ONLY for a web search the user
+// explicitly asked for: a search about a public figure is useless with the name
+// blinded, while every other redaction stays in place. It must never be used for
+// an automatic (implicit) lookup - the user did not ask for that search, so a
+// name in their question is not theirs to be shared with the search service
+// (background.js skips such a lookup instead). A fact-check request is handled
+// differently - the whole claim is sent unfiltered (see background.js).
 export function restoreNamePlaceholders(text, session) {
   if (typeof text !== "string" || !text || !session || !session.byPlaceholder.size || !text.includes("[NAME#")) return text;
   return text.replace(/\[NAME#\d+\]/g, (token) => session.byPlaceholder.get(token) ?? token);

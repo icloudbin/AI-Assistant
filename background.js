@@ -1089,6 +1089,12 @@ function stripPlaceholderTokens(text) {
   return String(text || '').replace(/\\?\[[A-Z_]+(?:#\d+)?\\?\]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// A name placeholder as the privacy filter writes it ([NAME#1]). Tolerates the
+// unnumbered [NAME] and the backslash-escaped form, like stripPlaceholderTokens
+// above does, so a variant spelling cannot slip past the automatic-lookup gate.
+// Deliberately not global: .test() on a /g regex carries lastIndex between calls.
+const NAME_PLACEHOLDER_RE = /\\?\[NAME(?:#\d+)?\\?\]/;
+
 function pageResearchQuery(question, pageContext) {
   const title = cleanResearchText(pageContext?.title, 280);
   const excerpt = cleanResearchText(pageContext?.text, 620);
@@ -1161,10 +1167,20 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
   }
 
   async function fetchTavilyEvidence() {
-    // Ordinary questions use the user's wording (without attachment text). Name
-    // placeholders are restored for THAT search only: a query like "[NAME#1]
-    // biography" finds nothing, and the user is asking about a public fact, not
-    // sharing their private data. Every other placeholder stays.
+    // A question uses the user's wording (without attachment text). What happens
+    // to name placeholders depends on who started the search:
+    //
+    //  - EXPLICIT ("search the web for ..."): the names are restored for THAT
+    //    search only. A query like "[NAME#1] biography" finds nothing, and the
+    //    user asked for exactly this lookup, so they are asking about a public
+    //    fact rather than sharing private data. Every other placeholder stays.
+    //  - AUTOMATIC (implicit): names are NEVER restored. The user did not ask
+    //    for a search at all, and a name in the question ("My name is ..., please
+    //    review my tax papers") is context they gave the assistant, not a fact to
+    //    look up - restoring it would hand it to a third party unasked. The
+    //    lookup is an optional extra, so when the question holds a name
+    //    placeholder it is simply skipped; otherwise the remaining placeholder
+    //    tokens are dropped (noise to a search engine) and nothing is restored.
     //
     // A forced Explain action has a fixed instruction, so it instead searches the
     // current page's title and opening text. That text is the PAGE's, not the
@@ -1176,8 +1192,14 @@ async function runTavilyQuestionResearch({ question, pageContext, ctx, force = f
     let searchQuery;
     if (force) {
       searchQuery = stripPlaceholderTokens(pageResearchQuery(questionText, pageContext)) || stripPlaceholderTokens(questionText) || questionText;
-    } else {
+    } else if (trigger === 'explicit') {
       searchQuery = restoreNamePlaceholders(questionText, ctx.piiSession);
+    } else {
+      // Automatic lookup: give up rather than restore (or search around) a name.
+      if (NAME_PLACEHOLDER_RE.test(questionText)) return null;
+      searchQuery = stripPlaceholderTokens(questionText);
+      // A question made only of placeholders has nothing left to search for.
+      if (!searchQuery) return null;
     }
     const result = await tavilySearch(searchQuery, apiKey, ctx.signal, 'general', ONLINE_RESEARCH_MAX_RESULTS);
     const byUrl = new Map();
