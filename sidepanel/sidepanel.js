@@ -403,6 +403,13 @@ let currentAssistantText = "";
 // Independent UI-side cap: also protects multi-batch translations and guards
 // against any malformed internal CHUNK message that bypasses the SSE reader.
 const MAX_ASSISTANT_REPLY_CHARS = 1_000_000;
+// The typed question is the one input path without its own budget (files,
+// page text and translations all have one): an oversized paste used to ride
+// into the saved history verbatim and was replayed in full by every follow-up
+// request inside the history window, each one failing at the provider
+// (round-17 P2-4). Larger than any realistic question - long texts belong in
+// attachments, whose own budgets apply there.
+const MAX_QUESTION_CHARS = 50_000;
 // placeholder -> value map of the in-flight request (sent by the worker as
 // PII_MAP). The reply text itself keeps its placeholders ([EMAIL#1]); values
 // are put back only when it is DISPLAYED, and only in text (setBubbleContent).
@@ -3164,6 +3171,14 @@ function gatePageSend(kind, forcedIncludePageContext) {
 async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "", noWebResearch = false, includePageImages = false, forceWebResearch = false, translateMode = false, translateSource = null, translateSourceFormat = "text", translateSourceTruncated = false) {
   e?.preventDefault?.();
   const question = forcedQuestion !== null ? String(forcedQuestion).trim() : questionInput.value.trim();
+  // Cap the TYPED question for the request (forced questions from quick
+  // actions and the context menu keep their own caps: translations cut at
+  // their translation limit, page text at the page cap). The FULL text stays
+  // in `question` so a failed pre-post send can restore the composer
+  // verbatim; what is stored, displayed and sent is the capped slice.
+  const questionForRequest = forcedQuestion === null && question.length > MAX_QUESTION_CHARS
+    ? cutAtCodePointBoundary(question, MAX_QUESTION_CHARS)
+    : question;
   const attachmentList = attachmentPayload();
   if ((!question && !attachmentList.length) || isStreaming) return;
   // A still-reading attachment (a multi-MB ZIP can take a while) is NOT part
@@ -3254,14 +3269,18 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     autoScrollEnabled = true;
     const displayQuestion = forcedDisplayQuestion !== null
       ? String(forcedDisplayQuestion).trim()
-      : (question || t(currentLang, "attachedFilesFallback"));
+      : (questionForRequest || t(currentLang, "attachedFilesFallback"));
     const readyAttachments = attachments.filter((a) => a.status === "ready");
     const displayContent = attachmentList.length
       ? `${displayQuestion}\n\n📎 ${readyAttachments.map((a) => a.name).join(", ")}`
       : displayQuestion;
+    if (questionForRequest !== question) {
+      // Above the user message, like every other pre-send condition.
+      addBubble("notice", t(currentLang, "questionTruncatedNotice_template", { max: String(MAX_QUESTION_CHARS) }));
+    }
     userBubble = addBubble("user", displayContent);
     // `content` is only what the user typed; the files ride along as structured data.
-    const baseQuestionForApi = question || "Please analyze the attached files.";
+    const baseQuestionForApi = questionForRequest || "Please analyze the attached files.";
     history.push(createMessage({ role: "user", content: baseQuestionForApi, ...(attachmentList.length ? { attachments: attachmentList } : {}), displayContent, modelLabel: "" }, history));
     userTurnPushed = true;
     if (!currentConversationId) {

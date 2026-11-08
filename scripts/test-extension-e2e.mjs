@@ -306,6 +306,28 @@ check("table keeps extra cells", table.includes("<td>3</td>") && table.includes(
     check("user bubble rendered through real side panel", !!userBubble && userBubble.text.includes("line one"), JSON.stringify(userBubble));
     check("user bubble preserves newlines", userBubble?.whiteSpace === "pre-wrap", JSON.stringify(userBubble));
 
+    // Round-17 P2-4: a typed question is capped at MAX_QUESTION_CHARS (50000)
+    // for the request - the bubble shows the capped slice, a notice explains
+    // the truncation. (No API key here, so the request ends in the ERROR path,
+    // which keeps the user turn; the composer is NOT restored after a posted
+    // error, only after a pre-post failure.)
+    await page.eval(`(async () => {
+      const q = document.getElementById('questionInput');
+      q.value = 'START-' + 'x'.repeat(60000) + '-ENDMARKER';
+      q.dispatchEvent(new Event('input', { bubbles: true }));
+      document.getElementById('chatForm').requestSubmit();
+      return true;
+    })()`);
+    await sleep(1800);
+    const capped = await page.eval(`(() => {
+      const user = [...document.querySelectorAll('.bubble.user .bubble-text')].pop();
+      const notices = [...document.querySelectorAll('.bubble.notice .bubble-text')].map((b) => b.textContent).join('\\n');
+      return { len: user ? user.textContent.length : -1, start: user ? user.textContent.slice(0, 6) : '', hasEnd: user ? user.textContent.includes('ENDMARKER') : null, notice50000: notices.includes('50000') };
+    })()`);
+    check("typed question capped at 50000 characters in the bubble",
+      capped?.len === 50000 && capped?.start === "START-" && capped?.hasEnd === false, JSON.stringify({ len: capped?.len, start: capped?.start, hasEnd: capped?.hasEnd }));
+    check("truncation notice is shown", capped?.notice50000 === true, JSON.stringify(capped?.notice50000));
+
     // P3-14 context-action queue: queue a translation for this panel tab, reload, claim it.
     const ids = await page.eval("(async () => { const t = await chrome.tabs.getCurrent(); return { tabId: t.id, windowId: t.windowId }; })()");
     await page.eval(`chrome.tabs.update(${ids.tabId}, { active: true })`);

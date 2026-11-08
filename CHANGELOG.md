@@ -4,6 +4,14 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## A typed question is capped; one giant paste no longer poisons the conversation (v1.10.161)
+
+- **Found by the round-17 review (P2).** The typed question was the one input path with no size budget: no `maxlength` on the input, no cut at submit. An oversized paste was stored verbatim in the saved history (`unlimitedStorage` never refuses) and replayed IN FULL by every follow-up request inside the 16-message history window - each of those requests carried the multi-megabyte string through the PII redaction and to the provider, which rejected it; recovery required New Topic.
+- **Fix.** The typed question is cut at `MAX_QUESTION_CHARS` (50,000 characters, surrogate-safe) for the request: what is stored, displayed and sent is the capped slice, and a notice explains the truncation and points at attachments for long texts ("Your question was longer than 50000 characters, so only the first 50000 characters were sent. For long texts, attach them as a file instead (Upload or drag & drop)." - six languages). The FULL text stays in the submit scope, so a failed pre-post send still restores the composer verbatim. Quick actions and the context menu are untouched: translations keep their own (larger) translation limit and page text keeps the page cap.
+- **Tests.** Two end-to-end checks in `test-extension-e2e.mjs`: a 60,053-character submit renders a 50,000-character user bubble (start marker kept, end marker cut) plus the truncation notice.
+- Checked: check-package green; 25 Node suites exit 0; real-Chrome 11/11; extension E2E 37/37.
+- Build bumped to 1.10.161.
+
 ## Dropping a text selection keeps the text, even when it contains an image (v1.10.160)
 
 - **Found by the round-17 review (P2).** Dragging a selected paragraph that happens to contain an inline `<img>` (extremely common on news and documentation pages) attached the image and silently discarded the selected text: `firstImageUrlFromDrop` returned the payload's first `<img src>` unconditionally, and a successful attach ended the drop before the text flavors were read. The user's intended input was thrown away and an image they did not ask for rode into the next request.
