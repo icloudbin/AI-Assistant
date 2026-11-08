@@ -298,6 +298,18 @@ const RULES = [
   [/\bsk-(?:ant-|or-v1-|proj-)?[A-Za-z0-9_-]{20,}\b/g, "[API_KEY]"],
   [/\bgsk_[A-Za-z0-9]{20,}\b/g, "[API_KEY]"],
   [/\btvly-[A-Za-z0-9_-]{16,}\b/g, "[API_KEY]"],
+  // Developer-platform tokens with a fixed prefix: HuggingFace (hf_), npm
+  // (npm_), Replicate (r8_), GitLab (glpat-), Google OAuth access tokens
+  // (ya29.; service accounts get ya29.c.<body>, hence the optional "c."), PyPI
+  // (pypi-), xAI (xai-), Perplexity (pplx-), DigitalOcean (dop_v1_), Mailgun
+  // (key- + 32 hex). Case-sensitive on purpose: the prefixes are lower-case.
+  [/\b(?:hf|npm|r8)_[A-Za-z0-9]{30,}\b/g, "[API_KEY]"],
+  [/\bglpat-[A-Za-z0-9_-]{20,}\b/g, "[API_KEY]"],
+  [/\bya29\.(?:c\.)?[A-Za-z0-9_-]{30,}\b/g, "[API_KEY]"],
+  [/\bpypi-[A-Za-z0-9_-]{40,}\b/g, "[API_KEY]"],
+  [/\b(?:xai|pplx)-[A-Za-z0-9]{30,}\b/g, "[API_KEY]"],
+  [/\bdop_v1_[a-f0-9]{64}\b/g, "[API_KEY]"],
+  [/\bkey-[0-9a-f]{32}\b/g, "[API_KEY]"],
   // Service-specific credentials with canonical shapes: Slack and Discord
   // incoming-webhook URLs, a SendGrid API key, a Telegram bot token.
   [/https:\/\/hooks\.slack\.com\/services\/T[A-Za-z0-9]+\/B[A-Za-z0-9]+\/[A-Za-z0-9]+/g, "[API_KEY]"],
@@ -322,7 +334,12 @@ const RULES = [
   // where the "#" would additionally truncate the match) must be left alone -
   // replacing part of it produced corrupted output like "[SECRET]#1]" and
   // broke the placeholder→value mapping.
-  [/([?&](?:api[_-]?key|key|token|access_token|auth|sig|signature|secret|password|pwd)=)[^&\s#\[\]]+/gi, "$1[SECRET]"],
+  // The parameter name may carry a vendor prefix (X-Amz-Signature,
+  // X-Amz-Security-Token, X-Amz-Credential, X-Goog-Signature, x-api-key): a
+  // presigned URL's signature is a bearer credential for the object. The bare
+  // names "key" and "auth" stay anchored right after ?/& - letting them take a
+  // prefix too would also catch ordinary parameters such as "turkey=".
+  [/([?&](?:[\w-]*?(?:api[_-]?key|token|sig|signature|secret|password|pwd|credential)|key|auth)=)[^&\s#\[\]]+/gi, "$1[SECRET]"],
   // user:pass@host
   [/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^\s\/:@]+:[^\s\/@]+@/gi, "$1[CREDENTIALS]@"],
 

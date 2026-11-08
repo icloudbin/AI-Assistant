@@ -4,6 +4,15 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Unreleased: privacy filter catches more credentials
+
+Field report: with synthetic data, several common credential shapes were sent to the model unredacted.
+
+- **New token rules.** HuggingFace `hf_`, npm `npm_`, Replicate `r8_`, GitLab `glpat-`, Google OAuth `ya29.` (including the service-account form `ya29.c.<body>`, which the first draft of the rule would have missed), PyPI `pypi-`, xAI `xai-`, Perplexity `pplx-`, DigitalOcean `dop_v1_` and Mailgun `key-<32 hex>` are replaced with `[API_KEY]`.
+- **URL query parameters.** The parameter-name match now allows a vendor prefix, so a presigned URL's `X-Amz-Signature=`, `X-Amz-Security-Token=`, `X-Amz-Credential=`, `X-Goog-Signature=` and `x-api-key=` are redacted (the old rule needed `sig` / `signature` right after `?` or `&`). The bare names `key` and `auth` are kept anchored right after `?` / `&`: dropping them from the list would have stopped redacting `?key=…` and `&auth=…`, and letting them take a prefix would catch ordinary parameters such as `turkey=`.
+- **Documented gap.** A bare 40-character AWS secret access key (no label, no prefix) cannot be detected without redacting every 40-character identifier, so it is not; a labelled one (`AWS_SECRET_ACCESS_KEY=…`) still is. See "Privacy filter: credential coverage and known gaps" in [docs/features.md](docs/features.md).
+- **Tests.** 38 new cases in `test-pii-filter.mjs` (189 → 227): every new prefix, look-alikes that must stay unchanged, numbered-placeholder round-trip, presigned URLs, the `key` / `auth` regression guard, and a linear-time guard for the lazy prefix. Test tokens are assembled from parts so GitHub push protection does not trip on them. Fifteen of the new cases fail against the previous `pii-filter.js`.
+
 ## Architecture extraction, unit-explicit stream limits, and docs merged from PR #3 (v1.10.154)
 
 Release build for the merged pull request #3 (arch-01 / arch-02 / doc-01), plus the repairs its merge needed.

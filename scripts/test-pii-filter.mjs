@@ -92,6 +92,90 @@ const KEEP = [
 ];
 for (const input of KEEP) check(`unchanged: ${input.slice(0, 60)}`, R(input) === input, `-> ${R(input)}`);
 
+// ---- fixed-prefix developer-platform tokens + vendor-prefixed URL parameters ----
+// Every value is synthetic and assembled from parts: a contiguous "glpat-..." /
+// "hf_..." literal can trip GitHub push protection even when it is fake.
+{
+  const rep = (s, n) => s.repeat(Math.ceil(n / s.length)).slice(0, n);
+  const alnum = (n) => rep("Ab3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0xR", n);
+  const urlsafe = (n) => rep("Ab3-E6_H9jK2mN5pQ8sT1vW4yZ7cF0xR", n);
+  const hex = (n) => rep("a1b2c3d4e5f60718", n);
+
+  const TOKENS = [
+    ["HuggingFace hf_", "hf_", alnum(34)],
+    ["npm npm_", "npm_", alnum(36)],
+    ["Replicate r8_", "r8_", alnum(37)],
+    ["GitLab glpat-", "glpat-", urlsafe(20)],
+    ["Google OAuth ya29.", "ya29.", urlsafe(60)],
+    ["Google service-account ya29.c.", "ya29.c.", urlsafe(60)],
+    ["PyPI pypi-", "pypi-", urlsafe(70)],
+    ["xAI xai-", "xai-", alnum(80)],
+    ["Perplexity pplx-", "pplx-", alnum(48)],
+    ["DigitalOcean dop_v1_", "dop_v1_", hex(64)],
+    ["Mailgun key-", "key-", hex(32)],
+  ];
+  for (const [name, prefix, body] of TOKENS) {
+    const out = R(`the value is ${prefix}${body} here`);
+    check(`redacts ${name} token`, out === "the value is [API_KEY] here", `-> ${out}`);
+  }
+  const jsonOut = R(`{"hf":"hf_${alnum(34)}"}`);
+  check("token inside a JSON string is redacted, quotes kept", jsonOut === '{"hf":"[API_KEY]"}', `-> ${jsonOut}`);
+
+  // Short or differently-shaped look-alikes are ordinary text.
+  for (const keep of [
+    `hf_${alnum(12)}`, "hf_hub_download(repo_id)", "npm_config_cache=/tmp/npm", `r8_${alnum(12)}`,
+    "xai-core and pplx-api are product names", "pypi-mirror", "a key-value store", `dop_v1_${hex(10)}`,
+    `monkey-${hex(32)}`, // no word boundary before "key-"
+  ]) check(`unchanged: ${keep.slice(0, 50)}`, R(keep) === keep, `-> ${R(keep)}`);
+
+  // Numbered placeholders round-trip for the new rules too.
+  {
+    const s = createRedactionSession();
+    const text = `token hf_${alnum(34)} then ya29.c.${urlsafe(60)}`;
+    const red = R(text, s);
+    check("new token rules get numbered placeholders", red === "token [API_KEY#1] then [API_KEY#2]", red);
+    check("... and the originals are restored", restorePlaceholders(red, s) === text, restorePlaceholders(red, s));
+  }
+
+  // Presigned URLs: the signature is a bearer credential for the object.
+  const sig = hex(64);
+  const amz = `https://bucket.s3.amazonaws.com/f.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=300&X-Amz-SignedHeaders=host&X-Amz-Signature=${sig}`;
+  const amzOut = R(amz);
+  check("presigned URL: X-Amz-Signature redacted", !amzOut.includes(sig) && amzOut.endsWith("&X-Amz-Signature=[SECRET]"), amzOut);
+  check("presigned URL: the other parameters survive", amzOut.includes("?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=300&X-Amz-SignedHeaders=host&"), amzOut);
+  const goog = R(`https://storage.googleapis.com/b/o?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Signature=${sig}&X-Goog-Expires=60`);
+  check("presigned URL: X-Goog-Signature redacted mid-URL", goog.endsWith("X-Goog-Signature=[SECRET]&X-Goog-Expires=60") && !goog.includes(sig), goog);
+  const session = urlsafe(80);
+  check("presigned URL: X-Amz-Security-Token redacted", R(`https://b.s3.amazonaws.com/f?X-Amz-Security-Token=${session}&X-Amz-Expires=300`) === "https://b.s3.amazonaws.com/f?X-Amz-Security-Token=[SECRET]&X-Amz-Expires=300");
+  check("presigned URL: X-Amz-Credential redacted", R("https://b.s3.amazonaws.com/f?X-Amz-Credential=AKIDEXAMPLE%2F20240101%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20240101T000000Z") === "https://b.s3.amazonaws.com/f?X-Amz-Credential=[SECRET]&X-Amz-Date=20240101T000000Z");
+  check("vendor-prefixed x-api-key parameter redacted", R("https://a.example/v1?x-api-key=abc123XYZ789") === "https://a.example/v1?x-api-key=[SECRET]");
+
+  // The bare names the old rule covered must keep working (key, auth, sig, access_token).
+  for (const [u, want] of [
+    ["https://a.example/x?key=abc123XYZ789", "https://a.example/x?key=[SECRET]"],
+    ["https://a.example/x?id=1&auth=abc123XYZ789", "https://a.example/x?id=1&auth=[SECRET]"],
+    ["https://a.example/x?sv=2022&sig=abc123XYZ789", "https://a.example/x?sv=2022&sig=[SECRET]"],
+    ["https://a.example/x?access_token=abc123XYZ789", "https://a.example/x?access_token=[SECRET]"],
+  ]) check(`bare URL parameter still redacted: ${u.split("?")[1]}`, R(u) === want, `-> ${R(u)}`);
+
+  // A value that is already a placeholder is left alone (no "[SECRET]]" residue).
+  const jwt = ["eyJ", "hbGciOiJI", ".", "eyJzdWIiOiIx", ".", "c2lnbmF0dXJl"].join("");
+  check("placeholder value under a prefixed parameter is not corrupted", R(`https://a.example/?X-Amz-Signature=${jwt}`) === "https://a.example/?X-Amz-Signature=[JWT]");
+
+  // The prefix is not a licence to eat ordinary parameters.
+  for (const keep of [
+    "https://a.example/?turkey=abc123&author=jane&page=2&sort=asc",
+    "https://b.s3.amazonaws.com/f?X-Amz-Expires=300&X-Amz-SignedHeaders=host&X-Amz-Algorithm=AWS4-HMAC-SHA256",
+    "https://a.example/?tokenizer=bert&design=dark",
+  ]) check(`unchanged: ${keep.slice(8, 70)}`, R(keep) === keep, `-> ${R(keep)}`);
+
+  // The lazy prefix must stay linear on a long run of name characters.
+  const t0 = performance.now();
+  R("&" + "a".repeat(200000));
+  R("&a".repeat(100000));
+  check("URL-parameter rule stays fast on pathological input", performance.now() - t0 < 1500, `${(performance.now() - t0).toFixed(0)} ms`);
+}
+
 // ---- display-name rule still redacts a real name, keeps role words ----
 check('"Please Contact Support Team <a@b.com>" is not a name', !R("Please Contact Support Team <a@b.com>").includes("[NAME"), R("Please Contact Support Team <a@b.com>"));
 check('"Please contact John Smith <a@b.com>" keeps the lead words', /^Please contact \[NAME\] <\[EMAIL\]>$/.test(R("Please contact John Smith <a@b.com>")), R("Please contact John Smith <a@b.com>"));
