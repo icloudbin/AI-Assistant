@@ -9,7 +9,10 @@ const eq = (name, got, want) => {
   if (!ok) failed++;
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : `  (got ${got}, want ${want})`}`);
 };
-const allowed = (img, page) => checkImageUrl(img, page) !== null;
+// The page argument is gone from checkImageUrl: destinations are judged on
+// their own host only (no same-page exception), so the `page` values in the
+// tables below document that they are irrelevant.
+const allowed = (img) => checkImageUrl(img) !== null;
 
 // Private and intranet destinations are blocked even when they match pageUrl.
 for (const [url, page] of [

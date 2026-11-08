@@ -163,9 +163,7 @@ export function isNonPublicHost(hostname) {
 // resolve to a private address after the string-level check. Since extensions
 // cannot pin fetch() to a verified DNS result, only exact, vetted image hosts
 // and public IP literals (which require no DNS lookup) are allowed.
-// `pageUrl` is retained for call-site compatibility but deliberately grants
-// no same-origin or private-network exception.
-export function checkImageUrl(rawUrl, _pageUrl = '') {
+export function checkImageUrl(rawUrl) {
   let url;
   try {
     url = new URL(String(rawUrl));

@@ -4,6 +4,13 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Dead parameter and stale comments removed from the image-fetch path (v1.10.156)
+
+- The `pageUrl` parameter traveled through three layers (side panel → FETCH_IMAGE / FETCH_PAGE_IMAGES messages → fetchImageDataUrl → checkImageUrl) but granted nothing: the destination policy has no same-page exception (see "Privacy filter: credential coverage and known gaps" in [docs/features.md](docs/features.md)). The parameter, the message fields, and the side-panel comment that still described a same-host exception are gone; the local page URL stays in use where it genuinely resolves relative image sources and names downloads.
+- check-package's i18n reader is CRLF-tolerant (a Windows autocrlf checkout or fresh clone no longer false-fails "could not find the English table" - hit for real by this build).
+- Checked: test-url-safety re-pinned (the `page` column now documents irrelevance), full sweep (24 suites) + check-package green; real-Chrome 11/11; the extension-level E2E ran against the EXTRACTED shipped package (EXT_ROOT) - 31/31.
+- Build bumped to 1.10.156.
+
 ## Privacy filter: more credential shapes, no real names in automatic searches; tooltip fix (v1.10.155)
 
 ### Automatic web search no longer sends real names to Tavily

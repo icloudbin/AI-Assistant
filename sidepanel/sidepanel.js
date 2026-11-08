@@ -746,13 +746,9 @@ async function loadRemoteImage(box) {
   if (!/^https?:\/\//i.test(src)) return;
   box.dataset.loading = "1";
   try {
-    // The worker refuses localhost/private-network hosts unless they are the
-    // host of the page the user is on; tell it which page.
-    const activeTab = await getCurrentActiveTab().catch(() => null);
-    const pageUrl = String(activeTab?.url || "");
-    let result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src, pageUrl });
+    let result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src });
     if ((!result?.ok || !result.dataUrl) && /^http:/i.test(src)) {
-      result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src.replace(/^http:/i, "https:"), pageUrl }).catch(() => null);
+      result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src.replace(/^http:/i, "https:") }).catch(() => null);
     }
     if (result?.ok && result.dataUrl) {
       rememberRemoteImage(src, result.dataUrl);
@@ -1146,7 +1142,7 @@ const PAGE_SCREENSHOT_MAX_DIMENSION = 1600;
 const PAGE_SCREENSHOT_MAX_BYTES = 2 * 1024 * 1024;
 
 // The id of the browser window that owns THIS side panel document. There is
-// one panel per window, so every page read (text, screenshot, image pageUrl)
+// one panel per window, so every page read (text, screenshot, images)
 // must come from this window's active tab - never from whichever window
 // happens to have focus when the request is submitted. Otherwise, with panels
 // open in windows A and B, submitting from A while B is focused would read,

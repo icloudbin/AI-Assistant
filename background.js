@@ -251,8 +251,8 @@ async function readBodyCapped(resp, maxBytes) {
   return out;
 }
 
-async function fetchImageDataUrl(rawUrl, maxBytes, allowedTypes, pageUrl = "", { timeoutMs = IMAGE_FETCH_TIMEOUT_MS, signal } = {}) {
-  const url = checkImageUrl(rawUrl, pageUrl);
+async function fetchImageDataUrl(rawUrl, maxBytes, allowedTypes, { timeoutMs = IMAGE_FETCH_TIMEOUT_MS, signal } = {}) {
+  const url = checkImageUrl(rawUrl);
   if (!url) throw new Error("blocked");
 
   const controller = new AbortController();
@@ -279,7 +279,7 @@ async function fetchImageDataUrl(rawUrl, maxBytes, allowedTypes, pageUrl = "", {
     });
     // Defense in depth: with redirects refused this should always equal the
     // requested URL, but keep verifying the final destination.
-    if (resp.url && !checkImageUrl(resp.url, pageUrl)) {
+    if (resp.url && !checkImageUrl(resp.url)) {
       resp.body?.cancel().catch(() => {});
       throw new Error("blocked");
     }
@@ -309,10 +309,9 @@ async function fetchImageDataUrl(rawUrl, maxBytes, allowedTypes, pageUrl = "", {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === "FETCH_IMAGE" && typeof msg.url === "string") {
     if (!isOwnExtensionPage(sender)) return false;
-    const pageUrl = typeof msg.pageUrl === "string" ? msg.pageUrl : "";
     (async () => {
       try {
-        const dataUrl = await fetchImageDataUrl(msg.url, 10 * 1024 * 1024, /^image\/(png|jpeg|gif|webp|bmp)$/, pageUrl);
+        const dataUrl = await fetchImageDataUrl(msg.url, 10 * 1024 * 1024, /^image\/(png|jpeg|gif|webp|bmp)$/);
         sendResponse({ ok: true, dataUrl });
       } catch {
         // Deliberately no detail: timing/error text must not become a probe
@@ -325,7 +324,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg?.type === "FETCH_PAGE_IMAGES" && Array.isArray(msg.urls)) {
     if (!isOwnExtensionPage(sender)) return false;
-    const pageUrl = typeof msg.pageUrl === "string" ? msg.pageUrl : "";
     (async () => {
       const urls = [...new Set(msg.urls.filter((url) => typeof url === "string"))].slice(0, PAGE_IMAGE_MAX_COUNT * 2);
       // All at once, under one overall budget (see the PAGE_IMAGE_* constants
@@ -339,7 +337,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const budgetTimer = setTimeout(() => budget.abort(), PAGE_IMAGE_TOTAL_BUDGET_MS);
       const settled = await Promise.allSettled(
         urls.map((url) =>
-          fetchImageDataUrl(url, PAGE_IMAGE_MAX_BYTES, /^image\/(png|jpeg|gif|webp)$/, pageUrl, {
+          fetchImageDataUrl(url, PAGE_IMAGE_MAX_BYTES, /^image\/(png|jpeg|gif|webp)$/, {
             timeoutMs: PAGE_IMAGE_FETCH_TIMEOUT_MS,
             signal: budget.signal,
           })
