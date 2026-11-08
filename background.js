@@ -191,17 +191,12 @@ function isOwnExtensionPage(sender) {
 //  * SVG is not accepted (the side panel's sanitizer already refuses SVG data
 //    images, and the provider-bound page-image path never allowed it);
 //  * failures are reported as a coarse "unavailable", with no network detail.
-const PAGE_IMAGE_MAX_COUNT = 4;
-const PAGE_IMAGE_MAX_BYTES = 3 * 1024 * 1024;
-const PAGE_IMAGE_MAX_TOTAL_BYTES = 8 * 1024 * 1024;
+//
+// Page images are NOT fetched here: they are fetched in the page's own context
+// (chrome.scripting.executeScript, see page-images.js), so the SSRF allowlist
+// below only gates URLs the worker fetches on the extension's behalf -
+// model-provided reply images and user-dropped image URLs.
 const IMAGE_FETCH_TIMEOUT_MS = 10000;
-// Page images are optional quick-action context: they are fetched in
-// parallel with a short per-image timeout and one overall budget, so a
-// handful of slow or hanging image hosts can never lock the composer for
-// the old serial worst case (8 URLs x 10 s = 80 s). A user-clicked
-// FETCH_IMAGE keeps the full IMAGE_FETCH_TIMEOUT_MS.
-const PAGE_IMAGE_FETCH_TIMEOUT_MS = 6000;
-const PAGE_IMAGE_TOTAL_BUDGET_MS = 15000;
 
 function sniffImageType(b) {
   if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return "png";
@@ -318,45 +313,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // for what is (or is not) listening on the user's network.
         sendResponse({ ok: false, error: "unavailable" });
       }
-    })();
-    return true;
-  }
-
-  if (msg?.type === "FETCH_PAGE_IMAGES" && Array.isArray(msg.urls)) {
-    if (!isOwnExtensionPage(sender)) return false;
-    (async () => {
-      const urls = [...new Set(msg.urls.filter((url) => typeof url === "string"))].slice(0, PAGE_IMAGE_MAX_COUNT * 2);
-      // All at once, under one overall budget (see the PAGE_IMAGE_* constants
-      // above): a slow host can no longer serialize its timeout behind the
-      // previous one. Promise.allSettled resolves in input order, so the
-      // byte accounting below still sees the page's document order; a
-      // rejected fetch (blocked, unsupported, too large, budget hit) is
-      // simply skipped - page images are optional context and must not
-      // prevent the requested text operation.
-      const budget = new AbortController();
-      const budgetTimer = setTimeout(() => budget.abort(), PAGE_IMAGE_TOTAL_BUDGET_MS);
-      const settled = await Promise.allSettled(
-        urls.map((url) =>
-          fetchImageDataUrl(url, PAGE_IMAGE_MAX_BYTES, /^image\/(png|jpeg|gif|webp)$/, {
-            timeoutMs: PAGE_IMAGE_FETCH_TIMEOUT_MS,
-            signal: budget.signal,
-          })
-        )
-      );
-      clearTimeout(budgetTimer);
-      const images = [];
-      let totalBytes = 0;
-      for (const result of settled) {
-        if (images.length >= PAGE_IMAGE_MAX_COUNT) break;
-        if (result.status !== "fulfilled") continue;
-        const dataUrl = result.value;
-        const encoded = dataUrl.split(",", 2)[1] || "";
-        const imageBytes = Math.floor((encoded.length * 3) / 4);
-        if (totalBytes + imageBytes > PAGE_IMAGE_MAX_TOTAL_BYTES) continue;
-        totalBytes += imageBytes;
-        images.push({ name: `Web image ${images.length + 1}`, dataUrl });
-      }
-      sendResponse({ ok: true, images });
     })();
     return true;
   }

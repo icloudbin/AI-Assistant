@@ -7,6 +7,11 @@
 // user's own machine or network (localhost services, router admin pages, cloud
 // metadata endpoints such as http://169.254.169.254/ ...).
 //
+// Page images are deliberately NOT fetched here: they are fetched in the
+// page's own context (see page-images.js), which lends out no privilege and
+// therefore needs no allowlist. This gate covers the worker's FETCH_IMAGE
+// channel: model-provided reply images and user-dropped image URLs.
+//
 // Pure functions, no chrome.* calls, so they can be unit-tested in Node.
 //
 // Browser extensions do not expose a reliable DNS-resolution-and-pinning API.

@@ -124,6 +124,16 @@ function startServer() {
         res.end(Buffer.from([0x89,0x50,0x4e,0x47]));
         return;
       }
+      // Page-image probes: the same PNG served with and without a CORS header.
+      // /corsimg.png is fetched from a different origin (localhost vs
+      // 127.0.0.1) so CORS actually applies.
+      if (u.pathname === "/corsimg.png" || u.pathname === "/no-cors-img.png") {
+        const headers = { "content-type": "image/png" };
+        if (u.pathname === "/corsimg.png") headers["access-control-allow-origin"] = "*";
+        res.writeHead(200, headers);
+        res.end(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]));
+        return;
+      }
       const body = pages[u.pathname];
       if (!body) { res.writeHead(404); res.end("not found"); return; }
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -292,9 +302,32 @@ check("table keeps extra cells", table.includes("<td>3</td>") && table.includes(
     check("P3-2 Proton extraction source", protonPage?.data?.source === "proton-mail", JSON.stringify(protonPage?.data?.source));
     check("P3-2 Proton text capped and flagged", protonPage?.data?.text?.length <= 120000 && protonPage?.data?.truncated === true, `len=${protonPage?.data?.text?.length} truncated=${protonPage?.data?.truncated}`);
 
-    // Background SSRF guard through the real service worker.
-    const blocked = await page.eval(`chrome.runtime.sendMessage({ type: 'FETCH_IMAGE', url: 'http://127.0.0.1:${webPort}/secret.png', pageUrl: 'http://example.com/' })`);
+    // Background SSRF guard through the real service worker (model-provided
+    // and user-dropped image URLs; page images no longer go through it).
+    const blocked = await page.eval(`chrome.runtime.sendMessage({ type: 'FETCH_IMAGE', url: 'http://127.0.0.1:${webPort}/secret.png' })`);
     check("FETCH_IMAGE blocks a private host", blocked?.ok === false, JSON.stringify(blocked));
+
+    // Page images are fetched in the page's own context (executeScript). The
+    // injected function's fetch() must stay confined by the page's CORS rules:
+    // a source with Access-Control-Allow-Origin is readable, a source without
+    // one must fail - a canary against the isolated world ever regaining the
+    // extension's privileged network position. The image is fetched from
+    // localhost while the page is on 127.0.0.1 so the origin really differs.
+    const imgTab = await page.eval(`chrome.tabs.create({ url: 'http://127.0.0.1:${webPort}/markdown' })`);
+    await sleep(700);
+    const corsProbe = await page.eval(`chrome.scripting.executeScript({
+      target: { tabId: ${imgTab.id} },
+      func: (url) => fetch(url, { credentials: 'omit', mode: 'cors' }).then((r) => r.ok).catch(() => false),
+      args: ['http://localhost:${webPort}/corsimg.png'],
+    })`);
+    check("page-context fetch reads a CORS-enabled image", corsProbe?.[0]?.result === true, JSON.stringify(corsProbe));
+    const noCorsProbe = await page.eval(`chrome.scripting.executeScript({
+      target: { tabId: ${imgTab.id} },
+      func: (url) => fetch(url, { credentials: 'omit', mode: 'cors' }).then((r) => r.ok).catch(() => false),
+      args: ['http://localhost:${webPort}/no-cors-img.png'],
+    })`);
+    check("page-context fetch stays CORS-confined (no privileged reads)", noCorsProbe?.[0]?.result === false, JSON.stringify(noCorsProbe));
+    await page.eval(`chrome.tabs.remove(${imgTab.id})`).catch(() => {});
 
     // Options page with real APIs.
     const optTab = await page.eval(`chrome.tabs.create({ url: chrome.runtime.getURL('options/options.html') })`);

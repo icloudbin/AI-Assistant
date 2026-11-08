@@ -202,8 +202,10 @@ const PAGE_IMAGE_MIN_AREA = 12000;
 const PAGE_IMAGE_NOISE_RE = /(?:^|[-_./])(?:ad|ads|advert|advertisement|banner|avatar|icon|logo|pixel|tracking|spacer)(?:[-_./]|$)/i;
 
 // Returns a bounded list of meaningful visible <img> sources. The actual
-// image bytes are fetched later by the extension service worker, where host
-// permissions and strict size/type limits can be applied. CSS backgrounds and
+// image bytes are fetched later in the page's own context
+// (chrome.scripting.executeScript, see page-images.js), where fetch() is
+// subject to the page's own CORS rules - sources that refuse cross-origin
+// reads are skipped and reported to the user. CSS backgrounds and
 // private/cookie-authenticated resources are deliberately not collected.
 function extractPageImageUrls() {
   const urls = [];

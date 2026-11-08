@@ -28,6 +28,9 @@ import { mergeConversationLists, sortedByNewest, resolveContextEpoch, withHistor
 import { markdownToHtml } from "./rendering/markdown.js";
 import { makeTopicTitle, toStoredMessage, compressForQuota } from "./history-manager.js";
 import { sanitizeAttachmentName, normalizeAttachments, migrateLegacyConversations } from "../attachments.js";
+// Page images are fetched in the page's own context (no worker privilege) -
+// see page-images.js for why the worker's image-host allowlist does not apply.
+import { fetchImagesInPage, collectPageImageResults, PAGE_IMAGE_MAX_BYTES, PAGE_IMAGE_MAX_COUNT, PAGE_IMAGE_FETCH_TIMEOUT_MS, PAGE_IMAGE_TOTAL_BUDGET_MS } from "../page-images.js";
 import { sanitizePiiMap, usedPiiMap, restoreWithMap, restoreInHtmlText } from "../privacy/pii-filter.js";
 import { startPortKeepAlive } from "../request-keep-alive.js";
 import {
@@ -1332,15 +1335,27 @@ async function getActivePageContext(retryCount = 0, format = null) {
   return null;
 }
 
-async function fetchPageImages(imageUrls, pageUrl = "") {
-  if (!Array.isArray(imageUrls) || !imageUrls.length) return [];
+async function fetchPageImages(imageUrls, tabId) {
+  if (!Array.isArray(imageUrls) || !imageUrls.length || !Number.isInteger(tabId)) {
+    return { images: [], skipped: 0, requested: 0 };
+  }
+  const requested = [...new Set(imageUrls.filter((url) => typeof url === "string" && /^https?:\/\//i.test(url)))]
+    .slice(0, PAGE_IMAGE_MAX_COUNT * 2);
+  if (!requested.length) return { images: [], skipped: 0, requested: 0 };
   try {
-    const result = await chrome.runtime.sendMessage({ type: "FETCH_PAGE_IMAGES", urls: imageUrls, pageUrl });
-    if (!result?.ok || !Array.isArray(result.images)) return [];
-    return result.images.filter((img) => img && typeof img.dataUrl === "string" && /^data:image\/(jpeg|png|gif|webp);base64,/i.test(img.dataUrl));
+    // The overall deadline is handed to the page: a slow image host cannot
+    // outlive the budget even though a running executeScript is not
+    // cancellable from here.
+    const injection = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: fetchImagesInPage,
+      args: [requested, PAGE_IMAGE_FETCH_TIMEOUT_MS, Date.now() + PAGE_IMAGE_TOTAL_BUDGET_MS, PAGE_IMAGE_MAX_BYTES],
+    });
+    return collectPageImageResults(requested, injection?.[0]?.result);
   } catch (err) {
+    // Restricted pages (chrome://, the Web Store) refuse script injection.
     console.debug("[AI Assistant] Unable to collect webpage images:", err);
-    return [];
+    return { images: [], skipped: requested.length, requested: requested.length };
   }
 }
 
@@ -2524,8 +2539,8 @@ fileInput.addEventListener("change", async () => {
 //     pipeline as the Upload button;
 //   - an image dragged FROM THE PAGE carries no bytes, only its URL (text/html
 //     <img src> or text/uri-list): the URL is fetched through the worker's
-//     FETCH_IMAGE channel (host rules, 10 MB cap, private-host rules with the
-//     page URL, http->https fallback) and attached as a regular image;
+//     FETCH_IMAGE channel (host allowlist, 10 MB cap, private-host rules,
+//     http->https fallback) and attached as a regular image;
 //   - anything else that carries text (a page text selection, a copied URL
 //     or a link that does not look like an attachable image) is inserted
 //     into the question box at the caret;
@@ -3271,6 +3286,8 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
 
     const pageContextValid = !!pageContext && !pageContext.captureFailed;
     let automaticPageImages = [];
+    let pageImagesSkipped = 0;
+    let pageImagesRequested = 0;
     let pageScreenshot = null;
     // Page images/screenshots are optional extra context. Text-only models (the
     // GPT-OSS models) reject requests that contain image parts, which would make
@@ -3282,10 +3299,14 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     // (`attachPageVisuals` was worked out before the page question, which says
     // when a screenshot would go too.)
     if (attachPageVisuals && sendPage && pageContextValid) {
-      automaticPageImages = await fetchPageImages(pageContext.imageUrls, pageContext.url);
+      const pageImages = await fetchPageImages(pageContext.imageUrls, pageContext.tabId);
+      automaticPageImages = pageImages.images;
+      pageImagesSkipped = pageImages.skipped;
+      pageImagesRequested = pageImages.requested;
       const currentTab = await getCurrentActiveTab();
       if (currentTab?.id !== pageContext.tabId || String(currentTab?.url || "") !== pageContext.url) {
         automaticPageImages = [];
+        pageImagesSkipped = 0;
       }
     }
     if (attachPageVisuals && sendPage) {
@@ -3301,6 +3322,15 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       }
     }
     if (isCancelled()) return;
+    if (pageImagesSkipped > 0) {
+      // Page images are fetched in the page's own context, so sources that
+      // refuse cross-origin reads (or exceed the caps, or time out) are
+      // skipped - say so instead of dropping them silently.
+      addBubble("notice", t(currentLang, "pageImages_skippedNotice_template", {
+        skipped: String(pageImagesSkipped),
+        total: String(pageImagesRequested),
+      }));
+    }
     const pageVisualInputCount = automaticPageImages.length + (pageScreenshot ? 1 : 0);
     // A visual input in the provider payload is not always enough to make a
     // text-focused quick action discuss it. State explicitly that the attached

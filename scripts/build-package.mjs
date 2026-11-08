@@ -65,6 +65,7 @@ const RUNTIME_FILES = [
   "translate-lines.js",
   "translation-selection.js",
   "url-safety.js",
+  "page-images.js",
   "conversation-store.js",
   "attachments.js",
   "providers/messages.js",
