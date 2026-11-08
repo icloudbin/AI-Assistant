@@ -2234,7 +2234,13 @@ async function extractZipText(file, maxTotalChars = MAX_TOTAL_EXTRACTED_CHARS) {
     // that decode to mojibake rather than real text. Fail with a clear
     // message instead.
     if (flags & 1) throw new Error(t(currentLang, "sp_zip_error_encrypted"));
-    if (uncompressedSize > entryByteCap) { addToZipBucket(report.tooLarge, name); continue; }
+    // Judge the size by what is actually going to be read. A stored (method 0) entry
+    // is read as compressedSize bytes and decoded as they are, so a header that claims
+    // a small uncompressedSize while compressedSize is large must not get past this
+    // check (it would be copied and decoded in full, then cut to the character budget,
+    // using the budget up). A deflated entry is bounded by inflateRaw() below instead.
+    const declared = method === 0 ? Math.max(uncompressedSize, compressedSize) : uncompressedSize;
+    if (declared > entryByteCap) { addToZipBucket(report.tooLarge, name); continue; }
     if (localOffset + 30 > bytes.length || readU32(view, localOffset) !== 0x04034b50) { addToZipBucket(report.unreadable, name); continue; }
 
     const localNameLen = readU16(view, localOffset + 26);
@@ -2259,7 +2265,10 @@ async function extractZipText(file, maxTotalChars = MAX_TOTAL_EXTRACTED_CHARS) {
       addToZipBucket(report.unreadable, name);
       continue;
     }
-    if (!content) { addToZipBucket(report.tooLarge, name); continue; } // grew past the size cap while inflating
+    // null: a deflated entry grew past the size cap while inflating. The length check
+    // is the last line of defence for any entry: the bytes really read must fit the cap
+    // whatever the headers said.
+    if (!content || content.length > entryByteCap) { addToZipBucket(report.tooLarge, name); continue; }
 
     const text = decodeTextBytes(content);
     if (!text.trim()) continue;

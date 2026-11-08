@@ -134,15 +134,18 @@ try {
   // ---- build the attachments ------------------------------------------------
   const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
   const crc32 = (buf) => { let c = 0xffffffff; for (const b of buf) c = crcTable[(c ^ b) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  // An entry may carry a third element: the uncompressed size its headers CLAIM, when
+  // that should differ from the real length (a lying header).
   function zip(entries) { // stored (no compression) entries
     const chunks = []; const central = []; let offset = 0;
-    for (const [name, text] of entries) {
+    for (const [name, text, claimedSize] of entries) {
       const nameBuf = Buffer.from(name, "utf8"); const data = Buffer.from(text, "utf8"); const crc = crc32(data);
+      const claimed = claimedSize ?? data.length;
       const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x800, 6);
-      local.writeUInt32LE(crc, 14); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(nameBuf.length, 26);
+      local.writeUInt32LE(crc, 14); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(claimed, 22); local.writeUInt16LE(nameBuf.length, 26);
       chunks.push(local, nameBuf, data);
       const cen = Buffer.alloc(46); cen.writeUInt32LE(0x02014b50, 0); cen.writeUInt16LE(20, 4); cen.writeUInt16LE(20, 6); cen.writeUInt16LE(0x800, 8);
-      cen.writeUInt32LE(crc, 16); cen.writeUInt32LE(data.length, 20); cen.writeUInt32LE(data.length, 24); cen.writeUInt16LE(nameBuf.length, 28); cen.writeUInt32LE(offset, 42);
+      cen.writeUInt32LE(crc, 16); cen.writeUInt32LE(data.length, 20); cen.writeUInt32LE(claimed, 24); cen.writeUInt16LE(nameBuf.length, 28); cen.writeUInt32LE(offset, 42);
       central.push(cen, nameBuf);
       offset += 30 + nameBuf.length + data.length;
     }
@@ -237,6 +240,30 @@ try {
     const migrated = saved.find((c) => c.id === "legacy-1").messages[0];
     assert.equal(migrated.content, "Summarize this");
     assert.ok(Array.isArray(migrated.attachments) && migrated.attachments.length === 1);
+  });
+
+  await test("a stored ZIP entry is size-checked by the bytes it would read, not by the size its header claims", async () => {
+    // A stored entry is read as compressedSize bytes. big.txt says "12 bytes" in its
+    // header but really holds ~1 MB, over the 720 KB per-entry cap: it must be left out
+    // and reported as too large, not read in full and cut down afterwards. small.txt is
+    // an honest entry in the same archive (control: the archive itself is readable).
+    const BIG = "BIGMARK lorem ipsum dolor sit amet.\n".repeat(30000);
+    const lyingPath = path.join(tmp, "lying.zip");
+    fs.writeFileSync(lyingPath, zip([["big.txt", BIG, 12], ["small.txt", "SMALLMARK honest entry"]]));
+    provider.requests.length = 0;
+    await page.setInputFiles("#fileInput", lyingPath);
+    await waitFor(() => page.evaluate(() => document.querySelectorAll("#attachmentList > *").length >= 1), "the ZIP chip");
+    await sleep(800);
+    await page.fill("#questionInput", "What do the entries say?");
+    await page.click("#sendBtn");
+    await waitFor(() => provider.requests.length > 0 && provider.requests[0].finished, "the provider request");
+    await waitFor(sendEnabled, "the composer");
+    const text = userText(provider.requests[0]);
+    assert.ok(!text.includes("BIGMARK"), "the oversized stored entry reached the model although its header claimed 12 bytes");
+    // Read and cut to the character budget instead, it would also use the whole budget up
+    // and crowd the honest entry out.
+    assert.ok(text.includes("SMALLMARK honest entry"), "the honest entry of the same ZIP was not read");
+    assert.match(text, /too large, over 720 KB: 1 \(big\.txt\)/, "the oversized entry is not reported as too large");
   });
 
   assert.deepEqual(pageErrors, [], `uncaught errors in the panel: ${pageErrors.join(" | ")}`);
