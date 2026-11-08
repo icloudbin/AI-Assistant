@@ -1,6 +1,8 @@
-# Side-panel regression test for the "Read current page" toggle and the
-# webmail/banking guard. Loads the REAL sidepanel.js in Chromium with stubbed
-# chrome.* APIs.  Needs: pip install playwright (and a Chromium; set
+# Side-panel regression test for the "Read current page" checkbox: checked by
+# default, unchecking stops ordinary questions from carrying the page, and quick
+# actions (Summarize, Key Points, ...) ignore the box. Loads the REAL sidepanel.js
+# in Chromium with stubbed chrome.* APIs. (The page-privacy behaviour against a real
+# provider request is covered by scripts/e2e-page-privacy.mjs.)  Needs: pip install playwright (and a Chromium; set
 # CHROMIUM_PATH to use a specific binary).   Run: python3 scripts/test-sidepanel-context.py
 import sys, json, threading, http.server, functools, os
 from playwright.sync_api import sync_playwright
@@ -25,7 +27,7 @@ STUB = """
     runtime: { id: 'x', lastError: undefined, getURL: (p)=>location.origin+'/'+p, sendMessage: async()=>({}), onMessage: ev(), openOptionsPage(){}, 
       connect: () => ({ postMessage: (m) => window.__sent.push(m), disconnect(){}, onMessage: { addListener: (f)=>{ window.__portL=f; }, removeListener(){} }, onDisconnect: ev() }) },
     storage: { local: { get: async (k)=>pick(k), set: async (o)=>{ Object.assign(store,o); persist(); }, remove: async()=>{} }, onChanged: ev() },
-    tabs: { query: async()=>[window.__tab], get: async()=>window.__tab, create(){}, sendMessage: (id, msg, cb)=>cb({ ok: true, data: { ...window.__extract } }), onActivated: ev(), onUpdated: ev(), onRemoved: ev(), captureVisibleTab: async()=>'' },
+    tabs: { query: async()=>[window.__tab], get: async()=>window.__tab, create(){}, sendMessage: (id, msg, opts, cb)=>{ if (typeof opts === 'function') cb = opts; cb({ ok: true, data: { ...window.__extract } }); }, onActivated: ev(), onUpdated: ev(), onRemoved: ev(), captureVisibleTab: async()=>'' },
     windows: { WINDOW_ID_NONE: -1, getCurrent: async()=>({id:1}), getAll: async()=>[{id:1,focused:true,type:'normal'}], onFocusChanged: ev() },
     scripting: { executeScript: async()=>[] },
   };
@@ -42,13 +44,21 @@ def run(p, fn):
 def setpage(page, tab, ext):
     page.evaluate("([t,e])=>{sessionStorage.setItem('__tab',JSON.stringify(t));sessionStorage.setItem('__ext',JSON.stringify(e));}", [tab, ext])
 
-def ask(page, q):
-    page.evaluate("window.__sent.length=0")
-    page.fill("#questionInput", q); page.press("#questionInput","Enter"); page.wait_for_timeout(900)
+def collect_asks(page):
     res=page.evaluate("window.__sent.filter(m=>m.type==='ASK').map(m=>m.payload)")
     page.evaluate("(id)=>{ if(window.__portL){ window.__portL({type:'START',requestId:id}); window.__portL({type:'CHUNK',delta:'ok',requestId:id}); window.__portL({type:'DONE',requestId:id}); } }", res[-1]["requestId"] if res else None)
     page.wait_for_timeout(300)
     return res
+
+def ask(page, q):
+    page.evaluate("window.__sent.length=0")
+    page.fill("#questionInput", q); page.press("#questionInput","Enter"); page.wait_for_timeout(900)
+    return collect_asks(page)
+
+def quick(page, selector):
+    page.evaluate("window.__sent.length=0")
+    page.click(selector); page.wait_for_timeout(900)
+    return collect_asks(page)
 
 fails=0
 def check(name, ok, extra=""):
@@ -59,7 +69,7 @@ def check(name, ok, extra=""):
 with sync_playwright() as p:
     # 1. default ON, shows what will be sent
     def t1(page):
-        on=page.is_checked("#includeContextToggle"); bar=page.inner_text("#pageContextBar")
+        on=page.is_checked("#includeContextCheckbox"); bar=page.inner_text("#pageContextBar")
         a=ask(page,"what is this?")
         return on,bar,a
     (on,bar,a),errs=run(p,t1)
@@ -70,10 +80,10 @@ with sync_playwright() as p:
 
     # 2. turning it off is remembered across panel re-opens (reload keeps sessionStorage-backed store)
     def t2(page):
-        page.uncheck("#includeContextToggle"); page.wait_for_timeout(200)
+        page.uncheck("#includeContextCheckbox"); page.wait_for_timeout(200)
         saved=page.evaluate("window.__store.includeCurrentPageContext")
         page.reload(); page.wait_for_timeout(900)
-        on=page.is_checked("#includeContextToggle")
+        on=page.is_checked("#includeContextCheckbox")
         a=ask(page,"hello")
         return saved,on,a
     (saved,on,a),_=run(p,t2)
@@ -81,45 +91,26 @@ with sync_playwright() as p:
     check("opt-out remembered after reopening the panel", on is False)
     check("and no page is sent", a and a[0]["includePageContext"] is False and a[0]["pageContext"] is None)
 
-    # 3. webmail/banking: not sent, bar explains, allow button works for this session only
+    # 3. quick actions ignore the box: unchecked, Summarize and Key Points still send the
+    #    page, and neither changes the user's choice
     def t3(page):
-        setpage(page, {"id":7,"windowId":1,"active":True,**{"url":'https://mail.google.com/mail/u/0/#inbox',"title":'Inbox (3)'}}, {"text":'SECRET EMAIL BODY',"title":'Inbox (3)',"url":'https://mail.google.com/mail/u/0/#inbox'})
-        page.reload(); page.wait_for_timeout(900)
-        bar=page.inner_text("#pageContextBar"); btn=page.is_visible("#pageContextAllowBtn")
-        a=ask(page,"summarize my inbox")
-        page.click("#pageContextAllowBtn"); page.wait_for_timeout(300)
-        bar2=page.inner_text("#pageContextBar"); btn2=page.is_visible("#pageContextAllowBtn")
-        a2=ask(page,"summarize my inbox")
-        page.reload(); page.wait_for_timeout(900)
-        a3=ask(page,"again")
-        return bar,btn,a,bar2,btn2,a2,a3
-    (bar,btn,a,bar2,btn2,a2,a3),errs=run(p,t3)
-    check("mail site: bar says not sent + offers allow", "mail.google.com" in bar and btn, repr(bar))
-    check("mail site: ordinary question does NOT send page", a and a[0]["includePageContext"] is False and "SECRET" not in json.dumps(a[0]))
-    check("after Allow: bar shows will-send, button gone", "Will send" in bar2 and not btn2, repr(bar2))
-    check("after Allow: page is sent", a2 and a2[0]["includePageContext"] is True and "SECRET EMAIL BODY" in json.dumps(a2[0]["pageContext"]))
-    check("allow does not persist to a new panel session", a3 and a3[0]["includePageContext"] is False and "SECRET" not in json.dumps(a3[0]))
-    check("no page errors (mail)", not errs, str(errs))
+        page.uncheck("#includeContextCheckbox"); page.wait_for_timeout(200)
+        before=ask(page,"an ordinary question")
+        summarize=quick(page,"#quickSummarizeBtn")
+        keypoints=quick(page,"#quickKeyPointsBtn")
+        still_off=page.is_checked("#includeContextCheckbox")
+        saved=page.evaluate("window.__store.includeCurrentPageContext")
+        after=ask(page,"one more question")
+        return before,summarize,keypoints,still_off,saved,after
+    (before,summarize,keypoints,still_off,saved,after),errs=run(p,t3)
+    check("unchecked: an ordinary question carries no page", before and before[0]["includePageContext"] is False and before[0]["pageContext"] is None)
+    check("unchecked: Summarize still sends the page", summarize and summarize[0]["includePageContext"] is True and "PAGE TEXT" in json.dumps(summarize[0]["pageContext"]), json.dumps(summarize)[:300])
+    check("unchecked: Key Points still sends the page", keypoints and keypoints[0]["includePageContext"] is True and "PAGE TEXT" in json.dumps(keypoints[0]["pageContext"]), json.dumps(keypoints)[:300])
+    check("quick actions leave the box unchecked and the stored choice alone", still_off is False and saved is False, f"checked={still_off} saved={saved}")
+    check("after quick actions an ordinary question carries no page again", after and after[0]["includePageContext"] is False and after[0]["pageContext"] is None)
+    check("no page errors (quick actions)", not errs, str(errs))
 
-    # 4. self-hosted mail detected by extractor source
-    def t4(page):
-        setpage(page, {"id":7,"windowId":1,"active":True,**{"url":'https://nas.corp.example:5001/',"title":'MailPlus'}}, {"text":'PRIVATE MAIL',"title":'MailPlus',"url":'https://nas.corp.example:5001/',"source":'synology-mailplus'})
-        page.reload(); page.wait_for_timeout(900)
-        return ask(page,"what does it say")
-    a,_=run(p,t4)
-    check("self-hosted mail (extractor source) is blocked", a and a[0]["includePageContext"] is False and "PRIVATE" not in json.dumps(a[0]))
-
-    # 5. quick action still works on a mail page (explicit action)
-    def t5(page):
-        setpage(page, {"id":7,"windowId":1,"active":True,**{"url":'https://mail.google.com/x',"title":'Inbox'}}, {"text":'MAIL BODY',"title":'Inbox',"url":'https://mail.google.com/x'})
-        page.reload(); page.wait_for_timeout(900)
-        page.evaluate("window.__sent.length=0")
-        btns=page.query_selector_all("button[data-action], .quick-actions button, #quickActions button")
-        return len(btns)
-    n,_=run(p,t5)
-    print("INFO quick-action buttons found:", n)
-
-    # 6. an unexpected exception while preparing a request must not lock the composer
+    # 4. an unexpected exception while preparing a request must not lock the composer
     def t6(page):
         page.evaluate("window.__tab = { id: 7, windowId: 1, active: true, title: 'x', get url() { throw new Error('boom-url'); } }")
         page.evaluate("window.__sent.length=0")
