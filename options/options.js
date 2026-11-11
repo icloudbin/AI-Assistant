@@ -1331,7 +1331,14 @@ async function importSettings() {
         if (typeof value === "boolean") restored[key] = value;
       } else if (key === INCLUDE_CONTEXT_STORAGE_KEY) {
         // A checkbox value (true / false); a legacy "ask" imports as checked.
-        restored[key] = value === "ask" ? true : value === true;
+        // A file that does not carry this key - or carries something that is
+        // neither a boolean nor the legacy "ask" - must leave the stored
+        // setting alone: it used to be coerced to `false`, so importing any
+        // backup without the key (every export from a user who never touched
+        // the box omits it, since ABSENT reads as checked) silently UNCHECKED
+        // "Read current page" without showing a row for it.
+        if (value === "ask") restored[key] = true;
+        else if (typeof value === "boolean") restored[key] = value;
       } else if (typeof value === "string" && (value || !SETTINGS_BACKUP_SECRET_KEYS.includes(key))) {
         // v1 plaintext files may carry EMPTY-STRING keys: skipping those keeps
         // an existing stored key alive (the comment below promises exactly

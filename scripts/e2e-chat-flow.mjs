@@ -190,6 +190,49 @@ try {
     assert.deepEqual(await errorBubbles(), []);
   });
 
+  await test("the Stop button ends the reply on purpose and keeps what had streamed in", async () => {
+    await page.click("#clearBtn");
+    Object.assign(provider, { chunks: 100, intervalMs: 40, prefix: "k", reply: null, requests: [] }); // would run ~4 s
+    const buttons = () => page.evaluate(() => ({ send: !document.getElementById("sendBtn").hidden, stop: !document.getElementById("stopBtn").hidden }));
+    assert.deepEqual(await buttons(), { send: true, stop: false }, "idle: Send is shown, Stop is not");
+    await ask("a long answer worth keeping");
+    await waitFor(async () => (await lastReply()).includes("k3"), "the stream to be under way");
+    assert.deepEqual(await buttons(), { send: false, stop: true }, "streaming: Stop takes Send's place");
+    const stopAt = Date.now();
+    await page.click("#stopBtn");
+    const rec = provider.requests[0];
+    await waitFor(() => rec.closedByClientAt || rec.finished, "the server to see the connection end", 6000);
+    const lag = rec.closedByClientAt ? rec.closedByClientAt - stopAt : Infinity;
+    await sleep(500); // anything still being produced would show up now
+    assert.equal(rec.finished, false, `the provider streamed to completion (${rec.written}/${rec.total} chunks) after Stop`);
+    assert.ok(lag < 1000, `connection closed ${lag} ms after Stop`);
+    assert.ok(rec.written < 60, `provider wrote ${rec.written}/${rec.total} chunks`);
+    assert.deepEqual(await errorBubbles(), [], "Stop is not an error");
+    await waitFor(sendEnabled, "the composer to unlock");
+    assert.deepEqual(await buttons(), { send: true, stop: false }, "idle again: Send is back");
+    // What had streamed in is still on screen: the bubble is a finished reply, not a pending one.
+    const shown = await lastReply();
+    assert.ok(shown.includes("k3"), `the partial reply disappeared: ${shown}`);
+    assert.ok(!shown.includes("k99"), "the reply kept growing after Stop");
+    assert.equal(await page.evaluate(() => document.querySelectorAll(".bubble.assistant.pending").length), 0, "the kept reply must not stay marked as pending");
+    // ... and it is saved as a finished assistant turn.
+    const savedReply = async () => {
+      const saved = await worker.evaluate(async () => (await chrome.storage.local.get("conversationHistory")).conversationHistory);
+      const convo = saved?.find((c) => c.messages?.some((m) => m.role === "user" && m.content === "a long answer worth keeping"));
+      return convo?.messages?.find((m) => m.role === "assistant")?.content || "";
+    };
+    await waitFor(async () => (await savedReply()).includes("k3"), "the partial reply to be saved");
+    assert.ok(!(await savedReply()).includes("k99"), "the saved reply is longer than what was shown");
+    // The conversation goes on normally, and the follow-up carries the kept reply.
+    Object.assign(provider, { chunks: 3, intervalMs: 20, prefix: "n", reply: null, requests: [] });
+    await ask("go on");
+    await waitFor(async () => (await lastReply()).includes("n2"), "the follow-up reply");
+    await waitFor(sendEnabled, "the composer to unlock");
+    const sent = provider.requests[0].body.messages;
+    assert.ok(sent.some((m) => m.role === "assistant" && String(m.content).includes("k3")), "the follow-up must carry the reply that was kept");
+    assert.deepEqual(await errorBubbles(), []);
+  });
+
   await test("context-menu 'Translate selected text' still works end to end (E-04)", async () => {
     await page.click("#clearBtn");
     Object.assign(provider, { chunks: 8, intervalMs: 20, prefix: "x", reply: "[1] Bonjour le monde.\n", requests: [] });

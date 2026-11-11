@@ -200,6 +200,31 @@ try {
     assert.equal(await boxNow(), false, "the unchecked box was not imported");
   });
 
+  // A file that does not carry the key says nothing about it. It used to be
+  // coerced to an explicit `false`, so importing ANY backup without the key
+  // (every export from a user who never touched the box - ABSENT reads as
+  // checked) silently unchecked "Read current page" through a non-risky row.
+  await test("S-05: a file that does not carry 'Read current page' leaves the box alone", async () => {
+    await resetMine(); // theme "dark": the file's "light" is the one change in the dialog
+    await worker.evaluate((k) => chrome.storage.local.remove(k), KEY); // ABSENT = checked
+    await page.setInputFiles("#importSettingsFile", settingsFile("nokey.json", { themePreference: "light" }));
+    await waitUntil(dialogOpen, "the review dialog");
+    const rowTexts = await page.$$eval("dialog.import-review .import-row", (els) => els.map((e) => e.textContent));
+    assert.ok(!rowTexts.some((text) => text.includes("Read current page")), `the dialog lists a change to 'Read current page': ${JSON.stringify(rowTexts)}`);
+    await page.click("dialog.import-review .actions button:not(.secondary)");
+    await waitUntil(async () => !(await dialogOpen()), "the dialog to close");
+    await sleep(300);
+    assert.equal(await boxNow(), undefined, "the box was written although the file did not carry it");
+  });
+
+  await test("S-05: a file with no recognised setting is refused and changes nothing", async () => {
+    await setBox(true);
+    await page.setInputFiles("#importSettingsFile", settingsFile("unknown.json", { somethingElse: 1 }));
+    await waitUntil(async () => /Not an AI Assistant settings backup file/.test(await msg()), "the refusal message");
+    assert.equal(await dialogOpen(), false, "a dialog opened for a file with no recognised setting");
+    assert.equal(await boxNow(), true, "the box changed although nothing in the file was a setting");
+  });
+
   assert.deepEqual(pageErrors, [], `uncaught errors in the page: ${pageErrors.join(" | ")}`);
 } finally {
   await context.close();

@@ -216,8 +216,8 @@ body.panel-resizing * { cursor: row-resize !important; user-select: none !import
 .bubble-text a:hover { color: var(--accent); }
 .remote-image { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; padding: 4px 8px; margin: 2px 0; border: 1px dashed var(--border, #888); border-radius: 6px; font-size: 0.9em; opacity: 0.9; cursor: pointer; }
 .remote-image:hover, .remote-image:focus-visible { opacity: 1; border-style: solid; }
-.remote-image.failed { cursor: default; opacity: 0.8; }
-.remote-image.has-query { border-color: var(--warning, #c58a00); }
+.remote-image.failed, .remote-image.untrusted { cursor: default; opacity: 0.8; }
+.remote-image.has-query, .remote-image.untrusted { border-color: var(--warning, #c58a00); }
 .remote-image-warning { flex-basis: 100%; font-size: 0.9em; }
 .bubble-text img {
   display: block;
@@ -495,6 +495,20 @@ button#sendBtn {
   font-weight: 600;
 }
 button#sendBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* While a reply is being produced the Send button gives way to Stop, in the
+   same place; the two are never visible together. */
+button#sendBtn[hidden], button#stopBtn[hidden] { display: none; }
+button#stopBtn {
+  min-width: 64px;
+  background: var(--danger);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  padding: 0 16px;
+  cursor: pointer;
+  font-weight: 600;
+}
+button#stopBtn:hover { filter: brightness(1.08); }
 
 /* ---------- Modal questions (sidepanel/dialogs.js) ---------- */
 dialog.ai-dialog {

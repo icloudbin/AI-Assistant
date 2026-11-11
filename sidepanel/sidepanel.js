@@ -13,7 +13,7 @@ import {
   COMPOSER_HEIGHT_STORAGE_KEY,
   MIC_LANG_STORAGE_KEY,
 } from "../storage-keys.js";
-import { hostOf } from "../url-safety.js";
+import { hostOf, checkReplyImageUrl } from "../url-safety.js";
 // S-05: the rules for "does this request send the page?" (pure, unit-tested) and
 // the modal questions the panel asks.
 import { showNoticeDialog, dismissDialog } from "./dialogs.js";
@@ -151,6 +151,7 @@ const emptyState = document.getElementById("emptyState");
 const chatForm = document.getElementById("chatForm");
 const questionInput = document.getElementById("questionInput");
 const sendBtn = document.getElementById("sendBtn");
+const stopBtn = document.getElementById("stopBtn");
 const clearBtn = document.getElementById("clearBtn");
 const optionsBtn = document.getElementById("optionsBtn");
 const includeContextCheckbox = document.getElementById("includeContextCheckbox");
@@ -660,9 +661,12 @@ function sanitizeRenderedHtml(html) {
 // remote images are NEVER loaded automatically: the panel's CSP allows only
 // 'self' and data: images, and each remote image is shown as a placeholder
 // that shows its address. Only when the user clicks it is the image fetched,
-// through the background worker (public hosts only, size/type checked), and
-// shown as a data URL. Loaded images are remembered so streaming re-renders
-// do not turn them back into placeholders.
+// through the background worker (size/type checked), and shown as a data URL.
+// The worker fetches a reply image only from the vetted image hosts
+// (checkReplyImageUrl in url-safety.js): any other address - a public IP
+// literal included, which is a server the reply's author can run - is shown as
+// a placeholder that cannot be loaded and says so up front. Loaded images are
+// remembered so streaming re-renders do not turn them back into placeholders.
 const loadedRemoteImages = new Map(); // url -> data URL, LRU order: oldest first
 // The panel document lives for a whole browsing session and every fetched
 // image is a data URL of up to 10 MB (FETCH_IMAGE's cap in background.js),
@@ -706,8 +710,6 @@ function remoteImageNode(doc, url, alt) {
   }
   const box = doc.createElement("span");
   box.className = "remote-image";
-  box.setAttribute("role", "button");
-  box.setAttribute("tabindex", "0");
   box.setAttribute("data-src", url);
   box.setAttribute("data-alt", alt);
   box.setAttribute("title", url);
@@ -716,10 +718,25 @@ function remoteImageNode(doc, url, alt) {
 }
 
 // What a remote-image placeholder says BEFORE the user clicks: where the image
-// comes from (the host name, in plain sight) and - when the address carries a
-// query string - that loading it sends those parameters to that host. A model
-// reply steered by a page can put anything it saw into such a query; the
-// panel never loads it by itself, and this tells the user what a click does.
+// comes from (the host name, in plain sight) and what a click does.
+//  - An address on a vetted image host can be loaded. When it carries a query
+//    string the placeholder also says that loading it sends those parameters to
+//    that host.
+//  - Any other address cannot be: the worker refuses it (checkReplyImageUrl). A
+//    model reply steered by a page can put anything it saw into the address -
+//    into the PATH as well as the query - so the placeholder is not clickable,
+//    says that it is not loaded, warns that opening the address sends all of it
+//    to that host, and leaves a plain link for a user who wants it anyway.
+// The panel never loads a remote image by itself.
+function remoteImageOpenLink(src) {
+  const link = document.createElement("a");
+  link.href = src;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = t(currentLang, "imageBlockedHttp_open");
+  return link;
+}
+
 function fillRemoteImageBox(box, url, alt) {
   let host = "";
   let hasQuery = false;
@@ -728,15 +745,25 @@ function fillRemoteImageBox(box, url, alt) {
     host = u.hostname;
     hasQuery = u.search.length > 1;
   } catch { /* the sanitizer only passes http(s) URLs here; keep the label plain */ }
-  const label = `🖼️ ${t(currentLang, "imageRemote_load")}${host ? ` ${t(currentLang, "imageRemote_host_template", { host })}` : ""}${alt.trim() ? ` - ${alt.trim()}` : ""}`;
+  const loadable = checkReplyImageUrl(url) !== null;
+  const label = `🖼️ ${t(currentLang, loadable ? "imageRemote_load" : "imageRemote_untrusted")}${host ? ` ${t(currentLang, "imageRemote_host_template", { host })}` : ""}${alt.trim() ? ` - ${alt.trim()}` : ""}`;
   box.textContent = label;
   box.classList.toggle("has-query", hasQuery);
-  if (hasQuery) {
+  box.classList.toggle("untrusted", !loadable);
+  if (loadable) {
+    box.setAttribute("role", "button");
+    box.setAttribute("tabindex", "0");
+  } else {
+    box.removeAttribute("role");
+    box.removeAttribute("tabindex");
+  }
+  if (!loadable || hasQuery) {
     const warning = document.createElement("span");
     warning.className = "remote-image-warning";
-    warning.textContent = t(currentLang, "imageRemote_queryWarning_template", { host });
+    warning.textContent = t(currentLang, loadable ? "imageRemote_queryWarning_template" : "imageRemote_untrustedWarning_template", { host });
     box.append(warning);
   }
+  if (!loadable) box.append(" ", remoteImageOpenLink(url));
 }
 
 // Re-label remote-image placeholders already rendered in the chat when the
@@ -751,14 +778,16 @@ function refreshRemoteImageLabels() {
 }
 
 async function loadRemoteImage(box) {
-  if (box.dataset.loading === "1") return;
+  if (box.dataset.loading === "1" || box.classList.contains("untrusted")) return;
   const src = box.getAttribute("data-src") || "";
   if (!/^https?:\/\//i.test(src)) return;
   box.dataset.loading = "1";
   try {
-    let result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src });
+    // source:"reply" marks this as a model-reply image: the worker then
+    // fetches it from the vetted image hosts only.
+    let result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src, source: "reply" });
     if ((!result?.ok || !result.dataUrl) && /^http:/i.test(src)) {
-      result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src.replace(/^http:/i, "https:") }).catch(() => null);
+      result = await chrome.runtime.sendMessage({ type: "FETCH_IMAGE", url: src.replace(/^http:/i, "https:"), source: "reply" }).catch(() => null);
     }
     if (result?.ok && result.dataUrl) {
       rememberRemoteImage(src, result.dataUrl);
@@ -774,22 +803,20 @@ async function loadRemoteImage(box) {
   box.dataset.loading = "0";
   box.classList.add("failed");
   box.textContent = `🚫 ${t(currentLang, "imageRemote_failed")}`;
-  const link = document.createElement("a");
-  link.href = src;
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  link.textContent = t(currentLang, "imageBlockedHttp_open");
-  box.append(" ", link);
+  box.append(" ", remoteImageOpenLink(src));
 }
 
+// A placeholder that failed, or that is not loadable in the first place
+// (untrusted), is not a button; its "Open" link must keep its own Enter key.
+const isLoadableRemoteImageBox = (box) => box && !box.classList.contains("failed") && !box.classList.contains("untrusted");
 chatLog.addEventListener("click", (event) => {
   const box = event.target?.closest?.(".remote-image");
-  if (box && !box.classList.contains("failed")) loadRemoteImage(box);
+  if (isLoadableRemoteImageBox(box)) loadRemoteImage(box);
 });
 chatLog.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") return;
   const box = event.target?.closest?.(".remote-image");
-  if (box && !box.classList.contains("failed")) { event.preventDefault(); loadRemoteImage(box); }
+  if (isLoadableRemoteImageBox(box)) { event.preventDefault(); loadRemoteImage(box); }
 });
 
 // Copies text to the clipboard, preferring the modern async Clipboard API
@@ -1085,6 +1112,9 @@ function setStreaming(streaming) {
     stopRequestKeepAlive = null;
   }
   sendBtn.disabled = streaming;
+  // Stop takes Send's place while a request is in flight (and only then).
+  sendBtn.hidden = streaming;
+  stopBtn.hidden = !streaming;
   questionInput.disabled = streaming;
   quickActionButtons.forEach((button) => { button.disabled = streaming; });
   modelSelect.disabled = streaming;
@@ -1142,6 +1172,54 @@ function stopActiveRequest() {
   autoScrollEnabled = false;
   setStreaming(false);
 }
+
+// The composer's Stop button. Ends the in-flight request on purpose and KEEPS
+// what has streamed in so far as a finished assistant turn - the shape the
+// mid-stream ERROR path leaves (see handlePortMessage), without the error
+// notice, because the user asked for this. stopActiveRequest() above is the
+// other kind of stop, for Clear / switching conversations, where the whole
+// reply is thrown away with the conversation.
+// It also works before the request has left the panel (page text, screenshots
+// and images are still being gathered): handleSubmit then sees isCancelled()
+// and sends nothing, and the question stays in the conversation unanswered
+// (background.js folds an unanswered user turn into the next request).
+function stopGeneration() {
+  if (!isStreaming) return;
+  const stoppedRequestId = currentRequestId;
+  // Cleared first so handlePortMessage ignores whatever is still on its way for
+  // this request (a chunk queued before the abort reached the fetch).
+  currentRequestId = null;
+  if (port) {
+    try {
+      port.postMessage({ type: "STOP", requestId: stoppedRequestId });
+    } catch {}
+  }
+  // Paint the whole tail that was received before the bubble is finalized.
+  flushStreamingRender();
+  const textToKeep = currentAssistantText.trim();
+  if (currentAssistantBubble) {
+    if (textToKeep) currentAssistantBubble.classList.remove("pending");
+    else currentAssistantBubble.remove();
+    currentAssistantBubble = null;
+  }
+  if (textToKeep) {
+    history.push(createMessage({
+      role: "assistant",
+      content: textToKeep,
+      displayContent: currentAssistantText,
+      ...piiMapField(currentAssistantText),
+      modelLabel: pendingModelLabel,
+      modelId: pendingModelId,
+      plain: pendingPlainReply,
+    }, history));
+    saveConversations().catch(notifyHistorySaveFailure);
+  }
+  currentAssistantText = "";
+  currentPiiMap = null;
+  autoScrollEnabled = false;
+  setStreaming(false);
+}
+stopBtn.addEventListener("click", stopGeneration);
 
 // MAX_PAGE_CONTEXT_CHARS (imported from models.js, shared with background.js)
 // must stay equal to content.js's PAGE_CONTEXT_CHAR_LIMIT, so the panel never
@@ -3677,10 +3755,12 @@ chatForm.addEventListener("submit", handleSubmit);
 // whatever the "Read current page" checkbox says.
 // The page's current selection as Markdown ("" when nothing is selected or the
 // page is unreachable). Used by the Fact Check quick action: the claim is the
-// user's own highlighted text - the documented unfiltered-claim exception
-// (privacy-policy.md, pii-filter.js header) - and it cannot be derived from the
-// redacted page text, where placeholders like [SIN#1] or [PHONE#1] make the
-// search useless. Same messaging as getActivePageContext: top frame only, one
+// user's own highlighted text. It is read raw here, but the background worker's
+// privacy filter redacts it like every other field before anything is sent;
+// only [NAME#n] placeholders are restored, in its Tavily query (privacy-policy.md,
+// pii-filter.js header). It cannot be derived from the page text, which is
+// redacted in its entirety and has no notion of what the user highlighted.
+// Same messaging as getActivePageContext: top frame only, one
 // content-script re-injection when none is reachable, bounded timeout. Any
 // failure returns "", so Fact Check falls back to claims from the (redacted)
 // page text exactly as before.
@@ -3723,9 +3803,9 @@ async function runQuickPageAction(apiPromptKey, displayPromptKey, factCheck = fa
   // Fact Check keeps its dedicated Tavily path. Explain performs Tavily
   // research for supporting context; the remaining quick actions stay local.
   // The fact-check claim is the user's current page selection: this argument
-  // used to be hardcoded "", so the documented unfiltered-claim exception in
-  // the background ASK handler (see there) never had anything to pass through
-  // and every search ran on claims mined from the REDACTED page text. An empty
+  // used to be hardcoded "", so every search ran on claims mined from the
+  // REDACTED page text. The background worker filters the selection like any
+  // other field and restores only [NAME#n] in its Tavily query. An empty
   // selection still sends "" - background then falls back to page claims.
   const factCheckSelectedText = factCheck ? await getActivePageSelection() : "";
   await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck, factCheckSelectedText, !factCheck && !forceWebResearch, true, forceWebResearch, translateMode);

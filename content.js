@@ -1380,9 +1380,9 @@ globalThis.__aiAssistantMessageListener = (msg, sender, sendResponse) => {
     // A selection read clones only the selected range (no whole-DOM walk), so
     // it answers synchronously instead of going through the idle-slot path
     // below. Used by the Fact Check quick action: the claim is the user's own
-    // highlighted text - the documented unfiltered-claim exception - and it
-    // cannot be derived from the redacted page text (see
-    // getActivePageSelection in sidepanel.js). data is null with no selection.
+    // highlighted text, read raw here and filtered by the background worker
+    // before it is sent anywhere (see getActivePageSelection in sidepanel.js).
+    // data is null with no selection.
     try {
       sendResponse({ ok: true, data: globalThis.__aiAssistantPageExtractor().extractSelectionMarkdown() });
     } catch (err) {

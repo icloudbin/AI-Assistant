@@ -176,5 +176,29 @@ await test("replay that is incomplete too keeps the first attempt", async () => 
   assert.equal(r.notices.length, 1);
 });
 
+// A correct model hands names, acronyms and commands back unchanged. That is a
+// COMPLETE translation: such an echo used to count as a missing line, which
+// replayed the whole request (the echo was judged missing again) and then
+// announced "N lines were not translated" (round-18 #18).
+await test("names / commands / acronyms returned unchanged are not missing lines: no replay, no notice", async () => {
+  const src = ["GitHub", "npm install", "OK", "Second line here."].join("\n");
+  const reply = "[1] GitHub\n[2] npm install\n[3] OK\n[4] Deuxieme ligne ici.";
+  const r = await runTranslation(src, [reply, reply]);
+  assert.ok(r.done, `request did not finish: ${JSON.stringify(r.error)}`);
+  assert.equal(r.calls, 1, "an unchanged name must not trigger the replay request");
+  assert.equal(r.reply, ["GitHub", "npm install", "OK", "Deuxieme ligne ici."].join("\n"));
+  assert.equal(r.notices.length, 0, "no missing-lines notice for a complete translation");
+});
+
+await test("a whole SENTENCE echoed back is still a missing line (replayed once, notice if it stays)", async () => {
+  const src = ["Hello world.", "Second line here."].join("\n");
+  const echoReply = "[1] Hello world.\n[2] Deuxieme ligne ici.";
+  const r = await runTranslation(src, [echoReply, echoReply]);
+  assert.ok(r.done, `request did not finish: ${JSON.stringify(r.error)}`);
+  assert.equal(r.calls, 2, "an echoed sentence is replayed once");
+  assert.equal(r.reply, ["Hello world.", "Deuxieme ligne ici."].join("\n"));
+  assert.equal(r.notices.length, 1, "the replay echoed it too, so the missing-lines notice stays");
+});
+
 console.log(`\n${results.filter(Boolean).length}/${results.length} passed`);
 process.exit(results.every(Boolean) ? 0 : 1);

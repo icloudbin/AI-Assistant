@@ -10,14 +10,14 @@
 // (e.g. "Name:", "My name is", "Dear", "姓名", "我叫", email display names).
 // It is a safety net, not a guarantee.
 //
-// Two deliberate exceptions (both needed for search / answers to work):
-//   - A fact-check request goes out UNFILTERED: redacting the claim makes it
-//     unsearchable and unanswerable (background.js skips question + selectedText).
-//   - A web search the user EXPLICITLY asked for ("search the web ...") carries
-//     real names (restoreNamePlaceholders): a search for a public fact is
-//     useless with the name blinded. An AUTOMATIC lookup never does - it is
-//     skipped when the question holds a name placeholder. Every other field,
-//     and every other kind of PII, stays redacted.
+// One deliberate exception (needed for search to work): the Tavily query of a
+// web search the user EXPLICITLY asked for ("search the web ...") - and of a
+// Fact Check of text they highlighted - carries real names
+// (restoreNamePlaceholders): a search for a public fact is useless with the
+// name blinded. The AI provider still sees placeholders. An AUTOMATIC lookup
+// never restores a name - it is skipped when the question holds a name
+// placeholder. Every other field, and every other kind of PII (a fact-check
+// claim included), stays redacted.
 
 import { parseIPv6 } from "../url-safety.js";
 
@@ -593,8 +593,11 @@ function expandReplacement(rep, args) {
 }
 
 // `full` was replaced by `replaced`; give the placeholder that appeared in its
-// place a number and remember what it stands for.
-function numberPlaceholder(full, replaced, session) {
+// place a number and remember what it stands for. `origFull` is the text the
+// user actually typed at that spot when `full` is its ASCII-folded shadow (see
+// foldFullWidth): the value that is remembered, and later shown back, is the
+// typed one. It always has the same length as `full`.
+function numberPlaceholder(full, replaced, session, origFull = full) {
   if (full === replaced) return replaced;
   let p = 0;
   const max = Math.min(full.length, replaced.length);
@@ -615,13 +618,46 @@ function numberPlaceholder(full, replaced, session) {
     replaced.length - 1 - close <= s &&
     /^\[[A-Z_]+\]$/.test(replaced.slice(open, close + 1))
   ) {
-    const originalPart = full.slice(open, full.length - (replaced.length - 1 - close));
+    const originalPart = origFull.slice(open, full.length - (replaced.length - 1 - close));
     if (originalPart) {
       const type = /^\[([A-Z_]+)\]$/.exec(replaced.slice(open, close + 1))[1];
       return replaced.slice(0, open) + placeholderFor(session, type, originalPart) + replaced.slice(close + 1);
     }
   }
   return replaced; // unusual shape: keep the plain placeholder
+}
+
+// ---------- full-width forms ----------
+//
+// Every rule above is written for ASCII digits and punctuation, so a value typed
+// in full-width form - "０９０－１２３４－５６７８", a card number grouped with
+// ideographic spaces (U+3000), "１１０１０５１９４９１２３１００２Ｘ",
+// "ｊａｎｅ＠ｅｘａｍｐｌｅ．ｃｏｍ" - matched nothing and went out in plain text
+// (Japanese and Chinese input methods produce these routinely). Matching
+// therefore runs on a SHADOW copy of the text in which these characters are
+// folded to their ASCII counterparts. The fold is one UTF-16 unit for one unit,
+// so a match offset in the shadow is the same offset in the real text:
+// placeholders are spliced into the REAL text, which keeps its own full-width
+// punctuation everywhere outside the matched value, and a placeholder's mapping
+// stores the value exactly as the user typed it, so the reply shows it back
+// unchanged.
+//
+// Only digits, Latin letters and the separators that occur INSIDE numbers and
+// addresses (－ ． ＋ ＠ and the ideographic space) are folded. Deliberately NOT
+// folded: the full-width colon and slash, the underscore and CJK punctuation
+// such as ，。（）？！. Several lookbehinds refuse a match right after an ASCII
+// ":" - (?<![\w:-]) for a MAC address, (?<![\w:.]) for IPv6, a bare phone
+// number's - and a Chinese or Japanese label is usually followed by exactly that
+// colon ("MAC地址：00:1A:2B:3C:4D:5E"): folding it would hide values that are
+// redacted today. The bare secret value likewise stops at CJK punctuation on
+// purpose. Text whose only full-width characters are those - ordinary Chinese
+// prose - never takes the shadow path at all.
+const FULLWIDTH_CHARS = "[\\uFF10-\\uFF19\\uFF21-\\uFF3A\\uFF41-\\uFF5A\\uFF0B\\uFF0D\\uFF0E\\uFF20\\u3000]";
+const FULLWIDTH_TEST_RE = new RegExp(FULLWIDTH_CHARS);
+const FULLWIDTH_FOLD_RE = new RegExp(FULLWIDTH_CHARS, "g");
+const PLACEHOLDER_TOKEN_RE = /\[[A-Z_]+(?:#\d+)?\]/g;
+function foldFullWidth(text) {
+  return text.replace(FULLWIDTH_FOLD_RE, (c) => (c.charCodeAt(0) === 0x3000 ? " " : String.fromCharCode(c.charCodeAt(0) - 0xFEE0)));
 }
 
 // With a session, placeholders are numbered and remembered; without one the
@@ -632,19 +668,70 @@ export function redactSensitive(text, session = null) {
   // value never gets the same number as text such as "use [EMAIL#1] literally".
   reservePlaceholders(text, session);
   let out = text;
+  // `shadow` mirrors `out` with full-width characters folded to ASCII (see
+  // above); null for text that has none, which is matched exactly as it stands.
+  let shadow = FULLWIDTH_TEST_RE.test(text) ? foldFullWidth(text) : null;
   for (const [re, rep, pre] of RULES) {
     // A cheap prefilter (the CN address rule) can skip a rule whose
     // expensive regex cannot possibly match the current text.
-    if (pre && !pre(out)) continue;
-    if (!session) {
-      out = out.replace(re, rep);
+    if (pre && !pre(shadow ?? out)) continue;
+    if (shadow === null) {
+      if (!session) {
+        out = out.replace(re, rep);
+        continue;
+      }
+      out = out.replace(re, (...args) => {
+        const full = args[0];
+        const replaced = typeof rep === "function" ? rep(...args) : expandReplacement(rep, args);
+        return typeof replaced === "string" ? numberPlaceholder(full, replaced, session) : replaced;
+      });
       continue;
     }
-    out = out.replace(re, (...args) => {
+    // Text with full-width characters: the rule matches the shadow, the result
+    // is spliced into the real text at the same offsets.
+    let nextOut = "";
+    let nextShadow = "";
+    let cursor = 0;
+    let matched = false;
+    shadow.replace(re, (...args) => {
       const full = args[0];
-      const replaced = typeof rep === "function" ? rep(...args) : expandReplacement(rep, args);
-      return typeof replaced === "string" ? numberPlaceholder(full, replaced, session) : replaced;
+      const tail = args[args.length - 1];
+      const offset = tail !== null && typeof tail === "object" ? args[args.length - 3] : args[args.length - 2];
+      const produced = typeof rep === "function" ? rep(...args) : expandReplacement(rep, args);
+      const replaced = typeof produced === "string" ? produced : String(produced);
+      const origFull = out.slice(offset, offset + full.length);
+      const numbered = session ? numberPlaceholder(full, replaced, session, origFull) : replaced;
+      // What the rule kept at either end of the match (a label, a cue word, the
+      // separator after it) comes back from the REAL text, full-width characters
+      // intact; only the changed middle is new.
+      let keepHead = 0;
+      const max = Math.min(full.length, numbered.length);
+      while (keepHead < max && full[keepHead] === numbered[keepHead]) keepHead++;
+      let keepTail = 0;
+      while (keepTail < max - keepHead && full[full.length - 1 - keepTail] === numbered[numbered.length - 1 - keepTail]) keepTail++;
+      // A kept stretch must never end INSIDE a placeholder token: text that
+      // merely shares a few characters with "[COOKIE#1]" would otherwise be
+      // spliced in from the real text and corrupt the token.
+      for (const token of numbered.matchAll(PLACEHOLDER_TOKEN_RE)) {
+        const start = token.index;
+        const end = start + token[0].length;
+        if (keepHead > start && keepHead < end) keepHead = start;
+        const tailStart = numbered.length - keepTail;
+        if (tailStart > start && tailStart < end) keepTail = numbered.length - end;
+      }
+      matched = true;
+      nextOut += out.slice(cursor, offset)
+        + origFull.slice(0, keepHead)
+        + numbered.slice(keepHead, numbered.length - keepTail)
+        + origFull.slice(full.length - keepTail);
+      nextShadow += shadow.slice(cursor, offset) + numbered;
+      cursor = offset + full.length;
+      return full;
     });
+    if (matched) {
+      out = nextOut + out.slice(cursor);
+      shadow = nextShadow + shadow.slice(cursor);
+    }
   }
   return out;
 }
@@ -666,12 +753,12 @@ export function restorePlaceholders(text, session) {
 }
 
 // Restores ONLY [NAME#n] placeholders. Used ONLY for a web search the user
-// explicitly asked for: a search about a public figure is useless with the name
-// blinded, while every other redaction stays in place. It must never be used for
-// an automatic (implicit) lookup - the user did not ask for that search, so a
-// name in their question is not theirs to be shared with the search service
-// (background.js skips such a lookup instead). A fact-check request is handled
-// differently - the whole claim is sent unfiltered (see background.js).
+// explicitly asked for - and for the claim they highlighted for a Fact Check:
+// a search about a public figure is useless with the name blinded, while every
+// other redaction stays in place. It must never be used for an automatic
+// (implicit) lookup - the user did not ask for that search, so a name in their
+// question is not theirs to be shared with the search service (background.js
+// skips such a lookup instead) - nor for claims mined from the page text.
 export function restoreNamePlaceholders(text, session) {
   if (typeof text !== "string" || !text || !session || !session.byPlaceholder.size || !text.includes("[NAME#")) return text;
   return text.replace(/\[NAME#\d+\]/g, (token) => session.byPlaceholder.get(token) ?? token);
@@ -773,8 +860,8 @@ export function restoreInHtmlText(html, map) {
 // Single choke point for EVERYTHING in an ASK payload that can leave the
 // browser (provider requests and Tavily queries are both built from these
 // fields). Every string leaf is redacted, so a field added to the payload later
-// (e.g. factCheck.selectedText, which previously bypassed the filter) is
-// covered by default. Structural keys and binary image fields are left alone.
+// (e.g. factCheck.selectedText) is covered by default. Structural keys and
+// binary image fields are left alone.
 const STRUCTURAL_KEYS = new Set(["role", "type", "id", "requestId", "modelId", "tabId", "kind"]);
 const NON_TEXT_KEYS = new Set(["images", "dataUrl", "imageUrls", "pageScreenshot"]);
 
