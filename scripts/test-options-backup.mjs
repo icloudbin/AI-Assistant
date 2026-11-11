@@ -3,6 +3,7 @@
 // Ensures empty string settings, booleans, and numeric fields restore properly (#8).
 // Run:  node scripts/test-options-backup.mjs
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { LANGUAGE_STORAGE_KEY, AUTO_WEB_RESEARCH_KEY } from "../storage-keys.js";
 
 const SETTINGS_BACKUP_SECRET_KEYS = ["apiKey", "groqApiKey", "openrouterApiKey", "tavilyApiKey"];
@@ -104,6 +105,18 @@ function filterImportSettings(backupSettings) {
   for (const junk of [null, 0, 1, "never", "false", {}, []]) {
     assert.equal("includeCurrentPageContext" in filterImportSettings({ includeCurrentPageContext: junk }), false, `${JSON.stringify(junk)} must be ignored`);
   }
+}
+
+// ---------- 5. The real importer still follows the rule mirrored above ----------
+// filterImportSettings() is a copy, so it cannot notice options/options.js
+// drifting back to the old behaviour; pin the importer's own source as well.
+{
+  const options = fs.readFileSync(new URL("../options/options.js", import.meta.url), "utf8");
+  assert.ok(!/value === "ask" \? true : value === true/.test(options), "options.js coerces an absent 'Read current page' key to false again");
+  assert.ok(
+    /value === "ask"\) restored\[key\] = true;\s*else if \(typeof value === "boolean"\) restored\[key\] = value;/.test(options),
+    "options.js: the 'Read current page' import rule changed - update the mirror in this test"
+  );
 }
 
 console.log("OK: options-backup — empty string restoration, numeric/boolean validation, type filtering, absent 'Read current page' key.");
