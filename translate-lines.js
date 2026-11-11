@@ -85,6 +85,45 @@ const HAS_LETTER_RE = /\p{L}/u;
 // Whitespace-insensitive equality: a model that "translates" a line by echoing
 // it back (with its own line wrapping re-joined) has not translated it.
 const collapseWs = (s) => s.replace(/\s+/g, " ").trim();
+
+// ---- echoes that are not misses ----------------------------------------------
+// A model may hand a line back unchanged because it SHOULD stay as it is: a
+// brand or product name ("GitHub"), an acronym ("OK"), an identifier, a shell
+// command ("npm install"), a number with a unit, or a line holding nothing but
+// protected spans (a URL, inline code). Counting those as untranslated fired the
+// single-batch replay (a whole second request, whose echo was judged missing
+// again) and a "N lines were not translated" notice for a translation that was
+// in fact complete; multi-batch translations showed the same false notice.
+//
+// So a SHORT echo that does not read like a sentence is accepted. A sentence
+// echoed back - 4+ words, sentence case ("Hello world"), or a closing full stop /
+// question mark - is still a miss: that is how a lazy or confused reply looks,
+// and the replay / notice is the right response to it. Only Latin-script text is
+// waved through: a line in another script may simply be in a language other than
+// the target, so an echo of it keeps counting as untranslated.
+const SHORT_ECHO_MAX_WORDS = 3;
+const PROTECTED_TOKEN_RE = /\{\{\s*U\d+\s*\}\}/g;
+const LATIN_TEXT_RE = /^[\s\p{Script=Latin}\p{M}\p{N}\p{P}\p{S}\p{Z}]+$/u;
+const bareWord = (w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+
+// `safeText` is the line as the model saw it ({{Un}} in place of every protected
+// span, which the model can neither translate nor change).
+function mayStayUntranslated(safeText) {
+  const rest = safeText.replace(PROTECTED_TOKEN_RE, " ").trim();
+  if (!HAS_LETTER_RE.test(rest)) return true; // only protected spans, digits, symbols
+  if (!LATIN_TEXT_RE.test(rest)) return false;
+  const words = rest.split(/\s+/).filter((w) => HAS_LETTER_RE.test(w));
+  if (words.length > SHORT_ECHO_MAX_WORDS) return false;
+  if (words.length > 1) {
+    const [first, ...others] = words.map(bareWord);
+    // "Hello world": a capitalized word followed by ordinary lowercase words is
+    // a sentence. "Visual Studio Code", "NEW RELEASE" and "npm install" are not.
+    const sentenceCase = /^\p{Lu}\p{Ll}+$/u.test(first) && others.some((w) => /^\p{Ll}[\p{Ll}'’-]*$/u.test(w));
+    const sentenceEnd = /[.!?…]["'”’)\]]*$/.test(rest);
+    if (sentenceCase || sentenceEnd) return false;
+  }
+  return true;
+}
 // "[3] text" from the model - optionally markdown-escaped as "\[3\] text",
 // exactly like PLACEHOLDER_RE tolerates escaped brackets in pii-filter.js.
 const TAG_RE = /^\s*\\?\[(\d+)\\?\]\s?(.*)$/;
@@ -189,14 +228,17 @@ export class LineTranslator {
     this.fill(this.heldId);
     const l = this.lines[this.heldId];
     const restored = restore(this.heldText.trim(), l.tokens);
+    const tokensOk = tokensKept(this.heldText, l.tokens);
+    const echo = !!restored && tokensOk && collapseWs(restored) === collapseWs(l.body);
     // Two ways a "translation" is not a translation: an echo of the source
     // line, or a reply that dropped (or hallucinated) a {{Un}} token - the
     // visible text would lose the URL / inline code / link target. Both fall
-    // back to the original line and leave the line counted as missing.
-    const usable = restored
-      && tokensKept(this.heldText, l.tokens)
-      && collapseWs(restored) !== collapseWs(l.body);
-    const translatedText = usable ? restored : "";
+    // back to the original line and leave the line counted as missing - except
+    // an echo of a line that plausibly needed no translation (a name, an
+    // acronym, a command, a bare URL; see mayStayUntranslated), which is the
+    // correct output: it is written as the source had it and counts as done.
+    const usable = !!restored && tokensOk && (!echo || mayStayUntranslated(l.safe));
+    const translatedText = usable ? (echo ? l.body : restored) : "";
     if (translatedText) this.translated++;
     this.write(`${l.prefix}${translatedText || l.body}${l.trailingWhitespace}`);
     this.next = this.heldId + 1;

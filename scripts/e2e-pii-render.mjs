@@ -197,6 +197,25 @@ try {
     assert.ok(box.hasQuery && box.text.includes("⚠️"), `no warning for an address with a query: ${box.text}`);
   });
 
+  await test("S-03(b): an image outside the vetted hosts is announced as not loadable, with a plain link", async () => {
+    const box = await page.evaluate(() => {
+      const el = document.querySelector(".remote-image");
+      const link = el?.querySelector("a");
+      return el ? {
+        untrusted: el.classList.contains("untrusted"),
+        role: el.getAttribute("role"),
+        tabindex: el.getAttribute("tabindex"),
+        linkHref: link?.getAttribute("href") || "",
+        linkTarget: link?.getAttribute("target") || "",
+      } : null;
+    });
+    assert.ok(box, "no image placeholder");
+    assert.ok(box.untrusted, "an address outside the vetted hosts should be marked untrusted");
+    assert.ok(box.role === null && box.tabindex === null, `an untrusted placeholder is not a button: ${JSON.stringify(box)}`);
+    assert.ok(box.linkHref.includes("evil.example") && box.linkTarget === "_blank", `no plain link to the address: ${JSON.stringify(box)}`);
+    assert.ok(!box.linkHref.includes(EMAIL), "the link kept the real address");
+  });
+
   await test("S-03: the saved reply keeps placeholders (+ its map) and renders the same after a reload", async () => {
     const saved = await worker.evaluate(async () => (await chrome.storage.local.get("conversationHistory")).conversationHistory);
     const assistant = saved?.[0]?.messages?.find((m) => m.role === "assistant");

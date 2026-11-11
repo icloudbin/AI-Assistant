@@ -346,6 +346,81 @@ assert.deepEqual(browserPreferred, { text: "One\n\nTwo", format: "text", truncat
   assert.equal(lt.missing, 0, "real translations are counted");
 }
 
+// ---- an echo of a line that needs no translation is not a miss (round-18 #18) ----
+// Brand names, acronyms, commands, identifiers and lines made only of protected
+// spans come back unchanged from a correct model. They used to count as
+// untranslated, which fired the single-batch replay and a false
+// "N lines were not translated" notice. A SENTENCE echoed back is still a miss.
+{
+  const stayAsIs = [
+    "GitHub",
+    "npm install",
+    "OK",
+    "Visual Studio Code",
+    "NEW RELEASE",
+    "config.yaml",
+    "--help",
+    "v2.0",
+    "5 km",
+    "`npm install`",                // only a protected span
+    "https://example.com/docs",     // only a protected span
+  ];
+  for (const line of stayAsIs) {
+    const p = prepareLineTranslation(line);
+    assert.ok(p, `${JSON.stringify(line)} is offered to the model`);
+    let out = "";
+    const lt = new LineTranslator(p, (d) => { out += d; });
+    lt.push(`[1] ${p.lines[0].safe}`); // the model echoes exactly what it was sent
+    lt.finish();
+    assert.equal(out, line, `${JSON.stringify(line)}: the original line is written unchanged`);
+    assert.equal(lt.missing, 0, `${JSON.stringify(line)}: an echo of a name / command / bare URL is not a missing line`);
+    assert.equal(lt.translated, 1, `${JSON.stringify(line)}: counted as done`);
+  }
+  // The echo keeps the source's own spacing, not the model's re-wrapped copy.
+  const spaced = prepareLineTranslation("Visual  Studio   Code");
+  let spacedOut = "";
+  const spacedLt = new LineTranslator(spaced, (d) => { spacedOut += d; });
+  spacedLt.push("[1] Visual Studio\nCode");
+  spacedLt.finish();
+  assert.equal(spacedOut, "Visual  Studio   Code", "an accepted echo is written with the source's exact spacing");
+  assert.equal(spacedLt.missing, 0);
+}
+{
+  // ... while an echoed SENTENCE, a sentence-case phrase and a long line stay missing.
+  const stillMissing = [
+    "Hello world",                          // sentence case
+    "Click here",
+    "Read more.",                           // closing full stop
+    "Is this working?",
+    "Terms of Service apply here",          // more than three words
+    "Press `Ctrl+S` to save the file now.",
+    "Bonjour tout le monde ici",            // already-translated looking prose is still prose
+    "你好世界",                              // another script: could be a language other than the target
+  ];
+  for (const line of stillMissing) {
+    const p = prepareLineTranslation(line);
+    assert.ok(p, `${JSON.stringify(line)} is offered to the model`);
+    let out = "";
+    const lt = new LineTranslator(p, (d) => { out += d; });
+    lt.push(`[1] ${p.lines[0].safe}`);
+    lt.finish();
+    assert.equal(out, line, `${JSON.stringify(line)}: an echo falls back to the original text`);
+    assert.equal(lt.missing, 1, `${JSON.stringify(line)}: an echoed sentence still counts as untranslated`);
+    assert.equal(lt.translated, 0);
+  }
+  // A line the model did NOT return at all is missing whatever it looks like.
+  const p = prepareLineTranslation("GitHub\nSecond line here.");
+  const lt = new LineTranslator(p, () => {});
+  lt.push("[2] Deuxieme ligne ici.");
+  lt.finish();
+  assert.equal(lt.missing, 1, "a name the model skipped entirely is still missing");
+  // A short echo that DROPPED a protected token is still a loss, not an accepted echo.
+  const dropped = new LineTranslator(prepareLineTranslation("Run `npm test`"), () => {});
+  dropped.push("[1] Run");
+  dropped.finish();
+  assert.equal(dropped.missing, 1, "a reply that dropped the inline code is not accepted");
+}
+
 console.log("OK: translated paragraphs, trailing whitespace, and selection-source precedence are preserved.");
 
 // ---------- the length cap cuts between code points (round-10 P3) ----------

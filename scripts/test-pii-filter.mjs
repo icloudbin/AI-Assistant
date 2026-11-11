@@ -521,4 +521,120 @@ check("without a session plain placeholders are used", R("jane@x.com") === "[EMA
   check("ASCII bare value unchanged", !ascii.includes("hunter2") && ascii.includes(", next"), ascii);
 }
 
+// ---- full-width digits and separators (Japanese / Chinese input methods) ----
+// Every rule is written for ASCII, so "０９０－１２３４－５６７８", a card number grouped
+// with ideographic spaces or a resident ID ending in "Ｘ" used to match nothing and
+// went out in plain text. Matching now runs on an ASCII-folded shadow copy and the
+// placeholder is spliced into the REAL text: whatever the rule kept around the value
+// (a cue word, the punctuation next to it) stays as the user typed it, and the value
+// that is remembered - and shown back in the reply - is the typed one.
+{
+  // ASCII -> full-width: "!".."~" shift by 0xFEE0 and a space becomes U+3000. Done
+  // with arithmetic so that this file contains no invisible character.
+  const fw = (s) => s.replace(/[!-~]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0xFEE0)).replace(/ /g, String.fromCharCode(0x3000));
+
+  // What an input method really produces, typed literally rather than through fw().
+  check("full-width mobile number (literal)", R("Ring ０９０－１２３４－５６７８ now") === "Ring [PHONE] now", R("Ring ０９０－１２３４－５６７８ now"));
+  check("full-width email (literal)", R("ｊａｎｅ．ｄｏｅ＠ｅｘａｍｐｌｅ．ｃｏｍ") === "[EMAIL]", R("ｊａｎｅ．ｄｏｅ＠ｅｘａｍｐｌｅ．ｃｏｍ"));
+  check("full-width resident ID ending in Ｘ (literal)", R("id １１０１０５１９４９１２３１００２Ｘ here") === "id [ID_NUMBER] here", R("id １１０１０５１９４９１２３１００２Ｘ here"));
+
+  // A value typed in full-width form is treated exactly like its ASCII spelling.
+  // [label, text before, ASCII value, text after, placeholder both must produce]
+  const SAME_AS_ASCII = [
+    ["JP mobile, hyphens", "Ring ", "090-1234-5678", " now", "[PHONE]"],
+    ["JP mobile, solid", "Ring ", "09012345678", " now", "[PHONE]"],
+    ["JP landline", "Ring ", "03-1234-5678", " now", "[PHONE]"],
+    ["CN mobile", "Ring ", "13812345678", " now", "[PHONE]"],
+    ["US number with + and spaces", "Call ", "+1 415 555 0132", " now", "[PHONE]"],
+    ["card, ideographic-space groups", "card ", "4111 1111 1111 1111", "", "[CREDIT_CARD]"],
+    ["card, hyphen groups", "card ", "4111-1111-1111-1111", "", "[CREDIT_CARD]"],
+    ["card, solid", "Pay ", "4539148803436467", " now", "[CREDIT_CARD]"],
+    ["CN resident ID, X", "id ", "11010519491231002X", " here", "[ID_NUMBER]"],
+    ["CN resident ID, x", "id ", "11010519491231002x", " here", "[ID_NUMBER]"],
+    ["CN resident ID, legacy 15 digits", "old id ", "110105491231002", " here", "[ID_NUMBER]"],
+    ["Taiwan ID (letter + digits)", "id ", "A123456789", " here", "[ID_NUMBER]"],
+    ["SSN, dashes", "id ", "123-45-6789", " here", "[SSN]"],
+    ["SSN behind its cue", "", "SSN: 123456789", "", "[SSN]"],
+    ["email", "write ", "jane.doe@example.com", " now", "[EMAIL]"],
+  ];
+  for (const [label, before, value, after, ph] of SAME_AS_ASCII) {
+    const ascii = R(`${before}${value}${after}`);
+    const wide = R(`${before}${fw(value)}${after}`);
+    check(`full-width ${label} is redacted like its ASCII spelling`, ascii === `${before}${ph}${after}` && wide === ascii, `ascii -> ${ascii} | full-width -> ${wide}`);
+  }
+
+  // A birth date behind its label; the label (with its full-width colon) stays.
+  const dob = R(`生日：${fw("1990年1月2日")}`);
+  check("full-width birth date behind its label", dob === "生日：[DATE_OF_BIRTH]", dob);
+
+  // Whatever the rule kept around the value comes back from the REAL text: the
+  // cue word of a passport number stays full-width, only the value is replaced.
+  {
+    const cue = fw("Passport No. ");
+    const value = fw("E12345678");
+    const plain = R(`${cue}${value}`);
+    check("a full-width cue word is kept as typed", plain === `${cue}[ID_NUMBER]`, plain);
+    const s = createRedactionSession();
+    const numbered = R(`${cue}${value}`, s);
+    check("... and with numbering", numbered === `${cue}[ID_NUMBER#1]`, numbered);
+    check("... the remembered value is the typed one", placeholderMapFromSession(s)["[ID_NUMBER#1]"] === value, JSON.stringify(placeholderMapFromSession(s)));
+    check("... and it restores to the original text", restorePlaceholders(numbered, s) === `${cue}${value}`, restorePlaceholders(numbered, s));
+  }
+
+  // CJK punctuation and labels around a value are left exactly as typed.
+  {
+    const input = `連絡先：${fw("090-1234-5678")}（携帯）。メール：${fw("jane.doe@example.com")}。`;
+    const out = R(input);
+    check("punctuation around full-width values is untouched", out === "連絡先：[PHONE]（携帯）。メール：[EMAIL]。", out);
+    const two = R(`${fw("090-1234-5678")}，${fw("080-1111-2222")}`);
+    check("a full-width comma separates two full-width numbers", two === "[PHONE]，[PHONE]", two);
+  }
+
+  // Numbered placeholders: one per distinct typed value, restored as typed.
+  {
+    const s = createRedactionSession();
+    const phone = fw("090-1234-5678");
+    const card = fw("4111 1111 1111 1111");
+    const input = `Ring ${phone} now, again ${phone}, and ${card}.`;
+    const out = R(input, s);
+    check("one numbered placeholder per distinct full-width value", out === "Ring [PHONE#1] now, again [PHONE#1], and [CREDIT_CARD#1].", out);
+    check("the remembered value is the one the user typed", placeholderMapFromSession(s)["[PHONE#1]"] === phone && placeholderMapFromSession(s)["[CREDIT_CARD#1]"] === card, JSON.stringify(placeholderMapFromSession(s)));
+    check("full-width values round-trip exactly as typed", restorePlaceholders(out, s) === input, restorePlaceholders(out, s));
+  }
+
+  // Text that merely contains full-width characters is not changed.
+  {
+    const date = "２０２６年１１月１０日の会議は１２時からです。";
+    check("full-width dates and times stay text", R(date) === date, R(date));
+    const version = fw("v2.0.1.5");
+    check("a full-width version string is not an IP address", R(version) === version, R(version));
+    const s = createRedactionSession();
+    check("... also with a session", R(version, s) === version && !s.byPlaceholder.size, R(version, s));
+  }
+
+  // The fold set deliberately leaves the full-width colon alone: a Chinese or
+  // Japanese label is usually followed by exactly that colon, and the lookbehinds
+  // of the MAC / IPv6 / bare-phone rules refuse a match right after an ASCII ":".
+  // Folding it would stop redacting values that are redacted today.
+  check("MAC address after a full-width colon is still redacted", R("MAC地址：00:1A:2B:3C:4D:5E") === "MAC地址：[MAC_ADDRESS]", R("MAC地址：00:1A:2B:3C:4D:5E"));
+  check("IPv6 address after a full-width colon is still redacted", R("IP：2001:db8:85a3::8a2e:370:7334") === "IP：[IP_ADDRESS]", R("IP：2001:db8:85a3::8a2e:370:7334"));
+  check("bare phone number after a full-width colon is still redacted", R("号码：4155550132") === "号码：[PHONE]", R("号码：4155550132"));
+
+  // The single choke point covers every text field.
+  {
+    const s = createRedactionSession();
+    const out = redactOutbound({
+      question: `Ring ${fw("090-1234-5678")} now`,
+      history: [{ role: "user", content: `write ${fw("jane.doe@example.com")}` }],
+      pageContext: { text: `card ${fw("4111 1111 1111 1111")}` },
+    }, s);
+    check(
+      "redactOutbound redacts full-width values in every text field",
+      out.question === "Ring [PHONE#1] now" && out.history[0].content === "write [EMAIL#1]" && out.pageContext.text === "card [CREDIT_CARD#1]" && out.history[0].role === "user",
+      JSON.stringify(out)
+    );
+    check("... and the question restores to what was typed", restorePlaceholders(out.question, s) === `Ring ${fw("090-1234-5678")} now`, restorePlaceholders(out.question, s));
+  }
+}
+
 process.exit(failed ? 1 : 0);

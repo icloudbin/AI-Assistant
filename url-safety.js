@@ -10,7 +10,8 @@
 // Page images are deliberately NOT fetched here: they are fetched in the
 // page's own context (see page-images.js), which lends out no privilege and
 // therefore needs no allowlist. This gate covers the worker's FETCH_IMAGE
-// channel: model-provided reply images and user-dropped image URLs.
+// channel: model-provided reply images (checkReplyImageUrl, the stricter gate)
+// and user-dropped image URLs (checkImageUrl).
 //
 // Pure functions, no chrome.* calls, so they can be unit-tested in Node.
 //
@@ -186,6 +187,24 @@ export function checkImageUrl(rawUrl) {
   if (isPublicIpLiteral(host)) return url;
   if (TRUSTED_IMAGE_HOSTS.has(host)) return url;
   return null;
+}
+
+// True for the exact, vetted image hosts above (a trailing dot is ignored).
+export function isTrustedImageHost(hostname) {
+  return TRUSTED_IMAGE_HOSTS.has(String(hostname || '').toLowerCase().replace(/\.+$/, ''));
+}
+
+// The stricter gate for an image that comes out of a MODEL REPLY. Such an
+// address can be written by a web page (prompt injection), so it is held to the
+// vetted hosts only. checkImageUrl() above also lets a public IP literal
+// through - nothing resolves it, so it cannot be rebound - but a literal is
+// still a server the author of the reply can run, and the request carries
+// everything the injected prompt put into the address: the PATH as well as the
+// query. A dropped image URL is something the user chose themselves and keeps
+// using checkImageUrl().
+export function checkReplyImageUrl(rawUrl) {
+  const url = checkImageUrl(rawUrl);
+  return url && isTrustedImageHost(url.hostname) ? url : null;
 }
 
 // Hostname of any URL, for display and as a key.

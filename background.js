@@ -4,7 +4,7 @@ import { AUTO_WEB_RESEARCH_KEY, LANGUAGE_STORAGE_KEY, PENDING_CONTEXT_ACTION_KEY
 import { getStoredLanguage, t } from "./i18n.js";
 import { restoreSettingsFromBackupOnce } from "./settings-storage.js";
 import { withNamedLock, CONTEXT_ACTION_LOCK } from "./conversation-store.js";
-import { checkImageUrl } from "./url-safety.js";
+import { checkImageUrl, checkReplyImageUrl } from "./url-safety.js";
 import { redactOutbound, createRedactionSession, restoreNamePlaceholders, placeholderMapFromSession, PII_FILTER_STORAGE_KEY } from "./privacy/pii-filter.js";
 import { prepareLineTranslation, numberedBatches, LineTranslator } from "./translate-lines.js";
 import { chooseTranslationSelection } from "./translation-selection.js";
@@ -246,8 +246,11 @@ async function readBodyCapped(resp, maxBytes) {
   return out;
 }
 
-async function fetchImageDataUrl(rawUrl, maxBytes, allowedTypes) {
-  const url = checkImageUrl(rawUrl);
+// `gate` decides which destinations may be fetched: checkImageUrl for an image
+// the user chose (a dropped URL), checkReplyImageUrl - the vetted hosts only -
+// for an image a model reply asks for.
+async function fetchImageDataUrl(rawUrl, maxBytes, allowedTypes, gate = checkImageUrl) {
+  const url = gate(rawUrl);
   if (!url) throw new Error("blocked");
 
   const controller = new AbortController();
@@ -267,7 +270,7 @@ async function fetchImageDataUrl(rawUrl, maxBytes, allowedTypes) {
     });
     // Defense in depth: with redirects refused this should always equal the
     // requested URL, but keep verifying the final destination.
-    if (resp.url && !checkImageUrl(resp.url)) {
+    if (resp.url && !gate(resp.url)) {
       resp.body?.cancel().catch(() => {});
       throw new Error("blocked");
     }
@@ -298,7 +301,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!isOwnExtensionPage(sender)) return false;
     (async () => {
       try {
-        const dataUrl = await fetchImageDataUrl(msg.url, 10 * 1024 * 1024, /^image\/(png|jpeg|gif|webp|bmp)$/);
+        // The side panel marks an image that came out of a model reply with
+        // source:"reply" (it is the only code that sends this message for one),
+        // and that kind is held to the vetted image hosts. Without the mark the
+        // request is a user-dropped URL.
+        const gate = msg.source === "reply" ? checkReplyImageUrl : checkImageUrl;
+        const dataUrl = await fetchImageDataUrl(msg.url, 10 * 1024 * 1024, /^image\/(png|jpeg|gif|webp|bmp)$/, gate);
         sendResponse({ ok: true, dataUrl });
       } catch {
         // Deliberately no detail: timing/error text must not become a probe
@@ -499,17 +507,15 @@ chrome.runtime.onConnect.addListener((port) => {
           // data is left untouched (see NON_TEXT_KEYS in pii-filter.js).
           const redactedPayload = redactOutbound({ ...msg.payload, attachments }, piiSession);
           ({ question, pageContext, history, translateSource, factCheck, attachments } = redactedPayload);
-          // A fact-check request is the one deliberate exception: redacting the
-          // claim made it unsearchable ("[NAME#1] won 6 championships" finds
-          // nothing on Tavily) and unanswerable (the model cannot know who
-          // [NAME#1] is). The claim - the selected text and the question that
-          // carries it - goes out unfiltered; page context and history stay
-          // redacted. Names in ordinary questions are only redacted when they
-          // follow a clear cue, so normal Q&A about public figures works.
-          if (msg.payload.factCheck?.enabled === true) {
-            question = msg.payload.question;
-            factCheck = msg.payload.factCheck;
-          }
+          // A fact-check request is filtered like every other one: the selected
+          // claim and the question that carries it used to be swapped back to
+          // their raw originals here, which sent any email, phone number, card
+          // number or API key inside a highlighted passage to Tavily and the
+          // model. The one thing a fact check needs - a searchable claim
+          // ("[NAME#1] won 6 championships" finds nothing) - is handled where
+          // the search query is built: runTavilyFactCheckResearch restores
+          // [NAME#n] placeholders, and only those, for the highlighted claim's
+          // Tavily query, exactly like an explicit "search the web" question.
         }
       } catch (err) {
         console.warn("[AI Assistant] privacy filter failed", err);
@@ -1234,8 +1240,17 @@ async function runTavilyFactCheckResearch({ question, pageContext, ctx, selected
   // default), so older articles were effectively unsearchable. Fact checks
   // need the best matching sources regardless of age: use "general".
   const topic = "general";
+  // The claim has been through the privacy filter like everything else. For a
+  // claim the user HIGHLIGHTED (and asked to have checked) the Tavily query -
+  // and only the query - gets its [NAME#n] placeholders back: "[NAME#1] won 6
+  // championships" finds nothing, and this is a lookup they asked for, as with
+  // an explicit "search the web" question. Every other placeholder stays, and
+  // the claim shown to the model (CLAIM: below) stays in placeholder form. Claims
+  // mined from the page text (no highlight) are the PAGE's, not the user's own
+  // words, so no name is restored for them.
+  const searchQueryFor = (claim) => (selectedText ? restoreNamePlaceholders(claim, ctx.piiSession) : claim);
   const settled = await Promise.allSettled(
-    claims.map((claim) => tavilySearch(claim, apiKey, ctx.signal, topic))
+    claims.map((claim) => tavilySearch(searchQueryFor(claim), apiKey, ctx.signal, topic))
   );
   const evidence = [];
   let firstSearchError = null;
