@@ -431,6 +431,34 @@ assert.equal(openAICompatibleStreamError({ error: { code: 500 } }), '{"code":500
   }
 }
 
+// ---------- custom prompt: the filtered ctx.customPrompt wins over the raw stored value ----------
+{
+  const originalFetch = globalThis.fetch;
+  let lastBody = "";
+  globalThis.fetch = async (url, init) => {
+    lastBody = init.body;
+    const { resp } = sse(['data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n']);
+    return { ...resp, ok: true, status: 200, headers: { get: () => "text/event-stream" } };
+  };
+  globalThis.chrome = { storage: { local: { get: async () => ({ groqApiKey: "gsk_k", apiKey: "k", openrouterApiKey: "k", customPrompt: "RAW-SECRET jane@example.com" }) } } };
+  try {
+    const groq = MODELS.find((m) => m.provider === "groq");
+    const ctx = makeCtx();
+    ctx.safePost = () => {};
+    ctx.customPrompt = "FILTERED [EMAIL#1]";
+    await streamGroq(groq, "question", null, [], [], ctx);
+    assert.ok(lastBody.includes("FILTERED [EMAIL#1]") && !lastBody.includes("RAW-SECRET"), "the redacted custom prompt is sent, never the raw stored one");
+    const ctx2 = makeCtx();
+    ctx2.safePost = () => {};
+    ctx2.customPrompt = "";
+    await streamGroq(groq, "question", null, [], [], ctx2);
+    assert.ok(!lastBody.includes("RAW-SECRET"), "an empty filtered prompt does not fall back to the raw stored value");
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete globalThis.chrome;
+  }
+}
+
 // ---------- retired-model errors map to one actionable, localized message ----------
 // Groq can retire preview models at short notice (qwen3.8-27b IS one), and the
 // OpenRouter free router fails in-stream with "No allowed providers...". All

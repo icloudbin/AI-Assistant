@@ -240,6 +240,29 @@ try {
     assert.ok(body.includes("[EMAIL#"), "the earlier turns should carry placeholders");
   });
 
+  await test("S-04: reply HTML cannot borrow the panel's own classes; the renderer's code-block classes still work", async () => {
+    Object.assign(provider, { reply: [
+      '<div class="remote-image untrusted has-query">SPOOF-A</div>\n',
+      "\n",
+      "```js\nconst z = 1;\n```\n",
+    ].join("") });
+    await page.fill("#questionInput", "spoof?");
+    await page.click("#sendBtn");
+    await waitFor(async () => (await lastAssistant())?.text?.includes("const z"), "the spoof reply to render");
+    await waitFor(sendEnabled, "the composer to unlock");
+    const r = await page.evaluate(() => ({
+      // The markdown renderer escapes raw HTML, so no spoofed element may exist at all.
+      spoofElements: [...document.querySelectorAll("#chatLog *")].filter((e) => e.children.length === 0 && e.textContent.includes("SPOOF-A") && /untrusted|has-query|remote-image/.test(e.getAttribute("class") || "")).length,
+      realCode: !!document.querySelector("#chatLog .code-block, #chatLog code[class*='language-js']"),
+    }));
+    assert.equal(r.spoofElements, 0, "a spoofed placeholder element reached the chat log");
+    assert.ok(r.realCode, "the renderer's own code-block classes were lost");
+    // Defense in depth: the sanitizer itself also strips every class the renderer does not emit.
+    const src = fs.readFileSync(new URL("../sidepanel/sidepanel.js", import.meta.url), "utf8");
+    assert.ok(/RENDERER_CLASS_RE\s*=\s*\/\^\(\?:code-block\|table-wrap\|language-/.test(src), "class allowlist constant is missing");
+    assert.ok(/getAttribute\("class"\)\.split\(\/\\s\+\/\)\.filter\(\(c\) => RENDERER_CLASS_RE\.test\(c\)\)/.test(src), "sanitizeRenderedHtml no longer filters class names");
+  });
+
   assert.deepEqual(pageErrors, [], `uncaught errors in the page: ${pageErrors.join(" | ")}`);
 } finally {
   await context.close();

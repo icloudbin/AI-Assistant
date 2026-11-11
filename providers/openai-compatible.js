@@ -163,12 +163,19 @@ export async function fetchWithHeadersTimeout(url, init, ctx, timeoutMs = FIRST_
   }
 }
 
+// The custom prompt for this request. background.js hands over the version that
+// went through the privacy filter (ctx.customPrompt); the stored value is only
+// the fallback for callers that build a ctx without one (unit tests).
+function customPromptFor(ctx, stored) {
+  return ctx.customPrompt !== undefined ? ctx.customPrompt : stored.customPrompt;
+}
+
 async function streamDeepSeek(model, question, pageContext, history, images, ctx) {
   const stored = await chrome.storage.local.get(["apiKey", "customPrompt"]);
   // Trim: a key imported from a settings file may carry a trailing newline,
   // which is an illegal character in an HTTP header value.
   const apiKey = String(stored.apiKey || "").trim();
-  const customPrompt = stored.customPrompt;
+  const customPrompt = customPromptFor(ctx, stored);
   if (!apiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "DeepSeek" }));
 
   // `deepseek-flash` (DeepSeek-V4.1-Flash) accepts image input directly, so
@@ -201,7 +208,7 @@ async function streamGroq(model, question, pageContext, history, images, ctx) {
   // the provider was standardized on the groqApiKey storage name.
   const stored = await chrome.storage.local.get(["groqApiKey", "groqKey", "customPrompt"]);
   const groqApiKey = String(stored.groqApiKey || stored.groqKey || "").trim();
-  const customPrompt = stored.customPrompt || "";
+  const customPrompt = customPromptFor(ctx, stored) || "";
   if (!groqApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "Groq" }));
 
   const body = {
@@ -257,7 +264,7 @@ async function streamOpenRouter(model, question, pageContext, history, images, c
   const stored = await chrome.storage.local.get(["openrouterApiKey", "customPrompt"]);
   // Trim: see streamDeepSeek() - a newline in an imported key breaks the header.
   const openrouterApiKey = String(stored.openrouterApiKey || "").trim();
-  const customPrompt = stored.customPrompt;
+  const customPrompt = customPromptFor(ctx, stored);
   if (!openrouterApiKey) throw new Error(t(ctx.lang, "bg_error_apiKeyMissing_template", { provider: "OpenRouter" }));
 
   const resp = await fetchWithHeadersTimeout("https://openrouter.ai/api/v1/chat/completions", {

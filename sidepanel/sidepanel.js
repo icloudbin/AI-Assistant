@@ -553,6 +553,10 @@ const ALLOWED_TAGS = new Set([
 ]);
 const ALLOWED_ATTRS = new Set(["href", "target", "rel", "class", "src", "alt", "loading", "decoding", "start", "align"]);
 
+// Classes sidepanel/rendering/markdown.js puts into its HTML: the code-block and
+// table wrappers and the language-xxx class of a fenced block.
+const RENDERER_CLASS_RE = /^(?:code-block|table-wrap|language-[A-Za-z0-9_-]+)$/;
+
 const DROP_WITH_CONTENT = new Set([
   "SCRIPT", "STYLE", "SVG", "MATH", "TEMPLATE", "NOSCRIPT", "IFRAME", "FRAME", "FRAMESET",
   "OBJECT", "EMBED", "APPLET", "TEXTAREA", "TITLE", "XMP", "NOEMBED", "NOFRAMES", "PLAINTEXT",
@@ -594,6 +598,15 @@ function sanitizeRenderedHtml(html) {
 
     for (const attr of [...el.attributes]) {
       if (!ALLOWED_ATTRS.has(attr.name.toLowerCase())) el.removeAttribute(attr.name);
+    }
+    // A class is only kept when the Markdown renderer itself emits it. A reply
+    // (which a page can steer by prompt injection) could otherwise borrow the
+    // panel's own styling - notice/error bubbles, the image placeholder - to
+    // pass off its text as a message from the extension.
+    if (el.hasAttribute("class")) {
+      const kept = el.getAttribute("class").split(/\s+/).filter((c) => RENDERER_CLASS_RE.test(c));
+      if (kept.length) el.setAttribute("class", kept.join(" "));
+      else el.removeAttribute("class");
     }
 
     if (el.tagName === "IMG") {

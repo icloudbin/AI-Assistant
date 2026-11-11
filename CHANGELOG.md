@@ -4,6 +4,14 @@ Release notes for AI Assistant, newest first. The version currently built is the
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
 
+## Code-review batch 2 (A, B): custom prompt privacy, reply classes (v1.10.165)
+
+Two findings from the second review pass.
+
+- **The custom prompt goes through the privacy filter (A).** The prompt saved in Settings was read from storage inside each provider and sent as the system message unfiltered, so a name, number or address in it left the browser as typed. The worker now reads it once per request, passes it through `redactOutbound` together with the question, page and history (the same placeholder numbering and map), and hands the filtered text to the providers as `ctx.customPrompt`; a provider only falls back to the stored value when no filtered one was supplied.
+- **Reply HTML keeps only the renderer's own classes (B).** `sanitizeRenderedHtml` allowed any `class`, so markup carrying `remote-image`, `untrusted` and so on could pose as the panel's own click-to-load boxes. It now keeps only `code-block`, `table-wrap` and `language-*`. The markdown renderer already escapes raw HTML, so this is defense in depth, not a reachable hole today.
+- Checked: check-package green; 25 Node suites exit 0 with a new custom-prompt case in test-outbound-pii (placeholders, no raw values) and test-openai-compatible (filtered ctx value wins over storage); the side-panel context test (Python) green; Playwright e2e green with a new class-allowlist case (pii-render 6/6, negative-controlled: fails on the old sanitizer); real-Chrome suite and extension E2E 38/38.
+
 ## Code-review batch 1: Fact Check privacy, reply images, full-width numbers, import, translation echo, Stop (v1.10.164)
 
 Six findings from a static code review, in one build.

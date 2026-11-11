@@ -496,6 +496,17 @@ chrome.runtime.onConnect.addListener((port) => {
       // Attached files arrive as structured data (see attachments.js). Clean
       // them BEFORE the privacy filter so it also sees single-line names.
       attachments = normalizeAttachments(attachments);
+      // The custom prompt travels in the same system message as everything else,
+      // so it goes through the same filter, in the same call as the payload (the
+      // placeholders it gets are numbered together with the rest and restored in
+      // the reply like any other). The providers use ctx.customPrompt, never the
+      // raw stored value.
+      let customPrompt = "";
+      try {
+        customPrompt = String((await chrome.storage.local.get("customPrompt")).customPrompt || "");
+      } catch {
+        // Unreadable storage: no custom prompt for this request.
+      }
       let piiSession = null;
       try {
         const piiSetting = await chrome.storage.local.get(PII_FILTER_STORAGE_KEY);
@@ -505,8 +516,8 @@ chrome.runtime.onConnect.addListener((port) => {
           // factCheck.selectedText (sent to Tavily and the model). The generic
           // redaction covers fields added to the payload later as well; image
           // data is left untouched (see NON_TEXT_KEYS in pii-filter.js).
-          const redactedPayload = redactOutbound({ ...msg.payload, attachments }, piiSession);
-          ({ question, pageContext, history, translateSource, factCheck, attachments } = redactedPayload);
+          const redactedPayload = redactOutbound({ ...msg.payload, attachments, customPrompt }, piiSession);
+          ({ question, pageContext, history, translateSource, factCheck, attachments, customPrompt } = redactedPayload);
           // A fact-check request is filtered like every other one: the selected
           // claim and the question that carries it used to be swapped back to
           // their raw originals here, which sent any email, phone number, card
@@ -558,7 +569,7 @@ chrome.runtime.onConnect.addListener((port) => {
       const ctx = { port, requestId, signal: abortController.signal, abort: () => abortController.abort(), lang, translateMode: translateMode === true ? "free" : false, lineTranslator: null, safePost, piiSession,
         // ONE random id for every untrusted block of this request (page data, attached files, search
         // evidence); the trusted instruction names it so look-alike markers in the data are not believed.
-        boundaryId: newBoundaryId(), attachments };
+        boundaryId: newBoundaryId(), attachments, customPrompt };
       // Everything shown to the user goes through here.
       ctx.sendChunk = (delta) => { if (delta) safePost({ type: "CHUNK", delta, requestId }); };
       const normalizedImages = Array.isArray(images) ? images.filter((img) => img && typeof img.dataUrl === "string" && /^data:image\/(jpeg|png|gif|webp);base64,/i.test(img.dataUrl)) : [];

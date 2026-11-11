@@ -551,6 +551,13 @@ r = await ask({ question: "summarize", pageContext: { tabId: 1, title: "P", url:
 check("context-length refusal still gets the page-too-large hint", r.final.type === "ERROR" && /Read current page/i.test(r.final.error) && !/rate.limiting/i.test(r.final.error), r.final.error || "");
 providerReply = () => 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n';
 
+// The user's custom prompt is outbound text too: it must go through the same filter.
+store.customPrompt = `Always CC ${PII[0]} and call ${PII[1]}`;
+const cp = await ask({ question: "hello", noWebResearch: true });
+check("custom prompt: PII in it never reaches the provider", cp.sent.length > 0 && !PII.some((p) => cp.sent.some((s) => s.body.includes(p))), cp.sent.map((s) => s.body).join(" ").slice(0, 200));
+check("custom prompt: the instruction itself is still sent (placeholders in place of values)", cp.sent.some((s) => s.body.includes("Always CC")));
+delete store.customPrompt;
+
 // Filter off: the same data must pass through unchanged (proves the test can detect leaks).
 store.piiFilterEnabled = false;
 const off = await ask({ question: "x", pageContext, noWebResearch: true });
