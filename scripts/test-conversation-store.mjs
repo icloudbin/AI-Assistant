@@ -276,7 +276,7 @@ await test("source: every message the panel creates goes through createMessage; 
   const panel = read("sidepanel/sidepanel.js");
   const code = (src) => src.replace(/\/\/.*$/gm, "");
   assert.ok(!/history\.push\(\{/.test(code(panel)), "sidepanel.js pushes a message without createMessage()");
-  assert.equal((code(panel).match(/history\.push\(createMessage\(/g) || []).length, 4, "user turn + DONE + ERROR + worker-recycle recovery");
+  assert.equal((code(panel).match(/history\.push\(createMessage\(/g) || []).length, 5, "user turn + DONE + ERROR + worker-recycle recovery + the Stop button (stopGeneration)");
   for (const f of ["sidepanel/sidepanel.js", "sidepanel/history-manager.js", "conversation-store.js", "options/options.js"]) {
     assert.ok(!/rememberQuotaCondensed|\.quotaCondensed|quotaCondensed\s*[:=]/.test(code(read(f))), `${f} still uses the quotaCondensed mechanism`);
   }
