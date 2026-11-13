@@ -20,13 +20,12 @@ import { isAutoWebResearchEnabled } from "./auto-web-research.js";
 // Content scripts do not need extension storage. Chrome exposes storage.local
 // to them by default, so explicitly restrict it to trusted extension contexts
 // before registering handlers that can inject or communicate with page scripts.
-try {
-  chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" }).catch((err) => {
-    console.error("[AI Assistant] Unable to restrict local storage access:", err);
-  });
-} catch (err) {
+const storageAccessReady = chrome.storage.local.setAccessLevel({
+  accessLevel: "TRUSTED_CONTEXTS",
+}).catch((err) => {
   console.error("[AI Assistant] Unable to restrict local storage access:", err);
-}
+  throw err;
+});
 
 void restoreSettingsFromBackupOnce();
 
@@ -100,6 +99,8 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 // the frame the user right-clicked in. Resolves to null when unavailable.
 async function readSelectionMarkdown(tabId, frameId) {
   try {
+    // Do not inject content.js until Chrome confirms storage is restricted.
+    await storageAccessReady;
     const target = { tabId, frameIds: [typeof frameId === "number" ? frameId : 0] };
     await chrome.scripting.executeScript({ target, files: ["content.js"] });
     const res = await chrome.scripting.executeScript({
