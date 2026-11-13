@@ -25,7 +25,7 @@ import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-s
 import { encryptSecrets, decryptSecrets, MIN_PASSPHRASE_LENGTH } from "../settings-crypto.js";
 import { withHistoryLock, withMessageIds, isValidMessageId, isValidTimestamp } from "../conversation-store.js";
 import { nextHistoryGeneration } from "../history-generation.js";
-import { compressForQuota, cleanForTopic } from "../sidepanel/history-manager.js";
+import { compressForQuota, cleanForTopic, limitStoredConversationMessages } from "../sidepanel/history-manager.js";
 import { migrateLegacyMessage, normalizeAttachments } from "../attachments.js";
 import { sanitizePiiMap } from "../privacy/pii-filter.js";
 import { cutAtCodePointBoundary, MAX_CUSTOM_PROMPT_CHARS } from "../models.js";
@@ -816,6 +816,8 @@ async function restoreHistory() {
 
       const merged = [...byId.values()]
         .filter((c) => c?.messages?.length)
+        .map(limitStoredConversationMessages)
+        .filter((c) => c.messages?.length)
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
         .slice(0, MAX_SAVED_CONVERSATIONS);
 
