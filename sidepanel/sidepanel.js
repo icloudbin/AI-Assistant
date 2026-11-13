@@ -4011,7 +4011,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   const nextGeneration = generationChange
     ? normalizeHistoryGeneration(generationChange.newValue)
     : historyGeneration;
-  const generationChanged = Boolean(generationChange) && !isHistoryGenerationCurrent(nextGeneration, historyGeneration);
+  const generationChanged = Boolean(generationChange) && nextGeneration > historyGeneration;
   if (generationChanged) {
     // The generation is the durable deletion signal. Clear the local list
     // immediately so a save cannot resurrect it before the follow-up reload.
