@@ -164,6 +164,36 @@ if (inGit) {
   }
 }
 
+// 6. Parse gate. Every check above reads sources as TEXT, so a module that
+// cannot even be COMPILED used to pass all of them and then break the whole
+// panel/worker at load time (v1.10.168 shipped a duplicate export name - a
+// SyntaxError - in history-manager.js; the affected suites died on import and
+// were never reached). vm.SourceTextModule compiles an ES module WITHOUT
+// executing it or resolving its imports, so it catches exactly this class.
+// Requires --experimental-vm-modules in one short-lived child process.
+{
+  const checker = `
+    const { SourceTextModule } = require("node:vm");
+    const fs = require("node:fs");
+    let bad = 0;
+    for (const f of JSON.parse(process.argv[1])) {
+      try { new SourceTextModule(fs.readFileSync(f, "utf8"), { identifier: f }); }
+      catch (err) { bad++; console.log("PARSE " + f + ": " + err.message); }
+    }
+    process.exit(bad ? 1 : 0);
+  `;
+  const files = [...required].filter((f) => f.endsWith(".js")).map((f) => path.join(root, f));
+  try {
+    const out = execFileSync(process.execPath, ["--experimental-vm-modules", "-e", checker, JSON.stringify(files)], { cwd: root, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    if (out) for (const line of out.split("\n")) problems.push(line);
+    console.log(`Parse gate: ${files.length} module(s) compiled.`);
+  } catch (err) {
+    const out = (err.stdout || "").toString().trim();
+    if (out) for (const line of out.split("\n")) problems.push(line);
+    else problems.push("parse gate: checker failed: " + err.message);
+  }
+}
+
 console.log(`Required files (${required.size}):`);
 for (const f of [...required].sort()) console.log("  " + f);
 if (problems.length) {

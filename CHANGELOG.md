@@ -1,5 +1,16 @@
 # Changelog
 
+## Repair of the v1.10.167/168 release (v1.10.169)
+
+The previous release shipped two breakages that its own regression tests could not catch: the broken module cannot even be COMPILED, so the suites died on import and were never reached. Both are fixed here, and check-package now fails on any module that does not parse.
+
+- **Duplicate export in history-manager.js.** `MAX_STORED_MESSAGES_PER_CONVERSATION` and `MAX_STORED_CONVERSATION_BYTES` were declared both as inline `export const` and in the module's bottom `export {}` block - a SyntaxError ("Duplicate export") that killed the whole side-panel module tree: every playwright e2e suite, the options page and the real-Chrome import-dialog test all failed on it. The constants are now exported once, in the block.
+- **setAccessLevel is feature-detected.** background.js called `chrome.storage.local.setAccessLevel()` unconditionally at the top level; the Node test harnesses stub `chrome.storage.local` without that method, so every suite importing background.js crashed at import time. The call is now feature-detected: real Chrome (102+) restricts storage to trusted contexts exactly as before, environments without the API are treated as ready.
+- **check-package parse gate.** The packaging pre-flight read sources as text only, so a module that cannot compile passed every check. It now compiles every required .js file as an ES module (`vm.SourceTextModule`, compile only, no execution) and fails the build on a SyntaxError - the gate that would have kept the broken release off main.
+- **build-package file list.** The two new runtime modules (`history-generation.js`, `tavily-response.js`) were missing from the builder's RUNTIME_FILES; its shipped-imports closure check refused to produce a broken zip (the package the release would have shipped could not load background.js at all). The package now carries 37 files.
+- Tests: 25 Node suites + check-package + all 9 playwright e2e suites + real-Chrome 11/11 green; the SEC-03/DATA-01/DATA-02/NET-01 regression suites from v1.10.167/168 pass as intended.
+- Build bumped to 1.10.169.
+
 ## Persistent history and Tavily response bounds (v1.10.168)
 
 - **DATA-02:** Bound each persisted conversation to the newest 200 messages and 5 MiB of serialized message data. The same limit is applied to normal saves and ZIP history restores; this is independent of Chrome's `unlimitedStorage` permission.

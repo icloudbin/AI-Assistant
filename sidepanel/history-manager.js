@@ -109,10 +109,13 @@ function toStoredMessage(message) {
 // timestamps are untouched, so the shortened copy is still the same message).
 // Persistent per-topic bounds. unlimitedStorage disables Chrome's normal
 // quota guard, so enforce both a message count and a serialized-byte budget.
-export const MAX_STORED_MESSAGES_PER_CONVERSATION = 200;
-export const MAX_STORED_CONVERSATION_BYTES = 5 * 1024 * 1024;
+// Declared without `export const`: the bottom export {} block of this module
+// exports them, and a second inline export is a SyntaxError that kills the
+// whole panel module tree (the v1.10.168 release shipped exactly that).
+const MAX_STORED_MESSAGES_PER_CONVERSATION = 200;
+const MAX_STORED_CONVERSATION_BYTES = 5 * 1024 * 1024;
 
-export function limitStoredConversationMessages(conversation) {
+function limitStoredConversationMessages(conversation) {
   if (!conversation || !Array.isArray(conversation.messages)) return conversation;
   const messages = conversation.messages;
   const encoder = new TextEncoder();

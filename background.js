@@ -21,9 +21,14 @@ import { readTavilyJsonCapped, normalizeTavilyPayload } from "./tavily-response.
 // Content scripts do not need extension storage. Chrome exposes storage.local
 // to them by default, so explicitly restrict it to trusted extension contexts
 // before registering handlers that can inject or communicate with page scripts.
-const storageAccessReady = chrome.storage.local.setAccessLevel({
-  accessLevel: "TRUSTED_CONTEXTS",
-}).then(() => true).catch((err) => {
+// Feature-detected: the Node test harnesses stub chrome.storage.local without
+// this method, and only real Chrome (102+) has it - there the restriction
+// happens exactly as before; without the API the request is treated as ready.
+const storageAccessReady = (typeof chrome.storage.local.setAccessLevel === "function"
+  ? chrome.storage.local.setAccessLevel({
+      accessLevel: "TRUSTED_CONTEXTS",
+    })
+  : Promise.resolve()).then(() => true).catch((err) => {
   console.error("[AI Assistant] Unable to restrict local storage access:", err);
   return false;
 });

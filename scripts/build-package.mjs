@@ -68,6 +68,8 @@ const RUNTIME_FILES = [
   "page-images.js",
   "conversation-store.js",
   "attachments.js",
+  "history-generation.js",
+  "tavily-response.js",
   "providers/messages.js",
   "providers/openai-compatible.js",
   "privacy/pii-filter.js",
