@@ -31,7 +31,11 @@ export async function readBoundedText(resp, maxChars = 4000) {
     while (!reachedLimit) {
       const { done, value } = await reader.read();
       if (done) {
-        out += decoder.decode();
+        const tail = decoder.decode();
+        const remaining = limit - out.length;
+        let part = tail.slice(0, remaining);
+        if (part.length && /[\uD800-\uDBFF]/.test(part.at(-1))) part = part.slice(0, -1);
+        out += part;
         break;
       }
       const decoded = decoder.decode(value, { stream: true });
@@ -39,7 +43,7 @@ export async function readBoundedText(resp, maxChars = 4000) {
       if (decoded.length > remaining) {
         let part = decoded.slice(0, remaining);
         // Do not leave an unmatched UTF-16 high surrogate at the boundary.
-        if (part.length && /[\\uD800-\\uDBFF]/.test(part.at(-1))) part = part.slice(0, -1);
+        if (part.length && /[\uD800-\uDBFF]/.test(part.at(-1))) part = part.slice(0, -1);
         out += part;
         reachedLimit = true;
       } else {
