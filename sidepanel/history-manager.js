@@ -128,6 +128,11 @@ export function limitStoredConversationMessages(conversation) {
   }
   if (kept.length === messages.length) return conversation;
   kept.reverse();
+  // Do not persist a partial turn beginning with an assistant response when
+  // the count/byte boundary cuts off its user prompt.
+  while (kept.length > 1 && kept[0]?.role !== "user" && kept.some((message) => message?.role === "user")) {
+    kept.shift();
+  }
   return { ...conversation, messages: kept };
 }
 
