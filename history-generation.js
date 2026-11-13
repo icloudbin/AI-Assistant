@@ -8,7 +8,8 @@ export function normalizeHistoryGeneration(value) {
 
 export function nextHistoryGeneration(value) {
   const current = normalizeHistoryGeneration(value);
-  return current >= Number.MAX_SAFE_INTEGER ? 1 : current + 1;
+  if (current >= Number.MAX_SAFE_INTEGER) throw new Error("History generation exhausted");
+  return current + 1;
 }
 
 export function isHistoryGenerationCurrent(stored, loaded) {
