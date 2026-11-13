@@ -21,16 +21,38 @@ import { buildMessages } from "./messages.js";
 // back to resp.text() for the synthetic responses the unit tests pass (no body
 // stream).
 export async function readBoundedText(resp, maxChars = 4000) {
+  const limit = Number.isSafeInteger(maxChars) && maxChars >= 0 ? maxChars : 4000;
   const reader = resp.body?.getReader?.();
-  if (!reader) return await resp.text();
+  if (!reader) return (await resp.text()).slice(0, limit);
   const decoder = new TextDecoder();
   let out = "";
-  while (out.length < maxChars) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    out += decoder.decode(value, { stream: true });
+  let reachedLimit = limit === 0;
+  try {
+    while (!reachedLimit) {
+      const { done, value } = await reader.read();
+      if (done) {
+        out += decoder.decode();
+        break;
+      }
+      const decoded = decoder.decode(value, { stream: true });
+      const remaining = limit - out.length;
+      if (decoded.length > remaining) {
+        let part = decoded.slice(0, remaining);
+        // Do not leave an unmatched UTF-16 high surrogate at the boundary.
+        if (part.length && /[\\uD800-\\uDBFF]/.test(part.at(-1))) part = part.slice(0, -1);
+        out += part;
+        reachedLimit = true;
+      } else {
+        out += decoded;
+        reachedLimit = out.length >= limit;
+      }
+    }
+  } finally {
+    if (reachedLimit) {
+      try { await reader.cancel(); } catch {}
+    }
+    try { reader.releaseLock(); } catch {}
   }
-  try { reader.cancel(); } catch {}
   return out;
 }
 
@@ -476,6 +498,10 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
         throwIfStopped();
         if (line.length > maxSseLineChars) throw streamLimitError(ctx.lang, `${Number(maxSseLineChars).toLocaleString()} characters per SSE line`);
         handleLine(line);
+        // Stop inside the line loop: a single network chunk may contain
+        // additional SSE events after [DONE] or finish_reason. They are not
+        // part of this response and must never reach the translator/UI.
+        if (sawTerminal) break;
       }
       if (buffer.length > maxSseLineChars) throw streamLimitError(ctx.lang, `${Number(maxSseLineChars).toLocaleString()} characters per SSE line`);
       // The terminal event ([DONE] or a finish_reason) ends the reply by
