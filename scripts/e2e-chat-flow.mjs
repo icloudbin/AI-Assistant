@@ -260,6 +260,13 @@ try {
     assert.ok(!/CURRENT PAGE CONTEXT/.test(text.split("[END INSTRUCTIONS FOR THIS REQUEST]")[1] || ""), "page context leaked into a selection translation");
     // the user bubble shows the instruction plus a preview of the selection
     assert.equal(userBubble, "Translate the following highlighted text into English:\n\nHello world.");
+    // The history entry is titled after the ACTION, not the instruction
+    // prefix: the dropdown shows the short quick-action label ("Translate"),
+    // never the boilerplate "Translate the following highlighted text …".
+    const historyTitles = await page.evaluate(() =>
+      [...document.querySelectorAll("#historySelect option")].map((o) => o.textContent));
+    assert.ok(historyTitles.includes("Translate"), `a history option titled exactly "Translate": ${JSON.stringify(historyTitles)}`);
+    assert.ok(!historyTitles.some((ttl) => ttl.includes("highlighted text")), `no option carries the instruction prefix: ${JSON.stringify(historyTitles)}`);
   });
 
   assert.deepEqual(pageErrors, [], `uncaught errors in the panel: ${pageErrors.join(" | ")}`);

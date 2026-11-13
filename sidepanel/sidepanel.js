@@ -3395,7 +3395,15 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       convo = { id: currentConversationId, title: "", messages: [], updatedAt: Date.now() };
       conversations.unshift(convo);
     }
-    convo.title = convo.title || makeTopicTitle(history, t(currentLang, "historySelect_newTopic"));
+    // A translation conversation is titled after the ACTION ("Translate"), not
+    // after its instruction prefix: the display question is a localized
+    // sentence ("将以下选中的文本翻译成简体中文: …") whose first words are
+    // boilerplate shared by every translation, which made each history entry
+    // start with that same long label instead of a meaningful short title.
+    convo.title = convo.title
+      || (translateMode === true
+          ? t(currentLang, "quickTranslate_button")
+          : makeTopicTitle(history, t(currentLang, "historySelect_newTopic")));
     renderHistorySelect();
     try {
       await saveConversations();

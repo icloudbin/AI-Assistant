@@ -1,5 +1,13 @@
 # Changelog
 
+## Translation history entries are titled "Translate" (v1.10.170)
+
+User-reported: in the history dropdown at the bottom of the side panel, every translation conversation was titled with the start of its instruction sentence ("将以下选中的文本翻译成简体中文 …" for a context-menu translation, "将当前文章翻译成 …" for the quick action) - boilerplate shared by every translation, not something that tells the entries apart.
+
+- A translation conversation is now titled after the ACTION, using the quick-action button label (`quickTranslate_button`, "Translate" / "翻译", six languages), set at submit time when the conversation has no title yet. Ordinary questions keep their derived first-message titles; an existing title is never overwritten (a normal question that starts a conversation, followed later by a translation, keeps the question's title).
+- e2e-chat-flow's context-menu translation test now pins the dropdown title: an option exactly "Translate" exists and no option carries the instruction prefix.
+- Build bumped to 1.10.170.
+
 ## Repair of the v1.10.167/168 release (v1.10.169)
 
 The previous release shipped two breakages that its own regression tests could not catch: the broken module cannot even be COMPILED, so the suites died on import and were never reached. Both are fixed here, and check-package now fails on any module that does not parse.
