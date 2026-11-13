@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import {
   cleanForTopic,
   makeTopicTitle,
+  translationTopicTitle,
   toStoredMessage,
   compressForQuota,
   limitStoredConversationMessages,
@@ -157,6 +158,25 @@ assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
   const byteSize = new TextEncoder().encode(JSON.stringify(byteLimited.messages)).length;
   assert.ok(byteSize <= MAX_STORED_CONVERSATION_BYTES, `serialized history stays within byte budget (${byteSize})`);
   assert.ok(byteLimited.messages.length < huge.length);
+}
+
+// ---------- translationTopicTitle: "<label>: <excerpt of the source>" ----------
+{
+  const label = "Translate";
+  assert.equal(translationTopicTitle(label, "Hello world."), "Translate: Hello world.");
+  // Long source: first 10 words, capped at 60 code points (CJK has no spaces).
+  const longAscii = Array.from({ length: 30 }, (_, i) => `w${i}`).join(" ");
+  assert.ok(translationTopicTitle(label, longAscii).startsWith("Translate: w0 w1 w2 w3 w4 w5 w6 w7 w8 w9"), translationTopicTitle(label, longAscii));
+  assert.ok(!translationTopicTitle(label, longAscii).includes("w10"), "excerpt stops at 10 words");
+  const cjk = "汉".repeat(120);
+  const cjkTitle = translationTopicTitle(label, cjk);
+  assert.ok(cjkTitle.startsWith("Translate: ") && [...cjkTitle].length <= "Translate: ".length + 60 + 1, `CJK excerpt capped at 60 code points (${[...cjkTitle].length})`);
+  // Empty/blank source keeps the bare label (capture failed / cancelled).
+  assert.equal(translationTopicTitle(label, ""), label);
+  assert.equal(translationTopicTitle(label, "   "), label);
+  assert.equal(translationTopicTitle(label, null), label);
+  // A missing label still returns text (never "undefined: ...").
+  assert.equal(translationTopicTitle("", "Hello"), "Hello");
 }
 
 console.log("OK: history-manager.js — titles, structured-attachment projection, quota compression.");

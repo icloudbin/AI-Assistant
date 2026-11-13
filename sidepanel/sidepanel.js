@@ -27,7 +27,7 @@ import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-s
 // in scripts/test-conversation-store.mjs).
 import { mergeConversationLists, sortedByNewest, resolveContextEpoch, withHistoryLock, withNamedLock, CONTEXT_ACTION_LOCK, createMessage, withMessageIds, migrateConversationIds } from "../conversation-store.js";
 import { markdownToHtml } from "./rendering/markdown.js";
-import { makeTopicTitle, toStoredMessage, compressForQuota, limitStoredConversationMessages } from "./history-manager.js";
+import { makeTopicTitle, translationTopicTitle, toStoredMessage, compressForQuota, limitStoredConversationMessages } from "./history-manager.js";
 import { normalizeHistoryGeneration, isHistoryGenerationCurrent } from "../history-generation.js";
 import { sanitizeAttachmentName, normalizeAttachments, migrateLegacyConversations, isImageDropPayload } from "../attachments.js";
 // Page images are fetched in the page's own context (no worker privilege) -
@@ -3400,6 +3400,9 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     // sentence ("将以下选中的文本翻译成简体中文: …") whose first words are
     // boilerplate shared by every translation, which made each history entry
     // start with that same long label instead of a meaningful short title.
+    // The label is a PLACEHOLDER for a whole-page translation - its source
+    // text only exists after the page capture below, which then extends the
+    // title to "<Translate>: <first words of the source>" (see pageContext).
     convo.title = convo.title
       || (translateMode === true
           ? t(currentLang, "quickTranslate_button")
@@ -3434,6 +3437,24 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     }
 
     const pageContextValid = !!pageContext && !pageContext.captureFailed;
+    // The translation title's source excerpt: for a selection translation the
+    // highlighted text is known right away; for a whole-page translation it is
+    // the article captured above. Extends the placeholder label to
+    // "<Translate>: <first words of the source>" so history entries tell each
+    // other apart; a failed capture (or a cancel during it) keeps the bare
+    // label, and a conversation that already had a title is never touched.
+    if (translateMode === true && convo.title === t(currentLang, "quickTranslate_button")) {
+      const titleWithSource = translationTopicTitle(
+        t(currentLang, "quickTranslate_button"),
+        (typeof translateSource === "string" && translateSource.trim())
+          ? translateSource
+          : (pageContextValid ? pageContext.text || "" : ""),
+      );
+      if (titleWithSource !== convo.title) {
+        convo.title = titleWithSource;
+        renderHistorySelect();
+      }
+    }
     let automaticPageImages = [];
     let pageImagesSkipped = 0;
     let pageImagesRequested = 0;

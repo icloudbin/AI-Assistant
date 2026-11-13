@@ -38,6 +38,20 @@ function makeTopicTitle(messages, fallbackTitle = "") {
   return title || fallbackTitle;
 }
 
+// "<Translate>: <first words of the translated text>" for a history entry.
+// `label` arrives already localized (the quick-action button label); the
+// excerpt mirrors makeTopicTitle's word/length caps so a whole article or a
+// long selection cannot flood the dropdown. An empty source keeps the bare
+// label (a translation whose capture failed still gets a usable title).
+function translationTopicTitle(label, source) {
+  const text = cleanForTopic(source);
+  if (!label) return text;
+  if (!text) return label;
+  const words = text.split(/\s+/).filter(Boolean);
+  const excerpt = cutAtCodePointBoundary(words.slice(0, 10).join(" "), 60).trim();
+  return excerpt ? `${label}: ${excerpt}` : label;
+}
+
 // Attachment text can be up to 180,000 characters per message. Stored in full
 // across up to 100 conversations it exceeds chrome.storage.local's 10 MB quota,
 // after which every save fails and no history is kept. providers/messages.js
@@ -159,6 +173,7 @@ function compressForQuota(list) {
 export {
   cleanForTopic,
   makeTopicTitle,
+  translationTopicTitle,
   toStoredMessage,
   compressForQuota,
   limitStoredConversationMessages,

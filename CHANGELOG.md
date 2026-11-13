@@ -1,5 +1,14 @@
 # Changelog
 
+## Translation history titles carry the translated text (v1.10.171)
+
+Follow-up to v1.10.170 (user request): a translation history entry is now titled "<Translate>: <first words of the translated text>" - the quick-action label as the prefix, then the source, so entries tell each other apart ("翻译: 四大行上调存款利率…").
+
+- `translationTopicTitle(label, source)` in history-manager.js (pure, unit-tested): excerpt = first 10 words, capped at 60 code points (CJK text has no spaces and would otherwise flood the title); an empty source keeps the bare label.
+- The source text is known at different times per path: for a selection translation it is `translateSource` at submit; for a whole-page translation it is the article captured during the request, so the submit-time title stays the bare label as a placeholder and is extended right after the page capture. A cancel during the capture or a failed capture keeps the bare label; an existing conversation title is never overwritten.
+- e2e-chat-flow pins "Translate: Hello world." for the context-menu translation; test-history-manager covers the excerpt caps and the empty-source fallback.
+- Build bumped to 1.10.171.
+
 ## Translation history entries are titled "Translate" (v1.10.170)
 
 User-reported: in the history dropdown at the bottom of the side panel, every translation conversation was titled with the start of its instruction sentence ("将以下选中的文本翻译成简体中文 …" for a context-menu translation, "将当前文章翻译成 …" for the quick action) - boilerplate shared by every translation, not something that tells the entries apart.
