@@ -4,7 +4,7 @@
 // integration-tested in the browser; here the shared machinery is driven
 // with synthetic Response bodies. Run:  node scripts/test-openai-compatible.mjs
 import assert from "node:assert/strict";
-import { readSse, openAICompatibleStreamError, providerHttpError, extractOpenAIDelta, fetchWithHeadersTimeout, streamGroq, isModelUnavailableError, classifyProviderFailure } from "../providers/openai-compatible.js";
+import { readSse, openAICompatibleStreamError, providerHttpError, extractOpenAIDelta, fetchWithHeadersTimeout, streamGroq, readBoundedText, isModelUnavailableError, classifyProviderFailure } from "../providers/openai-compatible.js";
 import { MODELS, findKnownModel } from "../models.js";
 
 const encoder = new TextEncoder();
@@ -53,6 +53,50 @@ const delta = (json) => json.choices?.[0]?.delta?.content ?? "";
   ]);
   await readSse(resp, delta, ctx, openAICompatibleStreamError);
   assert.equal(ctx.chunks.join(""), "Hello!", "chunks reassembled; unterminated final line flushed");
+}
+
+// ---------- terminal events stop processing later lines in the SAME network chunk (SEC-01) ----------
+{
+  for (const [terminal, label] of [
+    ['data: [DONE]', "[DONE]"],
+    ['data: {"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}]}', "finish_reason"],
+  ]) {
+    const ctx = makeCtx();
+    const trailing = 'data: {"choices":[{"delta":{"content":"INJECTED"}}]}\\n\\n';
+    const first = 'data: {"choices":[{"delta":{"content":"OK"}}]}\\n\\n';
+    const { resp } = sse([first + terminal + "\\n\\n" + trailing]);
+    await readSse(resp, delta, ctx, openAICompatibleStreamError);
+    assert.equal(ctx.chunks.join(""), label === "[DONE]" ? "OK" : "OK!", `${label}: events after terminal marker in same chunk are ignored`);
+    assert.ok(!ctx.chunks.join("").includes("INJECTED"), `${label}: post-terminal content never reaches output`);
+  }
+}
+
+// ---------- readBoundedText enforces its character cap on oversized chunks ----------
+{
+  const maxChars = 128;
+  let cancelled = 0;
+  let reads = 0;
+  const huge = "x".repeat(2 * 1024 * 1024);
+  const body = new ReadableStream({
+    pull(controller) {
+      reads++;
+      controller.enqueue(encoder.encode(huge));
+      // Deliberately leave the stream open; reaching the cap must cancel it.
+    },
+    cancel() { cancelled++; },
+  });
+  const result = await readBoundedText({ body }, maxChars);
+  assert.equal(result.length, maxChars, "one oversized chunk cannot exceed the configured cap");
+  assert.equal(cancelled, 1, "reader is cancelled immediately at the cap");
+  assert.equal(reads, 1, "no additional chunks are consumed after reaching the cap");
+  const utf8 = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode("A😀BC"));
+      controller.close();
+    },
+  });
+  const unicode = await readBoundedText({ body: utf8 }, 3);
+  assert.equal(unicode, "A😀", "truncation does not split a Unicode surrogate pair");
 }
 
 // ---------- [DONE] ends the read even when the connection stays open (v1.10.162) ----------
