@@ -1,5 +1,11 @@
 # Changelog
 
+## Persistent history and Tavily response bounds (v1.10.168)
+
+- **DATA-02:** Bound each persisted conversation to the newest 200 messages and 5 MiB of serialized message data. The same limit is applied to normal saves and ZIP history restores; this is independent of Chrome's `unlimitedStorage` permission.
+- **NET-01:** Tavily success bodies are now streamed with a 1.5 MB byte cap before JSON parsing. The response schema is validated and result count, title, URL, content and publication-date fields are bounded.
+- Added regression tests for message-count/byte limits and bounded Tavily JSON parsing.
+
 ## Storage isolation and history deletion race (v1.10.167)
 
 - **SEC-03:** Restricted `chrome.storage.local` to trusted extension contexts with `setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })`. Content scripts do not require direct storage access.
