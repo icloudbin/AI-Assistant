@@ -10,7 +10,7 @@ assert.equal(normalizeHistoryGeneration("2"), 0);
 assert.equal(normalizeHistoryGeneration(2), 2);
 assert.equal(nextHistoryGeneration(undefined), 1);
 assert.equal(nextHistoryGeneration(1), 2);
-assert.equal(nextHistoryGeneration(Number.MAX_SAFE_INTEGER), 1);
+assert.throws(() => nextHistoryGeneration(Number.MAX_SAFE_INTEGER), /exhausted/);
 assert.equal(isHistoryGenerationCurrent(0, undefined), true, "legacy snapshots use generation zero");
 assert.equal(isHistoryGenerationCurrent(2, 1), false, "pre-delete snapshots are stale");
 assert.equal(isHistoryGenerationCurrent(2, 2), true, "current snapshots may save");
