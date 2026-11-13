@@ -17,6 +17,17 @@ import { isAutoWebResearchEnabled } from "./auto-web-research.js";
 // arrives. restoreSettingsFromBackupOnce() memoizes the run for this service
 // worker instance, so the per-request safety-net call below is free after
 // the first (each fresh worker instance checks recovery exactly once).
+// Content scripts do not need extension storage. Chrome exposes storage.local
+// to them by default, so explicitly restrict it to trusted extension contexts
+// before registering handlers that can inject or communicate with page scripts.
+try {
+  chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" }).catch((err) => {
+    console.error("[AI Assistant] Unable to restrict local storage access:", err);
+  });
+} catch (err) {
+  console.error("[AI Assistant] Unable to restrict local storage access:", err);
+}
+
 void restoreSettingsFromBackupOnce();
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.warn);
