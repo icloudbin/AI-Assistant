@@ -18,20 +18,16 @@ import { readTavilyJsonCapped, normalizeTavilyPayload } from "./tavily-response.
 // arrives. restoreSettingsFromBackupOnce() memoizes the run for this service
 // worker instance, so the per-request safety-net call below is free after
 // the first (each fresh worker instance checks recovery exactly once).
-// Content scripts do not need extension storage. Chrome exposes storage.local
-// to them by default, so explicitly restrict it to trusted extension contexts
-// before registering handlers that can inject or communicate with page scripts.
-// Feature-detected: the Node test harnesses stub chrome.storage.local without
-// this method, and only real Chrome (102+) has it - there the restriction
-// happens exactly as before; without the API the request is treated as ready.
-const storageAccessReady = (typeof chrome.storage.local.setAccessLevel === "function"
-  ? chrome.storage.local.setAccessLevel({
-      accessLevel: "TRUSTED_CONTEXTS",
-    })
-  : Promise.resolve()).then(() => true).catch((err) => {
-  console.error("[AI Assistant] Unable to restrict local storage access:", err);
-  return false;
-});
+// Storage isolation note (retracts the v1.10.167 SEC-03 claim): there is NO
+// API to keep content scripts away from chrome.storage.local - the storage
+// access-level API applies exclusively to storage.session (whose default is
+// already trusted-contexts-only), and storage.local is always
+// content-script-readable while the "storage" permission is held. The
+// isolation that matters is structural: content.js and page-images.js never
+// touch chrome.storage at all (pinned by scripts/test-storage-access-level.mjs).
+// An access-level restriction call on storage.local used to sit here; it was
+// accepted without effect (verified by probe in real Chromium) and has been
+// removed - see the test for why it must not come back.
 
 void restoreSettingsFromBackupOnce();
 
@@ -105,8 +101,6 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 // the frame the user right-clicked in. Resolves to null when unavailable.
 async function readSelectionMarkdown(tabId, frameId) {
   try {
-    // Do not inject content.js until Chrome confirms storage is restricted.
-    if (!(await storageAccessReady)) return null;
     const target = { tabId, frameIds: [typeof frameId === "number" ? frameId : 0] };
     await chrome.scripting.executeScript({ target, files: ["content.js"] });
     const res = await chrome.scripting.executeScript({

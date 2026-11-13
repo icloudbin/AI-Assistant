@@ -1,5 +1,15 @@
 # Changelog
 
+## SEC-03 storage claim retracted, isolation documented truthfully (v1.10.172)
+
+Follows the 2026-11-13 review round (user-approved option A): the v1.10.167 SEC-03 entry claimed that content scripts were restricted from reading `chrome.storage.local` via an access-level call. That claim was wrong and has been retracted.
+
+- **The facts.** `StorageArea.setAccessLevel()` applies exclusively to `chrome.storage.session` (whose default is already trusted-contexts-only); `chrome.storage.local` remains readable by content scripts for as long as the `storage` permission is held, and no API can change that. The v1.10.167 call was accepted by the browser WITHOUT effect - verified by a probe in a real extension-loaded Chromium (`scripts/probe-trusted-storage.mjs`) and by the documentation.
+- **What actually protects the stored data is structural**: the only code Chrome runs in the page's content-script world (content.js, page-images.js) never touches `chrome.storage` at all, so nothing a page can influence reaches the stored history or API keys. The call and its injection gate in background.js are removed; a comment documents the truth where the call used to be.
+- `scripts/test-storage-access-level.mjs` now pins the real invariants instead of grepping for a call whose effect it could not verify: content.js and page-images.js contain no `chrome.storage` usage, the `storage` permission stays declared, and the placebo call must not come back.
+- No runtime behavior changes: the removed call was a no-op, and the injection gate it guarded was a no-op delay.
+- Build bumped to 1.10.172.
+
 ## Translation history titles carry the translated text (v1.10.171)
 
 Follow-up to v1.10.170 (user request): a translation history entry is now titled "<Translate>: <first words of the translated text>" - the quick-action label as the prefix, then the source, so entries tell each other apart ("翻译: 四大行上调存款利率…").
