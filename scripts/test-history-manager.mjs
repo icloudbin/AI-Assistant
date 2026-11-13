@@ -152,7 +152,7 @@ assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
   assert.equal(limited.messages[0].id, String(many.length - MAX_STORED_MESSAGES_PER_CONVERSATION));
   assert.equal(limited.messages.at(-1).id, String(many.length - 1));
   assert.equal(limitStoredConversationMessages({ id: "small", messages: many.slice(0, 2) }).messages.length, 2);
-  const huge = Array.from({ length: 20 }, (_, i) => ({ id: String(i), role: "assistant", content: String(i).repeat(400_000) }));
+  const huge = Array.from({ length: 20 }, (_, i) => ({ id: String(i), role: "assistant", content: "x".repeat(400_000) }));
   const byteLimited = limitStoredConversationMessages({ id: "bytes", messages: huge });
   const byteSize = new TextEncoder().encode(JSON.stringify(byteLimited.messages)).length;
   assert.ok(byteSize <= MAX_STORED_CONVERSATION_BYTES, `serialized history stays within byte budget (${byteSize})`);
