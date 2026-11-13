@@ -62,9 +62,9 @@ const delta = (json) => json.choices?.[0]?.delta?.content ?? "";
     ['data: {"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}]}', "finish_reason"],
   ]) {
     const ctx = makeCtx();
-    const trailing = 'data: {"choices":[{"delta":{"content":"INJECTED"}}]}\\n\\n';
-    const first = 'data: {"choices":[{"delta":{"content":"OK"}}]}\\n\\n';
-    const { resp } = sse([first + terminal + "\\n\\n" + trailing]);
+    const trailing = 'data: {"choices":[{"delta":{"content":"INJECTED"}}]}\n\n';
+    const first = 'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n';
+    const { resp } = sse([first + terminal + "\n\n" + trailing]);
     await readSse(resp, delta, ctx, openAICompatibleStreamError);
     assert.equal(ctx.chunks.join(""), label === "[DONE]" ? "OK" : "OK!", `${label}: events after terminal marker in same chunk are ignored`);
     assert.ok(!ctx.chunks.join("").includes("INJECTED"), `${label}: post-terminal content never reaches output`);
