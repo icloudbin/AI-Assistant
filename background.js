@@ -12,6 +12,7 @@ import { streamDeepSeek, streamGroq, streamOpenRouter, classifyProviderFailure, 
 import { factCheckLanguageInstruction, untrustedBoundary, newBoundaryId } from "./providers/messages.js";
 import { normalizeAttachments } from "./attachments.js";
 import { isAutoWebResearchEnabled } from "./auto-web-research.js";
+import { readTavilyJsonCapped, normalizeTavilyPayload } from "./tavily-response.js";
 
 // Restore settings as soon as the service worker starts, before any request
 // arrives. restoreSettingsFromBackupOnce() memoizes the run for this service
@@ -944,7 +945,8 @@ async function tavilySearchRequest(query, apiKey, signal, topic, maxResults) {
     const detail = await readBoundedText(resp);
     throw new Error(`Tavily HTTP ${resp.status}: ${detail.slice(0, 500)}`);
   }
-  return resp.json();
+  const payload = await readTavilyJsonCapped(resp);
+  return normalizeTavilyPayload(payload, maxResults);
 }
 
 const ONLINE_RESEARCH_MAX_RESULTS = 6;
