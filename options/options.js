@@ -11,6 +11,7 @@ import {
 import {
   AUTO_WEB_RESEARCH_KEY,
   HISTORY_STORAGE_KEY,
+  HISTORY_GENERATION_STORAGE_KEY,
   MAX_SAVED_CONVERSATIONS,
   PREFERRED_TRANSLATION_LANGUAGE_KEY,
   THEME_STORAGE_KEY,
@@ -23,7 +24,8 @@ import {
 import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-storage.js";
 import { encryptSecrets, decryptSecrets, MIN_PASSPHRASE_LENGTH } from "../settings-crypto.js";
 import { withHistoryLock, withMessageIds, isValidMessageId, isValidTimestamp } from "../conversation-store.js";
-import { compressForQuota, cleanForTopic } from "../sidepanel/history-manager.js";
+import { nextHistoryGeneration } from "../history-generation.js";
+import { compressForQuota, cleanForTopic, limitStoredConversationMessages } from "../sidepanel/history-manager.js";
 import { migrateLegacyMessage, normalizeAttachments } from "../attachments.js";
 import { sanitizePiiMap } from "../privacy/pii-filter.js";
 import { cutAtCodePointBoundary, MAX_CUSTOM_PROMPT_CHARS } from "../models.js";
@@ -814,6 +816,8 @@ async function restoreHistory() {
 
       const merged = [...byId.values()]
         .filter((c) => c?.messages?.length)
+        .map(limitStoredConversationMessages)
+        .filter((c) => c.messages?.length)
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
         .slice(0, MAX_SAVED_CONVERSATIONS);
 
@@ -932,7 +936,16 @@ async function deleteAllHistory() {
   msgEl.textContent = t(currentLang, "delete_deleting");
 
   try {
-    await withHistoryLock(() => chrome.storage.local.remove(HISTORY_STORAGE_KEY));
+    await withHistoryLock(async () => {
+      const stored = await chrome.storage.local.get(HISTORY_GENERATION_STORAGE_KEY);
+      const generation = nextHistoryGeneration(stored[HISTORY_GENERATION_STORAGE_KEY]);
+      // Publish the tombstone and empty history in one storage operation.
+      // Side-panel saves use this same lock and reject older generations.
+      await chrome.storage.local.set({
+        [HISTORY_GENERATION_STORAGE_KEY]: generation,
+        [HISTORY_STORAGE_KEY]: [],
+      });
+    });
     msgEl.style.color = "#4ade80";
     msgEl.textContent = t(currentLang, "delete_success");
     setTimeout(() => (msgEl.textContent = ""), 2500);

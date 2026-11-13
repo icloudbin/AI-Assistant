@@ -2,6 +2,7 @@
 import { MODELS, MAX_PAGE_CONTEXT_CHARS, findModelById, findKnownModel, resolveModelId, findModelIdByLabel, modelSupportsVision, cutAtCodePointBoundary } from "../models.js";
 import {
   HISTORY_STORAGE_KEY,
+  HISTORY_GENERATION_STORAGE_KEY,
   PENDING_CONTEXT_ACTION_KEY,
   PREFERRED_TRANSLATION_LANGUAGE_KEY,
   MAX_SAVED_CONVERSATIONS,
@@ -26,7 +27,8 @@ import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-s
 // in scripts/test-conversation-store.mjs).
 import { mergeConversationLists, sortedByNewest, resolveContextEpoch, withHistoryLock, withNamedLock, CONTEXT_ACTION_LOCK, createMessage, withMessageIds, migrateConversationIds } from "../conversation-store.js";
 import { markdownToHtml } from "./rendering/markdown.js";
-import { makeTopicTitle, toStoredMessage, compressForQuota } from "./history-manager.js";
+import { makeTopicTitle, toStoredMessage, compressForQuota, limitStoredConversationMessages } from "./history-manager.js";
+import { normalizeHistoryGeneration, isHistoryGenerationCurrent } from "../history-generation.js";
 import { sanitizeAttachmentName, normalizeAttachments, migrateLegacyConversations, isImageDropPayload } from "../attachments.js";
 // Page images are fetched in the page's own context (no worker privilege) -
 // see page-images.js for why the worker's image-host allowlist does not apply.
@@ -394,6 +396,7 @@ let attachments = [];
 
 let history = [];
 let conversations = [];
+let historyGeneration = 0;
 let currentConversationId = null;
 let port = null;
 let currentAssistantBubble = null;
@@ -1896,19 +1899,15 @@ async function saveConversationsNow() {
 }
 
 async function saveConversationsWithLock() {
-  const stored = await chrome.storage.local.get(HISTORY_STORAGE_KEY);
-  // Whether history existed when we read it: if "Delete All History" (any
-  // window) removes the key while this save is gathering its data, writing
-  // `merged` back would resurrect the deleted conversations - the delete
-  // branch of the storage.onChanged listener cannot retract a write that is
-  // already past its read, so the write re-checks below.
-  const historyExistedAtRead = stored[HISTORY_STORAGE_KEY] !== undefined;
+  const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY, HISTORY_GENERATION_STORAGE_KEY]);
+  const storedGeneration = normalizeHistoryGeneration(stored[HISTORY_GENERATION_STORAGE_KEY]);
+  if (!isHistoryGenerationCurrent(storedGeneration, historyGeneration)) return;
   // Snapshot the live history only after the read, so the freshest copy of
   // the current conversation is what gets merged and written.
   syncCurrentConversationFromHistory();
   let merged = withoutDiscardedMessages(sortedByNewest(
     mergeConversationLists(migrateLegacyConversations(stored[HISTORY_STORAGE_KEY]), conversations, currentConversationId)
-  )).slice(0, MAX_SAVED_CONVERSATIONS);
+  )).map(limitStoredConversationMessages).filter((c) => c.messages?.length).slice(0, MAX_SAVED_CONVERSATIONS);
   // Storage-quota escalation, most gentle first: (1) write as-is, (2) shrink
   // attachment previews and drop display-only copies (every conversation
   // kept), (3) only then drop the OLDEST conversations - half per attempt -
@@ -1916,15 +1915,6 @@ async function saveConversationsWithLock() {
   let quotaDropped = 0;
   for (let attempt = 0; ; attempt++) {
     try {
-      if (historyExistedAtRead) {
-        const recheck = await chrome.storage.local.get(HISTORY_STORAGE_KEY);
-        if (recheck[HISTORY_STORAGE_KEY] === undefined) {
-          // History was deleted while this save was in flight. Discard it:
-          // the onChanged delete branch has already reset this panel's
-          // in-memory state, and the list must stay deleted.
-          return;
-        }
-      }
       await chrome.storage.local.set({ [HISTORY_STORAGE_KEY]: merged });
       break;
     } catch (err) {
@@ -2030,7 +2020,10 @@ function startNewTopic() {
 }
 
 async function loadConversations() {
-  const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY]);
+  const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY, HISTORY_GENERATION_STORAGE_KEY]);
+  const loadedGeneration = normalizeHistoryGeneration(stored[HISTORY_GENERATION_STORAGE_KEY]);
+  if (loadedGeneration < historyGeneration) return;
+  historyGeneration = loadedGeneration;
   // migrateLegacyConversations: messages saved before attachments became
   // structured held them inline in `content`; convert them once, here.
   // migrateConversationIds: messages saved before they carried ids get their
@@ -4013,15 +4006,29 @@ initPromise = init().catch((err) => {
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local" || !changes[HISTORY_STORAGE_KEY]) return;
-  // Settings > Delete All History removes the key outright, so the change has
-  // no newValue (this panel's own saves and Settings > Restore always write an
-  // array). The displayed conversation would otherwise live on in memory and
-  // be written straight back by the next send, making "deleted" untrue. Reset
-  // to a blank New Topic exactly as the Clear button does, stopping an
-  // in-flight request first so its reply cannot re-save the conversation. The
-  // refresh below then empties the in-memory list and the history dropdown.
-  if (changes[HISTORY_STORAGE_KEY].newValue === undefined) {
+  if (areaName !== "local") return;
+  const generationChange = changes[HISTORY_GENERATION_STORAGE_KEY];
+  const nextGeneration = generationChange
+    ? normalizeHistoryGeneration(generationChange.newValue)
+    : historyGeneration;
+  const generationChanged = Boolean(generationChange) && nextGeneration > historyGeneration;
+  if (generationChanged) {
+    // The generation is the durable deletion signal. Clear the local list
+    // immediately so a save cannot resurrect it before the follow-up reload.
+    historyGeneration = nextGeneration;
+    conversations = [];
+    renderHistorySelect();
+    if (isListening) {
+      userStoppedMic = true;
+      stopMic();
+    }
+    stopActiveRequest();
+    startNewTopic();
+  }
+  if (!changes[HISTORY_STORAGE_KEY]) return;
+  // Compatibility with a history key removed by an older build or external
+  // tool. Current deletion writes the generation and empty array together.
+  if (!generationChanged && changes[HISTORY_STORAGE_KEY].newValue === undefined) {
     if (isListening) {
       userStoppedMic = true;
       stopMic();

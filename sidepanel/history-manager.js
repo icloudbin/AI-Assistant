@@ -107,6 +107,35 @@ function toStoredMessage(message) {
 // display-only copy of every message (readers fall back to `content`).
 // Lossy for display, but every conversation and every turn is kept (ids and
 // timestamps are untouched, so the shortened copy is still the same message).
+// Persistent per-topic bounds. unlimitedStorage disables Chrome's normal
+// quota guard, so enforce both a message count and a serialized-byte budget.
+export const MAX_STORED_MESSAGES_PER_CONVERSATION = 200;
+export const MAX_STORED_CONVERSATION_BYTES = 5 * 1024 * 1024;
+
+export function limitStoredConversationMessages(conversation) {
+  if (!conversation || !Array.isArray(conversation.messages)) return conversation;
+  const messages = conversation.messages;
+  const encoder = new TextEncoder();
+  const kept = [];
+  let totalBytes = 2;
+  for (let i = messages.length - 1; i >= 0 && kept.length < MAX_STORED_MESSAGES_PER_CONVERSATION; i--) {
+    let size;
+    try { size = encoder.encode(JSON.stringify(messages[i])).length + 1; }
+    catch { continue; }
+    if (totalBytes + size > MAX_STORED_CONVERSATION_BYTES) break;
+    kept.push(messages[i]);
+    totalBytes += size;
+  }
+  if (kept.length === messages.length) return conversation;
+  kept.reverse();
+  // Do not persist a partial turn beginning with an assistant response when
+  // the count/byte boundary cuts off its user prompt.
+  while (kept.length > 1 && kept[0]?.role !== "user" && kept.some((message) => message?.role === "user")) {
+    kept.shift();
+  }
+  return { ...conversation, messages: kept };
+}
+
 const QUOTA_ATTACHMENT_PREVIEW_CHARS = 800;
 function compressForQuota(list) {
   return list.map((c) => ({
@@ -129,6 +158,9 @@ export {
   makeTopicTitle,
   toStoredMessage,
   compressForQuota,
+  limitStoredConversationMessages,
+  MAX_STORED_MESSAGES_PER_CONVERSATION,
+  MAX_STORED_CONVERSATION_BYTES,
   STORED_ATTACHMENT_PREVIEW_CHARS,
   QUOTA_ATTACHMENT_PREVIEW_CHARS,
 };

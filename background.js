@@ -12,11 +12,22 @@ import { streamDeepSeek, streamGroq, streamOpenRouter, classifyProviderFailure, 
 import { factCheckLanguageInstruction, untrustedBoundary, newBoundaryId } from "./providers/messages.js";
 import { normalizeAttachments } from "./attachments.js";
 import { isAutoWebResearchEnabled } from "./auto-web-research.js";
+import { readTavilyJsonCapped, normalizeTavilyPayload } from "./tavily-response.js";
 
 // Restore settings as soon as the service worker starts, before any request
 // arrives. restoreSettingsFromBackupOnce() memoizes the run for this service
 // worker instance, so the per-request safety-net call below is free after
 // the first (each fresh worker instance checks recovery exactly once).
+// Content scripts do not need extension storage. Chrome exposes storage.local
+// to them by default, so explicitly restrict it to trusted extension contexts
+// before registering handlers that can inject or communicate with page scripts.
+const storageAccessReady = chrome.storage.local.setAccessLevel({
+  accessLevel: "TRUSTED_CONTEXTS",
+}).then(() => true).catch((err) => {
+  console.error("[AI Assistant] Unable to restrict local storage access:", err);
+  return false;
+});
+
 void restoreSettingsFromBackupOnce();
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.warn);
@@ -89,6 +100,8 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 // the frame the user right-clicked in. Resolves to null when unavailable.
 async function readSelectionMarkdown(tabId, frameId) {
   try {
+    // Do not inject content.js until Chrome confirms storage is restricted.
+    if (!(await storageAccessReady)) return null;
     const target = { tabId, frameIds: [typeof frameId === "number" ? frameId : 0] };
     await chrome.scripting.executeScript({ target, files: ["content.js"] });
     const res = await chrome.scripting.executeScript({
@@ -932,7 +945,8 @@ async function tavilySearchRequest(query, apiKey, signal, topic, maxResults) {
     const detail = await readBoundedText(resp);
     throw new Error(`Tavily HTTP ${resp.status}: ${detail.slice(0, 500)}`);
   }
-  return resp.json();
+  const payload = await readTavilyJsonCapped(resp);
+  return normalizeTavilyPayload(payload, maxResults);
 }
 
 const ONLINE_RESEARCH_MAX_RESULTS = 6;

@@ -11,6 +11,9 @@ import {
   makeTopicTitle,
   toStoredMessage,
   compressForQuota,
+  limitStoredConversationMessages,
+  MAX_STORED_MESSAGES_PER_CONVERSATION,
+  MAX_STORED_CONVERSATION_BYTES,
   STORED_ATTACHMENT_PREVIEW_CHARS,
   QUOTA_ATTACHMENT_PREVIEW_CHARS,
 } from "../sidepanel/history-manager.js";
@@ -137,6 +140,23 @@ assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
   assert.ok(attachmentCharCount(merged[0].messages[0].attachments) <= QUOTA_ATTACHMENT_PREVIEW_CHARS, `the shorter stored preview wins (${attachmentCharCount(merged[0].messages[0].attachments)})`);
   assert.equal(merged[0].messages[0].content, "Question?", "content identity untouched");
   assert.equal(merged[0].messages[0].id, live.id, "the merged message keeps the live id");
+}
+
+
+{
+  const many = Array.from({ length: MAX_STORED_MESSAGES_PER_CONVERSATION + 50 }, (_, i) => ({
+    id: String(i), role: i % 2 === 0 ? "user" : "assistant", content: `message-${i}`,
+  }));
+  const limited = limitStoredConversationMessages({ id: "long", messages: many });
+  assert.equal(limited.messages.length, MAX_STORED_MESSAGES_PER_CONVERSATION);
+  assert.equal(limited.messages[0].id, String(many.length - MAX_STORED_MESSAGES_PER_CONVERSATION));
+  assert.equal(limited.messages.at(-1).id, String(many.length - 1));
+  assert.equal(limitStoredConversationMessages({ id: "small", messages: many.slice(0, 2) }).messages.length, 2);
+  const huge = Array.from({ length: 20 }, (_, i) => ({ id: String(i), role: "assistant", content: "x".repeat(400_000) }));
+  const byteLimited = limitStoredConversationMessages({ id: "bytes", messages: huge });
+  const byteSize = new TextEncoder().encode(JSON.stringify(byteLimited.messages)).length;
+  assert.ok(byteSize <= MAX_STORED_CONVERSATION_BYTES, `serialized history stays within byte budget (${byteSize})`);
+  assert.ok(byteLimited.messages.length < huge.length);
 }
 
 console.log("OK: history-manager.js — titles, structured-attachment projection, quota compression.");

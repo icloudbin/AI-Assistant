@@ -1,5 +1,17 @@
 # Changelog
 
+## Persistent history and Tavily response bounds (v1.10.168)
+
+- **DATA-02:** Bound each persisted conversation to the newest 200 messages and 5 MiB of serialized message data. The same limit is applied to normal saves and ZIP history restores; this is independent of Chrome's `unlimitedStorage` permission.
+- **NET-01:** Tavily success bodies are now streamed with a 1.5 MB byte cap before JSON parsing. The response schema is validated and result count, title, URL, content and publication-date fields are bounded.
+- Added regression tests for message-count/byte limits and bounded Tavily JSON parsing.
+
+## Storage isolation and history deletion race (v1.10.167)
+
+- **SEC-03:** Restricted `chrome.storage.local` to trusted extension contexts with `setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })`. Content scripts do not require direct storage access.
+- **DATA-01:** Added a monotonic history-generation tombstone. Delete All History now atomically advances the generation and writes an empty history list under the shared history lock; side panels reject stale generations and clear in-memory state when deletion is observed.
+- Added regression checks for trusted storage access and stale history-generation rejection.
+
 ## Automatic web research default documentation alignment (v1.10.166)
 
 ARCH-02 follow-up: the automatic-research default is already centralized in `auto-web-research.js` and is ON unless storage contains the explicit boolean `false`. Corrected the stale `background.js` comment that still described the setting as OFF by default. Extended `test-auto-web-research.mjs` to guard the background comment against drifting from the actual default. No runtime behavior or user setting semantics changed.
