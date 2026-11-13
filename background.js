@@ -657,7 +657,7 @@ chrome.runtime.onConnect.addListener((port) => {
       } else if (!noWebResearch && translateMode !== true) {
         // Normal questions use web research when the user asks for it
         // explicitly, or - only if "Automatically search the web" is on in
-        // Settings (off by default) - when the current page cannot cover their
+        // Settings (ON by default; only an explicit opt-out disables it) - when the current page cannot cover their
         // key conditions. Questions the page already covers stay local.
         //
         // noWebResearch is sent by the predefined page/selection transforms

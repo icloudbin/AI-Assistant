@@ -1,5 +1,11 @@
 # Changelog
 
+## Automatic web research default documentation alignment (v1.10.166)
+
+ARCH-02 follow-up: the automatic-research default is already centralized in `auto-web-research.js` and is ON unless storage contains the explicit boolean `false`. Corrected the stale `background.js` comment that still described the setting as OFF by default. Extended `test-auto-web-research.mjs` to guard the background comment against drifting from the actual default. No runtime behavior or user setting semantics changed.
+
+- Build bumped to 1.10.166.
+
 Release notes for AI Assistant, newest first. The version currently built is the one in `manifest.json`.
 
 Standing explanations of how things work (updating without losing settings, packaging checks, feature notes) are not release notes; they live in [docs/](docs/).
