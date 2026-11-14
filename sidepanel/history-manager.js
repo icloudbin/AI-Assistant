@@ -121,36 +121,85 @@ function toStoredMessage(message) {
 // display-only copy of every message (readers fall back to `content`).
 // Lossy for display, but every conversation and every turn is kept (ids and
 // timestamps are untouched, so the shortened copy is still the same message).
-// Persistent per-topic bounds. unlimitedStorage disables Chrome's normal
-// quota guard, so enforce both a message count and a serialized-byte budget.
-// Declared without `export const`: the bottom export {} block of this module
-// exports them, and a second inline export is a SyntaxError that kills the
-// whole panel module tree (the v1.10.168 release shipped exactly that).
+// Persistent history bounds. unlimitedStorage disables Chrome's normal
+// quota guard, so enforce per-conversation AND whole-history serialized-byte
+// budgets, plus a per-conversation message-count cap.
 const MAX_STORED_MESSAGES_PER_CONVERSATION = 200;
 const MAX_STORED_CONVERSATION_BYTES = 5 * 1024 * 1024;
+export const MAX_STORED_HISTORY_BYTES = 50 * 1024 * 1024;
+
+function messageTurns(messages) {
+  const turns = [];
+  let turn = [];
+  for (const message of messages) {
+    if (message?.role === "user" && turn.length) {
+      turns.push(turn);
+      turn = [];
+    }
+    turn.push(message);
+  }
+  if (turn.length) turns.push(turn);
+  return turns;
+}
 
 function limitStoredConversationMessages(conversation) {
   if (!conversation || !Array.isArray(conversation.messages)) return conversation;
   const messages = conversation.messages;
   const encoder = new TextEncoder();
-  const kept = [];
+  const turns = messageTurns(messages);
+  const keptTurns = [];
   let totalBytes = 2;
-  for (let i = messages.length - 1; i >= 0 && kept.length < MAX_STORED_MESSAGES_PER_CONVERSATION; i--) {
+  let totalMessages = 0;
+
+  // Keep complete turns, newest first. If one turn is too large, skip that
+  // turn and continue: a single oversized message must not erase the entire
+  // conversation or prevent older complete turns from being retained.
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const turn = turns[i];
+    if (totalMessages + turn.length > MAX_STORED_MESSAGES_PER_CONVERSATION) continue;
     let size;
-    try { size = encoder.encode(JSON.stringify(messages[i])).length + 1; }
+    try { size = encoder.encode(JSON.stringify(turn)).length + (keptTurns.length ? 1 : 0); }
     catch { continue; }
-    if (totalBytes + size > MAX_STORED_CONVERSATION_BYTES) break;
-    kept.push(messages[i]);
+    if (totalBytes + size > MAX_STORED_CONVERSATION_BYTES) continue;
+    keptTurns.push(turn);
     totalBytes += size;
+    totalMessages += turn.length;
   }
-  if (kept.length === messages.length) return conversation;
-  kept.reverse();
-  // Do not persist a partial turn beginning with an assistant response when
-  // the count/byte boundary cuts off its user prompt.
-  while (kept.length > 1 && kept[0]?.role !== "user" && kept.some((message) => message?.role === "user")) {
-    kept.shift();
+
+  if (keptTurns.length === turns.length && totalMessages === messages.length) return conversation;
+  keptTurns.reverse();
+  const kept = keptTurns.flat();
+  // A leading assistant-only turn is not useful provider history. This can
+  // occur when the retained window begins mid-conversation.
+  while (kept.length && kept[0]?.role !== "user" && kept.some((message) => message?.role === "user")) {
+    const firstUser = kept.findIndex((message) => message?.role === "user");
+    kept.splice(0, firstUser);
   }
   return { ...conversation, messages: kept };
+}
+
+// Enforce one serialized-byte ceiling across all saved conversations. Input
+// order is irrelevant: newest conversations win. Oversized/unserializable
+// entries are skipped without preventing older entries from being considered.
+export function limitStoredHistoryBytes(conversations, maxBytes = MAX_STORED_HISTORY_BYTES) {
+  const encoder = new TextEncoder();
+  const ordered = [...(Array.isArray(conversations) ? conversations : [])]
+    .sort((a, b) => (Number(b?.updatedAt) || 0) - (Number(a?.updatedAt) || 0));
+  const kept = [];
+  let totalBytes = 2; // JSON array brackets
+  let dropped = 0;
+  for (const conversation of ordered) {
+    let size;
+    try { size = encoder.encode(JSON.stringify(conversation)).length + (kept.length ? 1 : 0); }
+    catch { dropped++; continue; }
+    if (totalBytes + size > maxBytes) {
+      dropped++;
+      continue;
+    }
+    kept.push(conversation);
+    totalBytes += size;
+  }
+  return { conversations: kept, dropped, bytes: totalBytes };
 }
 
 const QUOTA_ATTACHMENT_PREVIEW_CHARS = 800;
