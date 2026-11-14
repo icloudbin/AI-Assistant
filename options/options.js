@@ -24,8 +24,9 @@ import {
 import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-storage.js";
 import { encryptSecrets, decryptSecrets, MIN_PASSPHRASE_LENGTH } from "../settings-crypto.js";
 import { withHistoryLock, withMessageIds, isValidMessageId, isValidTimestamp } from "../conversation-store.js";
+import { normalizeHistoryGeneration, isHistoryGenerationCurrent } from "../history-generation.js";
 import { nextHistoryGeneration } from "../history-generation.js";
-import { compressForQuota, cleanForTopic, limitStoredConversationMessages } from "../sidepanel/history-manager.js";
+import { compressForQuota, cleanForTopic, limitStoredConversationMessages, limitStoredHistoryBytes } from "../sidepanel/history-manager.js";
 import { migrateLegacyMessage, normalizeAttachments } from "../attachments.js";
 import { sanitizePiiMap } from "../privacy/pii-filter.js";
 import { cutAtCodePointBoundary, MAX_CUSTOM_PROMPT_CHARS } from "../models.js";
@@ -777,6 +778,11 @@ async function restoreHistory() {
   msgEl.textContent = t(currentLang, "restore_restoring");
 
   try {
+    // Capture the delete-all tombstone BEFORE doing any asynchronous ZIP I/O.
+    // If Delete All completes while the archive is being parsed, this restore
+    // belongs to the pre-delete state and must not resurrect that history.
+    const startState = await chrome.storage.local.get(HISTORY_GENERATION_STORAGE_KEY);
+    const restoreGeneration = normalizeHistoryGeneration(startState[HISTORY_GENERATION_STORAGE_KEY]);
     const restored = await readBackupFile(restoreHistoryFile.files?.[0]);
     const normalized = restored
       .map(normalizeRestoredConversation)
@@ -795,7 +801,11 @@ async function restoreHistory() {
     // used to) threw a ReferenceError that the catch below reported as
     // "Restore failed" even though the data had already been written.
     const { condensed, dropped } = await withHistoryLock(async () => {
-      const stored = await chrome.storage.local.get(HISTORY_STORAGE_KEY);
+      const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY, HISTORY_GENERATION_STORAGE_KEY]);
+      const currentGeneration = normalizeHistoryGeneration(stored[HISTORY_GENERATION_STORAGE_KEY]);
+      if (!isHistoryGenerationCurrent(currentGeneration, restoreGeneration)) {
+        throw new Error(t(currentLang, "restore_cancelled_by_delete"));
+      }
       const existing = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
 
       // Merge by conversation ID. Imported copies replace matching IDs only when
@@ -820,14 +830,15 @@ async function restoreHistory() {
         .filter((c) => c.messages?.length)
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
         .slice(0, MAX_SAVED_CONVERSATIONS);
+      const globallyLimited = limitStoredHistoryBytes(merged);
+      let list = globallyLimited.conversations;
 
       // The side panel's save path escalates on storage-quota pressure
       // (compressForQuota, then halving) - a restore must too: a large backup
       // merged into an existing history used to fail with a raw QUOTA error
       // and restore NOTHING. Same lossy-but-keeps-everything escalation.
-      let list = merged;
       let condensed = false;
-      let dropped = 0;
+      let dropped = globallyLimited.dropped;
       for (let attempt = 0; ; attempt++) {
         try {
           await chrome.storage.local.set({ [HISTORY_STORAGE_KEY]: list });
