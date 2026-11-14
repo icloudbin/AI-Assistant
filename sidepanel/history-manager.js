@@ -142,7 +142,7 @@ function messageTurns(messages) {
   return turns;
 }
 
-const HISTORY_TRUNCATION_NOTICE = "\\n\\n[Message truncated in saved history to fit the storage limit.]";
+const HISTORY_TRUNCATION_NOTICE = "\n\n[Message truncated in saved history to fit the storage limit.]";
 
 function fitMessageToByteBudget(message, maxBytes, encoder) {
   let candidate = { ...message };
@@ -183,7 +183,7 @@ function fitTurnToByteBudget(turn, maxBytes, encoder) {
   let used = 2; // JSON array brackets
   for (let i = 0; i < turn.length; i++) {
     const separators = i > 0 ? 1 : 0;
-    const reserve = (turn.length - i - 1) * 64;
+    const reserve = (turn.length - i - 1) * 512;
     const available = maxBytes - used - separators - reserve;
     if (available <= 0) return null;
     const message = fitMessageToByteBudget(turn[i], available, encoder);
