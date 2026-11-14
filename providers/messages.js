@@ -149,6 +149,15 @@ const ATTACHMENTS_INSTRUCTION = "ATTACHED FILES: the user attached files to this
 
 const CONDENSED_NOTE = "[attachment contents truncated to stay within the context budget - the full text was provided when this message was first sent; ask the user to re-attach the file if this excerpt is not enough]";
 
+// A page controls its own document.title (no practical cap), and a URL can be
+// huge. Only the page TEXT above has an upstream cap, so these two get theirs
+// here at the single choke point every request passes through - otherwise a
+// hostile or broken page ships megabytes inside this block around a ~1k text
+// body (live-verified 2026-11-14: a 2,000,000-char document.title reached the
+// model verbatim) and drags the whole PII regex pass over them first.
+const PAGE_META_MAX_CHARS = 300;
+const PAGE_META_URL_MAX_CHARS = 2048;
+
 // Untrusted page data, delivered in the USER turn (never as `system`).
 function pageContextDataBlock(pageContext, boundaryId) {
   if (!pageContext || pageContext.captureFailed) return "";
@@ -156,10 +165,12 @@ function pageContextDataBlock(pageContext, boundaryId) {
   // cutAtCodePointBoundary: a raw slice can split a surrogate pair at the
   // cap and send a lone surrogate to the provider (some backends 400/500).
   const text = b.strip(cutAtCodePointBoundary((pageContext.text || ""), MAX_PAGE_CONTEXT_CHARS));
+  const title = b.strip(cutAtCodePointBoundary(String(pageContext.title || ""), PAGE_META_MAX_CHARS));
+  const url = b.strip(cutAtCodePointBoundary(String(pageContext.url || ""), PAGE_META_URL_MAX_CHARS));
   const prev = pageContext.previousPage
-    ? `\nPrevious page title (data): ${b.strip(pageContext.previousPage.title || pageContext.previousPage.url)}`
+    ? `\nPrevious page title (data): ${b.strip(cutAtCodePointBoundary(String(pageContext.previousPage.title || pageContext.previousPage.url || ""), PAGE_META_MAX_CHARS))}`
     : "";
-  const inner = `Tab ID: ${b.strip(pageContext.tabId)}\nTitle: ${b.strip(pageContext.title)}\nURL: ${b.strip(pageContext.url)}${prev}\nPage text:\n${text}`;
+  const inner = `Tab ID: ${b.strip(pageContext.tabId)}\nTitle: ${title}\nURL: ${url}${prev}\nPage text:\n${text}`;
   return b.wrap(inner);
 }
 

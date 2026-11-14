@@ -428,6 +428,14 @@ let pendingModelId = "";
 // already abandoned (e.g. a CHUNK already queued on the port before the
 // abort signal reached the fetch on the other end).
 let currentRequestId = null;
+// Request ids abandoned by the DISCARDING kind of stop (Clear / New Topic /
+// conversation switch / Delete-All via stopActiveRequest below). handleSubmit
+// checks this set at its cancelled exits: those must ROLL the pushed turn
+// back, because the view and the current conversation have already been
+// rewound and the abandoned question would otherwise resurrect there (and be
+// persisted). The Stop button's stopGeneration keeps the turn on purpose and
+// never adds to this set.
+const abandonedRequestIds = new Set();
 // The side panel sends Port messages during a request to reset the MV3 service
 // worker idle timer. The handle is cleared on every DONE/ERROR/STOP path.
 let stopRequestKeepAlive = null;
@@ -1166,6 +1174,12 @@ function setStreaming(streaming) {
 function stopActiveRequest() {
   if (!isStreaming) return;
   const stoppedRequestId = currentRequestId;
+  // Mark the request as abandoned BEFORE the id is cleared: when the in-flight
+  // handleSubmit resumes and sees isCancelled(), it must roll the already
+  // pushed turn back instead of resurrecting it into the rewound view (the
+  // Stop button's stopGeneration below deliberately keeps it, so it never
+  // adds to the set).
+  if (stoppedRequestId !== null) abandonedRequestIds.add(stoppedRequestId);
   // Cleared before anything else so handlePortMessage ignores any
   // START/CHUNK/DONE/ERROR that might still arrive for this request (e.g.
   // a chunk already queued on the port before the abort signal reaches the
@@ -1350,8 +1364,12 @@ async function getActivePageContext(retryCount = 0, format = null, excludeCommen
     const truncated = data?.truncated === true || text.length > MAX_PAGE_CONTEXT_CHARS;
     return {
       tabId: initialTabId,
-      title: String(data?.title || tab.title || ""),
-      url: String(data?.url || initialUrl || ""),
+      // Defense in depth with providers/messages.js pageContextDataBlock: the
+      // page controls its own document.title (no practical cap) and a URL can
+      // be huge - cap them here so storage, the history entries and the
+      // context bar also stay bounded.
+      title: cutAtCodePointBoundary(String(data?.title || tab.title || ""), 300),
+      url: cutAtCodePointBoundary(String(data?.url || initialUrl || ""), 2048),
       text: cutAtCodePointBoundary(text, MAX_PAGE_CONTEXT_CHARS),
       // "markdown" when the structure-preserving extractor produced the text.
       format: data?.format === "markdown" ? "markdown" : "text",
@@ -3364,6 +3382,9 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
   };
   try {
     const attachPageVisuals = await shouldAttachPageVisuals(includePageImages, selectedModel);
+    // First cancel check, BEFORE anything is cleared, pushed or created: this
+    // await is the earliest suspension point of the submit.
+    if (isCancelled()) return;
     let sendPage = gatePageSend(pageKind, forcedIncludePageContext);
 
     // Only clear the composer when the submission came from it. Quick actions
@@ -3428,7 +3449,15 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       // A storage failure must not leave the composer locked or block the answer.
       notifyHistorySaveFailure(err);
     }
-    if (isCancelled()) return;
+    if (isCancelled()) {
+      // A discard-cancel (Clear / New Topic / conversation switch / Delete-All)
+      // landed while this submit was suspended: the view and the current
+      // conversation have already been rewound, so the pushed turn must not
+      // resurrect there - roll it back. The Stop button's cancel keeps the
+      // turn (its id is not in abandonedRequestIds).
+      if (abandonedRequestIds.delete(requestId)) rollbackSubmit();
+      return;
+    }
 
     let pageContext = null;
     if (sendPage && !translateImageSource) {
@@ -3444,7 +3473,10 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
         // sections for this capture only (see content.js excludeComments).
         factCheck === true,
       );
-      if (isCancelled()) return;
+      if (isCancelled()) {
+        if (abandonedRequestIds.delete(requestId)) rollbackSubmit();
+        return;
+      }
       if (pageContext) {
         updateContextBar(pageContext, true);
       } else {
@@ -3519,7 +3551,10 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
         pageScreenshot = await captureVisiblePageScreenshot(screenshotTab?.id, String(screenshotTab?.url || ""));
       }
     }
-    if (isCancelled()) return;
+    if (isCancelled()) {
+      if (abandonedRequestIds.delete(requestId)) rollbackSubmit();
+      return;
+    }
     if (pageImagesSkipped > 0) {
       // Page images are fetched in the page's own context, so sources that
       // refuse cross-origin reads (or exceed the caps, or time out) are
@@ -3651,14 +3686,21 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     renderAttachments();
   } catch (err) {
     console.error("[AI Assistant] Request failed before it could be sent:", err);
-    if (!posted && !isCancelled()) {
-      currentRequestId = null;
-      autoScrollEnabled = false;
-      rollbackSubmit();
-      addBubble("error", t(currentLang, "error_withMessage_template", { message: err?.message || String(err) }));
-      setStreaming(false);
-      // Give the user their text back: it was cleared from the composer on submit.
-      if (forcedQuestion === null && !questionInput.value) questionInput.value = question;
+    if (!posted) {
+      if (!isCancelled()) {
+        currentRequestId = null;
+        autoScrollEnabled = false;
+        rollbackSubmit();
+        addBubble("error", t(currentLang, "error_withMessage_template", { message: err?.message || String(err) }));
+        setStreaming(false);
+        // Give the user their text back: it was cleared from the composer on submit.
+        if (forcedQuestion === null && !questionInput.value) questionInput.value = question;
+      } else if (abandonedRequestIds.delete(requestId)) {
+        // The exception raced a discard-cancel (Clear / conversation switch):
+        // the view was rewound, so the abandoned turn must leave no trace here
+        // either. The unlock already happened in stopActiveRequest.
+        rollbackSubmit();
+      }
     }
   }
 }

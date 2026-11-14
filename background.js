@@ -803,6 +803,12 @@ chrome.runtime.onConnect.addListener((port) => {
           safePost({ type: "NOTICE", text: t(lang, "bg_notice_translateStoppedAtLine_template", { line: String(translationStoppedAt.line), status: translationStoppedAt.status, translated: String(ctx.lineTranslator.translated), total: String(ctx.lineTranslator.expected) }), requestId });
         } else if (ctx.lineTranslator.missing > 0) {
           safePost({ type: "NOTICE", text: t(lang, "bg_notice_translateMissingLines_template", { missing: String(ctx.lineTranslator.missing), total: String(ctx.lineTranslator.expected) }), requestId });
+        } else if (ctx.truncatedByLength) {
+          // A batch reply cut by the model's output limit with every line
+          // still "translated": the LAST line's text is partial (its head was
+          // streamed before the cut). Without this notice the user receives a
+          // truncated translation presented as complete.
+          safePost({ type: "NOTICE", text: t(lang, "bg_notice_replyTruncatedLength"), requestId });
         }
       } else if (ctx.truncatedByLength) {
         safePost({ type: "NOTICE", text: t(lang, "bg_notice_replyTruncatedLength"), requestId });

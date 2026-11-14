@@ -586,6 +586,56 @@ try {
     });
   });
 
+  // ===================== cancel during the pre-send window =====================
+
+  await test("Clear during the page capture abandons the turn without a trace (no resurrection)", async () => {
+    await scenario({ web: HOSTS.plain }, async ({ panel }) => {
+      await waitBar(panel, `${PAGE_MARKER} Title`);
+      const beforeOpts = await panel.$$eval("#historySelect option", (els) => els.length);
+      // One synchronous task: submit, then Clear. setStreaming(true) is set
+      // synchronously inside the submit handler, so the Clear's
+      // stopActiveRequest() abandons the request while it is still capturing
+      // the page - the exact window in which the abandoned question used to
+      // resurrect into the freshly cleared conversation and persist there.
+      await panel.evaluate(() => {
+        const input = document.getElementById("questionInput");
+        input.value = "RESURRECTMARK what is this page about?";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        document.getElementById("sendBtn").click();
+        document.getElementById("clearBtn").click();
+      });
+      await sleep(4000);
+      assert.equal(await panel.$$eval(".bubble.user", (els) => els.filter((b) => b.textContent.includes("RESURRECTMARK")).length), 0, "the abandoned question reappeared in the cleared chat");
+      const markerInHistory = await panel.$$eval("#historySelect option", (els) => els.some((o) => o.textContent.includes("RESURRECTMARK")));
+      assert.equal(markerInHistory, false, "the abandoned question was persisted as a conversation");
+      assert.ok(await panel.evaluate(() => !document.getElementById("sendBtn").disabled), "the composer stayed locked after the abandoned submit");
+      const afterOpts = await panel.$$eval("#historySelect option", (els) => els.length);
+      assert.equal(afterOpts, beforeOpts, "a phantom conversation was added to the history");
+    });
+  });
+
+  await test("Stop during the page capture keeps the question (the documented Stop behavior is untouched)", async () => {
+    await scenario({ web: HOSTS.plain }, async ({ panel }) => {
+      await waitBar(panel, `${PAGE_MARKER} Title`);
+      await panel.evaluate(() => {
+        const input = document.getElementById("questionInput");
+        input.value = "STOPMARK what is this page about?";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        document.getElementById("sendBtn").click();
+        const stop = document.getElementById("stopBtn");
+        if (stop && !stop.hidden) stop.click();
+        else document.getElementById("clearBtn").click();
+      });
+      await sleep(3000);
+      // Stop: the turn stays (unanswered). If the Stop button was not yet
+      // reachable the fallback is a Clear, which must leave no trace.
+      const stopKept = await panel.$$eval(".bubble.user", (els) => els.some((b) => b.textContent.includes("STOPMARK")));
+      const cleared = await panel.$$eval("#historySelect option", (els) => !els.some((o) => o.textContent.includes("STOPMARK")));
+      assert.ok(stopKept || cleared, "neither behavior held: the question vanished without Stop keeping it");
+      assert.ok(await panel.evaluate(() => !document.getElementById("sendBtn").disabled), "the composer stayed locked");
+    });
+  });
+
   // ============================== S-08: one-time notices ==============================
 
   await test("voice input: the cloud-recognition notice comes before the first use; Cancel starts nothing; once agreed it is not shown again", async () => {

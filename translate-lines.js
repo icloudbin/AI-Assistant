@@ -128,6 +128,31 @@ function mayStayUntranslated(safeText) {
 // exactly like PLACEHOLDER_RE tolerates escaped brackets in pii-filter.js.
 const TAG_RE = /^\s*\\?\[(\d+)\\?\]\s?(.*)$/;
 
+// An oversized single translatable line is split at this many characters (see
+// prepareLineTranslation): comfortably under the 8000-char batch budget, so
+// every split line still fits a batch together with its neighbors.
+const LINE_SPLIT_CHARS = 4000;
+
+// Splits a body longer than `max` into chunks of at most `max` characters,
+// preferring a space so whole words stay together when the script has them.
+function splitLongBody(body, max) {
+  if (body.length <= max) return [body];
+  const chunks = [];
+  let rest = body;
+  while (rest.length > max) {
+    // cutAtCodePointBoundary returns the safe CUT STRING (surrogate-correct),
+    // not an index - its length is the next chunk's size.
+    const head = cutAtCodePointBoundary(rest, max);
+    // Prefer a space so whole words stay together when the script has them.
+    const sp = head.lastIndexOf(" ");
+    const keep = sp > head.length * 0.5 ? sp + 1 : head.length;
+    chunks.push(rest.slice(0, keep));
+    rest = rest.slice(keep);
+  }
+  if (rest.length) chunks.push(rest);
+  return chunks;
+}
+
 export function prepareLineTranslation(source, maxChars = 120000) {
   let text = String(source ?? "").replace(/\r\n?/g, "\n");
   let truncated = false;
@@ -142,7 +167,8 @@ export function prepareLineTranslation(source, maxChars = 120000) {
   }
   const rawLines = text.split("\n");
   let inFence = false;
-  const lines = rawLines.map((raw) => {
+  const lines = [];
+  for (const raw of rawLines) {
     const isFence = FENCE_RE.test(raw) && (raw.match(FENCE_RUN_RE) || []).length % 2 === 1;
     if (isFence) inFence = !inFence;
     const prefix = raw.match(PREFIX_RE)[1];
@@ -153,9 +179,41 @@ export function prepareLineTranslation(source, maxChars = 120000) {
       : bodyAndTrailingWhitespace;
     // Code (inside fences), fence lines, image lines and letter-less lines stay as they are.
     const translatable = !isFence && !inFence && !IMAGE_LINE_RE.test(raw) && HAS_LETTER_RE.test(body);
-    const p = translatable ? protect(body) : { text: body, tokens: [] };
-    return { raw, prefix, body, trailingWhitespace, safe: p.text, tokens: p.tokens, translatable };
-  });
+    if (!translatable) {
+      lines.push({ raw, prefix, body, trailingWhitespace, safe: body, tokens: [], translatable: false });
+      continue;
+    }
+    // numberedBatches never splits a line, so one translatable line longer
+    // than the batch budget would become a single batch of that size whose
+    // reply hits the model's output limit and is cut off - silently, because
+    // the cut line still counts as translated. Minified JSON, a code dump and
+    // one huge paragraph are real cases (a 100k-char line produced a
+    // 100,004-char batch against the 8000-char budget). Split such a body
+    // into continuation chunks: each chunk becomes its own numbered line with
+    // its own [n] tag, so batching bounds every request and a cut reply
+    // degrades to the missing-lines fallback instead of losing the tail. The
+    // output layout deviates from the source exactly here (one source line
+    // becomes several translated lines) - the alternative was losing the tail
+    // of the line entirely.
+    const chunks = splitLongBody(body, LINE_SPLIT_CHARS);
+    chunks.forEach((chunk, ci) => {
+      const p = protect(chunk);
+      const last = ci === chunks.length - 1;
+      lines.push({
+        // Continuation chunks carry their own text as the fallback `raw`: when
+        // the model never returns their tag, fill() writes the original chunk
+        // instead of an empty line.
+        raw: ci === 0 ? raw : chunk,
+        prefix: ci === 0 ? prefix : "",
+        body: chunk,
+        trailingWhitespace: last ? trailingWhitespace : "",
+        safe: p.text,
+        tokens: p.tokens,
+        translatable: true,
+        ...(ci > 0 ? { continuation: true } : {}),
+      });
+    });
+  }
   const numbered = lines
     .map((l, i) => (l.translatable ? `[${i + 1}] ${l.safe}` : null))
     .filter((l) => l !== null)

@@ -435,3 +435,44 @@ console.log("OK: translated paragraphs, trailing whitespace, and selection-sourc
   assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(all), "no lone high surrogate after the cut");
   assert.ok(!/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(all), "no lone low surrogate after the cut");
 }
+
+// ---------- an over-long SINGLE line is split into continuation lines ----------
+// numberedBatches never splits a line, so one 100k-character line (minified
+// JSON, a code dump, one huge paragraph) used to become a single batch of
+// 100,004 characters against the 8000-char budget; the model's reply was cut
+// by its output limit and the truncated translation was presented as
+// complete. Such a line now becomes continuation chunks, each with its own
+// [n] tag, so batching bounds every request.
+{
+  const { numberedBatches } = await import("../translate-lines.js");
+  const source = "z".repeat(100000);
+  const prepared = prepareLineTranslation(source);
+  assert.equal(prepared.lines.length > 1, true, "the huge line was split into continuation chunks");
+  const batches = numberedBatches(prepared);
+  assert.equal(batches.length > 1, true, "the split produced several batches");
+  for (const batch of batches) {
+    assert.ok(batch.length <= 8000 + 64, `every batch respects the budget (got ${batch.length})`);
+  }
+  // Every chunk kept its share of the source: no character lost between the
+  // chunks (each chunk is protected/numbered independently).
+  const covered = prepared.lines.filter((l) => l.translatable).map((l) => l.body).join("");
+  assert.equal(covered.length, source.length, "no source character lost between the chunks");
+  // Continuation entries fall back to their own chunk (never an empty line).
+  assert.equal(prepared.lines[1].continuation, true, "the second chunk is marked as a continuation");
+  assert.equal(prepared.lines[1].raw, prepared.lines[1].body, "a continuation's fallback text is its own chunk");
+  assert.equal(prepared.lines[1].prefix, "", "a continuation has no line prefix");
+  // The LAST chunk keeps the original line's trailing whitespace, if any.
+  const padded = prepareLineTranslation("z".repeat(9000) + "   ");
+  assert.equal(padded.lines.at(-1).trailingWhitespace, "   ", "trailing whitespace stays on the last chunk");
+  // An end-to-end pass: the model translates every chunk, the output joins
+  // the chunks in order, and nothing counts as missing. (push() buffers by
+  // "\n" - the model's reply lines carry their newlines, so feed them with one.)
+  {
+    let out = "";
+    const lt = new LineTranslator(prepared, (d) => { out += d; });
+    prepared.lines.forEach((l, i) => { if (l.translatable) lt.push(`[${i + 1}] T${i + 1}\n`); });
+    lt.finish();
+    assert.equal(lt.missing, 0, "every continuation chunk was translated");
+    assert.equal(out, prepared.lines.map((l, i) => (l.translatable ? `T${i + 1}` : l.raw)).join("\n"), "chunks join in order with single newlines");
+  }
+}
