@@ -492,6 +492,23 @@ try {
     });
   });
 
+  await test("a repeat fact check does not replay earlier turns: its request stays the size that cleared the TPM budget the first time", async () => {
+    await scenario({ seed: { tavilyApiKey: "tvly-test" }, web: { host: X_POST_HOST, path: "/maytao/status/1739" } }, async ({ panel }) => {
+      await waitBar(panel, `${X_MAIN} Post on X`);
+      // An earlier turn in the same conversation (question AND answer), as
+      // before a re-run of the fact check with a different model.
+      await send(panel, "HISTORYMARK what is this page about?");
+      const before = provider.requests.length;
+      await quickAction(panel, "#quickFactCheckBtn");
+      const request = provider.requests.slice(before).join("\n");
+      assert.ok(request.includes("web-grounded fact check"), "the request was not a fact check");
+      assert.ok(!request.includes("HISTORYMARK"), "the fact-check request replayed earlier conversation turns");
+      assert.ok(!request.includes("default answer"), "the fact-check request replayed an earlier reply");
+      assert.ok(request.includes(X_MAIN), "the main post did not reach the provider");
+      assert.ok(request.includes("EVIDENCEMARK"), "the Tavily evidence did not reach the provider");
+    });
+  });
+
   // ============================== S-08: one-time notices ==============================
 
   await test("voice input: the cloud-recognition notice comes before the first use; Cancel starts nothing; once agreed it is not shown again", async () => {

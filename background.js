@@ -608,6 +608,20 @@ chrome.runtime.onConnect.addListener((port) => {
       pageSentChars = requestPageContext && !requestPageContext.captureFailed ? (requestPageContext.text || "").length : 0;
       let effectiveQuestion = question;
       let requestPageContextFinal = requestPageContext;
+      // A fact check is self-contained: fresh Tavily evidence is searched for
+      // every request, and its prompt evaluates only the supplied claims plus
+      // the article/selection text carried in THIS request. Replaying earlier
+      // conversation turns buys it nothing and is not free - the stored
+      // verdict of a previous fact check alone is hundreds of tokens, so the
+      // same conversation's SECOND fact check crossed token-per-minute
+      // budgets that the first one cleared (user report: the first check
+      // answered on groq's free-tier gpt-oss-120b, every later attempt on any
+      // model failed with "Requested 8919, Limit 8000" - TPM counts the whole
+      // request, so the failure is deterministic, not transient). A fact check
+      // therefore sends no history: its request then has exactly the size that
+      // succeeded the first time. Ordinary follow-up questions keep the full
+      // history, including those fact-check turns.
+      const requestHistory = factCheck?.enabled ? [] : history;
       let translationBatches = [];
       let translationPrepared = null;
       let translateUsingSelection = false;
@@ -692,11 +706,11 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       const runProvider = async (q, pc) => {
         if (model.provider === "deepseek") {
-          await streamDeepSeek(model, q, pc, history, normalizedImages, ctx);
+          await streamDeepSeek(model, q, pc, requestHistory, normalizedImages, ctx);
         } else if (model.provider === "openrouter") {
-          await streamOpenRouter(model, q, pc, history, normalizedImages, ctx);
+          await streamOpenRouter(model, q, pc, requestHistory, normalizedImages, ctx);
         } else if (model.provider === "groq") {
-          await streamGroq(model, q, pc, history, normalizedImages, ctx);
+          await streamGroq(model, q, pc, requestHistory, normalizedImages, ctx);
         }
       };
       let translationStoppedAt = null;

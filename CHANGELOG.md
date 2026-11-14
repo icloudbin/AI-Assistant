@@ -1,5 +1,14 @@
 # Changelog
 
+## A repeat fact check no longer replays conversation history (v1.10.174)
+
+Follow-up to v1.10.173 (user report): the first fact check on groq's free-tier `openai/gpt-oss-120b` (8000 tokens per minute) returned a result, but every later attempt in the same conversation - on qwen, on gpt-oss-20b, and back on gpt-oss-120b itself - failed with "HTTP 413 ... TPM: Limit 8000, Requested 8919". Why the first worked and the rest did not: Groq's TPM limit counts the WHOLE request, and the request had grown - a fact check's request sits near that budget already (up to 18000 characters of Tavily evidence plus the system prompt), and the conversation replayed the earlier turns on top: the previous fact check's full verdict (hundreds of tokens), plus the stored questions of the failed attempts in between. Switching models keeps the same history, so switching back could not help, and the failure was deterministic rather than transient.
+
+- A fact check is self-contained: fresh Tavily evidence is searched for every request and its prompt evaluates only the supplied claims plus the article/selection text carried in that request. It therefore now sends NO conversation history (background.js builds `requestHistory` - empty for a fact check, the full epoch history for every other request). A repeat fact check's request then has exactly the size that succeeded the first time; ordinary follow-up questions keep the full history, including those fact-check turns.
+- e2e-page-privacy pins it: an ordinary question and its answer precede the fact check in the same conversation, and the fact-check request must carry the main post and the Tavily evidence but neither the earlier question's text nor its reply.
+- Tests: 28 Node suites + check-package + all 9 playwright e2e suites + extension-e2e 38/38 + real-Chrome 11/11 green.
+- Build bumped to 1.10.174.
+
 ## Fact Check reads the article, not the discussion under it (v1.10.173)
 
 User-reported: running Fact Check on a busy X (Twitter) post page failed with Groq's free-tier `openai/gpt-oss-120b` rejecting the request - HTTP 413, "Request too large ... Limit 8000, Requested 11386" tokens per minute. The capture had attached the ENTIRE thread: on an X status page the main post and every reply sit in one shared timeline of short `article[data-testid="tweet"]` elements whose names carry no "comment" word (the container is only `data-testid="cellInnerDiv"`), so every generic extraction rule missed them and 16k+ characters of replies went out with the request - blowing small token budgets and mining "claims" out of random replies.
