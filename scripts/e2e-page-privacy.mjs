@@ -86,16 +86,87 @@ const questionCarries = (marker, raw = provider.requests.at(-1)) => {
   return JSON.stringify(last?.content ?? "").includes(marker);
 };
 
+// ---- fake Tavily (the Fact Check search service) -----------------------------
+execFileSync("openssl", [
+  "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+  "-keyout", path.join(tmp, "tavily-key.pem"), "-out", path.join(tmp, "tavily-cert.pem"),
+  "-subj", "/CN=api.tavily.com", "-addext", "subjectAltName=DNS:api.tavily.com",
+], { stdio: "ignore" });
+
+const tavily = { queries: [] };
+const tavilyServer = https.createServer(
+  { key: fs.readFileSync(path.join(tmp, "tavily-key.pem")), cert: fs.readFileSync(path.join(tmp, "tavily-cert.pem")) },
+  (req, res) => {
+    let raw = "";
+    req.on("data", (c) => { raw += c; });
+    req.on("end", () => {
+      let query = "";
+      try { query = String(JSON.parse(raw).query || ""); } catch { /* not JSON: recorded empty */ }
+      tavily.queries.push(query);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        results: [{
+          title: "Independent coverage",
+          url: "https://evidence.example/story",
+          content: "EVIDENCEMARK Independent reporting confirms the claim in detail.",
+          published_date: "2026-11-13",
+          score: 0.98,
+        }],
+      }));
+    });
+  },
+);
+await new Promise((r) => tavilyServer.listen(0, "127.0.0.1", r));
+const tavilyPort = tavilyServer.address().port;
+
 // ---- fake website ------------------------------------------------------------
 const HOSTS = {
   plain: "plain.test-site.example", // an ordinary site
+  comments: "comments.test-site.example", // comments named only by data-testid (no "comment" id/class)
 };
 const PAGE_MARKER = "PLAINMARK";
 const sentence = (marker) => `${marker} is the text of this test page, written as several complete sentences so that the page extractor treats it as readable article content.`;
 const articleHtml = (marker) => `<!doctype html><html><head><meta charset="utf-8"><title>${marker} Title</title></head><body><main><h1>${marker} Heading</h1>${`<p>${sentence(marker)}</p>`.repeat(6)}</main></body></html>`;
+
+// An X (Twitter) status page look-alike, served at x.com itself (mapped to this
+// server in the browser's DNS rules) because the extractor keys on the real
+// host. The primary column holds the main post and three replies as
+// article[data-testid="tweet"] elements, each SHORT (<200 characters of text),
+// so no reader-mode candidate clears its minimum bar - exactly the mechanism
+// that made the real page fall through to whole-page extraction and send the
+// entire thread (HTTP 413 TPM on groq's free-tier gpt-oss-120b).
+const X_POST_HOST = "x.com";
+const X_MAIN = "MAINPOSTMARK";
+const X_REPLY = (n) => `REPLYMARK${n}`;
+const xStatusHtml = () => `<!doctype html><html><head><meta charset="utf-8"><title>${X_MAIN} Post on X</title></head><body>
+<div data-testid="primaryColumn">
+  <div data-testid="cellInnerDiv"><article data-testid="tweet">
+    <div><span>May Tao</span> <span>@maytao</span> <span>2h</span></div>
+    <div data-testid="tweetText">Breaking: ${X_MAIN} says Groq has laid off almost the entire Grok Imagine team. The report was announced on 2026-11-13 and 90 percent of the team is affected.</div>
+  </article></div>
+  ${[1, 2, 3].map((n) => `<div data-testid="cellInnerDiv"><article data-testid="tweet"><div data-testid="tweetText">${X_REPLY(n)} reply ${n} on this thread, not part of the article.</div></article></div>`).join("\n")}
+</div>
+</body></html>`;
+
+// A page whose comment section is named by data-testid only, and whose article
+// body is too short for reader mode on its own - so the whole <body> is the
+// winning candidate and the comments ride along unless the fact-check capture
+// skips them.
+const COMMENT_MARKER = "COMMENTMARK";
+const ARTICLE_MARKER = "ARTICLEMARK";
+const commentsHtml = () => `<!doctype html><html><head><meta charset="utf-8"><title>Comment Page</title></head><body>
+<div data-testid="comments"><p>${COMMENT_MARKER} what a story, first comment here. ${COMMENT_MARKER} second comment, also about the story.</p></div>
+<div><p>${ARTICLE_MARKER} the article body of this page, a few complete sentences of real content.</p></div>
+</body></html>`;
+
 const webServer = http.createServer((req, res) => {
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-  res.end(articleHtml(PAGE_MARKER));
+  const host = String(req.headers.host || "").split(":")[0];
+  res.end(
+    host === HOSTS.comments ? commentsHtml()
+    : host === X_POST_HOST ? xStatusHtml()
+    : articleHtml(PAGE_MARKER),
+  );
 });
 await new Promise((r) => webServer.listen(0, "127.0.0.1", r));
 const webPort = webServer.address().port;
@@ -106,7 +177,7 @@ const context = await chromium.launchPersistentContext(path.join(tmp, "profile")
   args: [
     `--disable-extensions-except=${extDir}`,
     `--load-extension=${extDir}`,
-    `--host-resolver-rules=MAP api.deepseek.com 127.0.0.1:${apiPort},MAP *.test-site.example 127.0.0.1`,
+    `--host-resolver-rules=MAP api.deepseek.com 127.0.0.1:${apiPort},MAP api.tavily.com 127.0.0.1:${tavilyPort},MAP *.test-site.example 127.0.0.1,MAP x.com 127.0.0.1`,
     "--ignore-certificate-errors",
     "--no-proxy-server",
   ],
@@ -207,23 +278,59 @@ try {
   // in front (it is "the page the user is looking at").
   async function scenario({ seed = {}, web = null, speech = false }, body) {
     provider.requests = [];
+    tavily.queries = [];
     await reset(seed);
     const opened = [];
     const sites = {};
     if (web) {
+      const { host, path = "/" } = typeof web === "string" ? { host: web } : web;
       const site = await context.newPage();
-      await site.goto(`http://${web}:${webPort}/`);
+      await site.goto(`http://${host}:${webPort}${path}`);
       opened.push(site);
-      sites[web] = site;
+      sites[host] = site;
     }
     const panel = await openPanel({ speech });
     opened.push(panel);
     try {
-      if (web) await showSite(panel, sites[web], web);
+      if (web) {
+        const host = typeof web === "string" ? web : web.host;
+        await showSite(panel, sites[host], host);
+      }
       return await body({ panel, sites });
     } finally {
       for (const page of opened) await page.close().catch(() => {});
     }
+  }
+
+  // Read the page through the extension's own extractor, exactly as a capture
+  // would: a message from an extension page to the site tab's content script.
+  // The message goes through the panel page - the content script rejects
+  // service-worker senders (they carry no extension-page URL), and the panel
+  // is the real caller anyway. Content.js is injected on demand - the
+  // context-bar preview that ran while the panel opened has already done it
+  // (waitBar first).
+  async function extractFromSite(panel, host, msg) {
+    const tabId = await panel.evaluate(async (pattern) => (await chrome.tabs.query({ url: pattern }))[0]?.id, `http://${host}/*`);
+    assert.ok(tabId, `no tab for ${host} was found`);
+    let lastError = "";
+    const value = await waitFor(async () => {
+      const answer = await panel.evaluate((payload) => new Promise((resolve) => {
+        try {
+          chrome.tabs.sendMessage(payload.tabId, payload.msg, { frameId: 0 }, (v) => resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : v));
+        } catch (err) {
+          resolve({ ok: false, error: String(err?.message || err) });
+        }
+      }), { tabId, msg });
+      if (answer?.ok) return answer.data;
+      lastError = answer?.error || "no answer";
+      // The extractor is injected on demand (see sidepanel.js extractOnce):
+      // do the same here instead of racing the panel's own first injection.
+      await panel.evaluate(async (id) => {
+        try { await chrome.scripting.executeScript({ target: { tabId: id }, files: ["content.js"] }); } catch { /* surfaced via lastError */ }
+      }, tabId);
+      return null;
+    }, "the page extractor to answer").catch((err) => { throw new Error(`${err.message} (${lastError})`); });
+    return value;
   }
 
   const sendEnabled = (panel) => panel.evaluate(() => !document.getElementById("sendBtn").disabled);
@@ -335,6 +442,53 @@ try {
       // still in the conversation history, so only this question's own message is checked.)
       await send(panel, "one more question");
       assert.ok(!questionCarries(PAGE_MARKER), "after a quick action an ordinary question carried the page");
+    });
+  });
+
+  // ================== Fact Check reads the article, not the discussion ==================
+
+  await test("X status page: ordinary page reading still takes the whole thread, the fact-check capture takes the main post only", async () => {
+    await scenario({ web: { host: X_POST_HOST, path: "/maytao/status/1739" } }, async ({ panel }) => {
+      await waitBar(panel, `${X_MAIN} Post on X`);
+      // Control (status quo): without the fact-check flag nothing changes.
+      const whole = await extractFromSite(panel, X_POST_HOST, { type: "EXTRACT_PAGE_CONTENT" });
+      assert.ok(whole?.text?.includes(X_MAIN), "the main post is missing from the ordinary capture");
+      assert.ok(whole.text.includes(X_REPLY(1)) && whole.text.includes(X_REPLY(3)), "ordinary page reading changed: the thread no longer comes along");
+      // The fact-check capture: main post only, replies gone.
+      const trimmed = await extractFromSite(panel, X_POST_HOST, { type: "EXTRACT_PAGE_CONTENT", excludeComments: true });
+      assert.equal(trimmed?.source, "x-main-post", "the X main-post extractor did not run");
+      assert.ok(trimmed.text.includes(X_MAIN), "the main post text was not kept");
+      assert.ok(!trimmed.text.includes("REPLYMARK"), "a reply leaked into the fact-check capture");
+    });
+  });
+
+  await test("a data-testid comment section is skipped on ordinary pages too, only for the fact-check capture", async () => {
+    await scenario({ web: { host: HOSTS.comments, path: "/" } }, async ({ panel }) => {
+      await waitBar(panel, "Comment Page");
+      const whole = await extractFromSite(panel, HOSTS.comments, { type: "EXTRACT_PAGE_CONTENT" });
+      assert.ok(whole?.text?.includes(COMMENT_MARKER), "control: the comment text was never readable at all");
+      assert.ok(whole.text.includes(ARTICLE_MARKER), "control: the article body is missing from the ordinary capture");
+      const trimmed = await extractFromSite(panel, HOSTS.comments, { type: "EXTRACT_PAGE_CONTENT", excludeComments: true });
+      assert.ok(trimmed?.text?.includes(ARTICLE_MARKER), "the article body was lost with the comments");
+      assert.ok(!trimmed.text.includes(COMMENT_MARKER), "a data-testid comment section leaked into the fact-check capture");
+    });
+  });
+
+  await test("the Fact Check quick action sends the main post and mines its claims from it - never the replies", async () => {
+    await scenario({ seed: { tavilyApiKey: "tvly-test" }, web: { host: X_POST_HOST, path: "/maytao/status/1739" } }, async ({ panel }) => {
+      await waitBar(panel, `${X_MAIN} Post on X`);
+      const before = provider.requests.length;
+      const beforeQueries = tavily.queries.length;
+      await quickAction(panel, "#quickFactCheckBtn");
+      const request = provider.requests.slice(before).join("\n");
+      assert.ok(request.includes("web-grounded fact check"), "the request was not a fact check");
+      assert.ok(request.includes("EVIDENCEMARK"), "the Tavily evidence did not reach the provider");
+      assert.ok(request.includes(X_MAIN), "the main post did not reach the provider");
+      assert.ok(!request.includes("REPLYMARK"), "a reply reached the provider through the fact-check request");
+      const queries = tavily.queries.slice(beforeQueries);
+      assert.ok(queries.length >= 1, "no Tavily query was made");
+      assert.ok(queries.some((q) => q.includes(X_MAIN)), "no claim was mined from the main post");
+      assert.ok(queries.every((q) => !q.includes("REPLYMARK")), "a Tavily claim query was mined from the replies");
     });
   });
 

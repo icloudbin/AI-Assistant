@@ -843,14 +843,17 @@ function findReaderModeBestEl() {
   return bestEl;
 }
 
-function extractReaderModeArticle() {
+function extractReaderModeArticle(skipElements = null) {
   const bestEl = findReaderModeBestEl();
   if (!bestEl) return null;
 
   // Re-read the winning candidate's visible, layout-aware text (rather than
   // reusing the cheap textContent-based measurement above) by walking the live
   // tree read-only - see readVisibleText(). The page is never modified.
-  const text = readVisibleText(bestEl).replace(/\n{3,}/g, '\n\n').trim();
+  // skipElements (fact check only) removes comment subtrees that sit inside
+  // the winning candidate - a <body> candidate would otherwise carry the
+  // whole discussion.
+  const text = readVisibleText(bestEl, { skipElements }).replace(/\n{3,}/g, '\n\n').trim();
   if (text.length < READER_MODE_MIN_TEXT_LENGTH) return null;
 
   return {
@@ -1226,6 +1229,66 @@ function mdCut(text) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Fact-check page capture: the article, not the discussion under it.
+//
+// A fact check on a busy post page used to read the WHOLE discussion: on X
+// (Twitter) the main post and every reply sit in one shared timeline of
+// short article[data-testid="tweet"] elements whose names carry no "comment"
+// word (data-testid only), so every generic rule missed them and the whole
+// thread - easily 16k+ characters - went out as one page, blowing the small
+// token budgets of free-tier models (HTTP 413 on groq's gpt-oss-120b) and
+// mining "claims" out of random replies. Only the Fact Check quick action
+// opts into this (excludeComments); ordinary page reading is unchanged.
+// ---------------------------------------------------------------------------
+
+// X main post only. The first article[data-testid="tweet"] in the primary
+// column is the post the URL points at (quoted posts are nested INSIDE it and
+// come along); every following one is a reply. Modelled on
+// extractRedditArticle. Author, timestamp and post text are read; the action
+// row's buttons are noise tags. The author's own follow-up posts look like
+// any other reply and are left out - a self-thread is not distinguishable
+// from a discussion in this DOM.
+function extractXMainPost() {
+  const host = String(location.hostname || '').toLowerCase();
+  if (!/(^|\.)x\.com$/.test(host) && !/(^|\.)twitter\.com$/.test(host)) return null;
+  // Only post pages /<user>/status/<id>: a timeline, search or profile has no
+  // single main post, and the first article there would be an arbitrary tweet.
+  if (!/^\/[^/]+\/status\/\d+/.test(String(location.pathname || ''))) return null;
+  const article =
+    document.querySelector('[data-testid="primaryColumn"] article[data-testid="tweet"]') ||
+    document.querySelector('article[data-testid="tweet"]');
+  if (!article) return null;
+  // Read-only visible-text walk (see readVisibleText) - the page is never
+  // touched. Hidden elements are out; a "Show more" cut stays a cut, exactly
+  // like for any other collapsed content.
+  const text = readVisibleText(article).replace(/\n{3,}/g, '\n\n').trim();
+  if (!text) return null;
+  return withPageImages({
+    source: 'x-main-post',
+    title: document.title,
+    url: location.href,
+    text: capPageText(text),
+  });
+}
+
+// Comment sections that carry their role only in a data-testid (component-style
+// test ids): an id/class named "comments" is already a STRONG noise word (see
+// readerModeClassifyNoise), so this only adds the test-id spelling. An element
+// that holds most of the page's prose is kept - forum software sometimes
+// renders the whole thread inside one "comments" component.
+function findCommentSkipElements() {
+  const commentWords = new Set(['comment', 'comments', 'replies', 'disqus']);
+  const skip = new Set();
+  let seen = 0;
+  for (const el of document.querySelectorAll('[data-testid]')) {
+    if (++seen > READER_MODE_MAX_SCORED_NODES) break;
+    const words = readerModeNameWords(String(el.getAttribute('data-testid') || ''));
+    if (words.some((w) => commentWords.has(w)) && !readerModeHoldsMostOfPage(el)) skip.add(el);
+  }
+  return skip;
+}
+
 function extractPageMarkdownContent() {
   // findReaderModeBestEl() falls back to <body> itself when no candidate
   // scored; the Set keeps that case from extracting the whole page twice.
@@ -1296,12 +1359,25 @@ function extractPageContent(opts) {
   const amazonProduct = extractAmazonProductPage();
   if (amazonProduct) return withPageImages(amazonProduct);
 
+  // Only the Fact Check quick action asks for the article without the
+  // discussion under it (see the block comment above).
+  const excludeComments = !!(opts && opts.excludeComments);
+  if (excludeComments) {
+    const xPost = extractXMainPost();
+    if (xPost) return xPost;
+  }
+
   if (opts && opts.markdown) {
     const markdownPage = extractPageMarkdownContent();
     if (markdownPage) return withPageImages(markdownPage);
   }
 
-  const readerMode = extractReaderModeArticle();
+  // Comment containers named by data-testid are skipped here (reader mode and
+  // the fallback below), not by readerModeIsNoise: the noise classifier is
+  // shared by every caller, and only the fact check asked for this.
+  const commentSkip = excludeComments ? findCommentSkipElements() : null;
+
+  const readerMode = extractReaderModeArticle(commentSkip);
   if (readerMode) return withPageImages(readerMode);
 
   // Last-resort extraction: still exclude common page chrome/noise rather
@@ -1313,12 +1389,13 @@ function extractPageContent(opts) {
 
   // Walk the live tree read-only (see readVisibleText): the page is never
   // cloned, modified, or re-laid-out.
-  let text = readVisibleText(document.body).replace(/\n{3,}/g, '\n\n').trim();
+  let text = readVisibleText(document.body, { skipElements: commentSkip }).replace(/\n{3,}/g, '\n\n').trim();
   // Noise filtering must never be the reason a page comes back empty: when it
   // left (almost) nothing, read the page again without it. Menus and footers
-  // may come along, but the content is not lost.
+  // may come along, but the content is not lost. The comment skip stays: a
+  // fact check that fell back to "almost nothing but comments" wants neither.
   if (text.length < READER_MODE_MIN_TEXT_LENGTH) {
-    const unfiltered = readVisibleText(document.body, { filterNoise: false }).replace(/\n{3,}/g, '\n\n').trim();
+    const unfiltered = readVisibleText(document.body, { filterNoise: false, skipElements: commentSkip }).replace(/\n{3,}/g, '\n\n').trim();
     if (unfiltered.length > text.length) text = unfiltered;
   }
   // A page can be meaningful even when it has no extractable text, such as
@@ -1403,7 +1480,7 @@ globalThis.__aiAssistantMessageListener = (msg, sender, sendResponse) => {
     if (extractionStarted) return;
     extractionStarted = true;
     try {
-      sendResponse({ ok: true, data: globalThis.__aiAssistantPageExtractor().extractPageContent({ markdown: msg.format === 'markdown' }) });
+      sendResponse({ ok: true, data: globalThis.__aiAssistantPageExtractor().extractPageContent({ markdown: msg.format === 'markdown', excludeComments: msg.excludeComments === true }) });
     } catch (err) {
       sendResponse({ ok: false, error: String(err?.message || err) });
     }

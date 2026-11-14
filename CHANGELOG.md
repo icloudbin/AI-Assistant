@@ -1,5 +1,17 @@
 # Changelog
 
+## Fact Check reads the article, not the discussion under it (v1.10.173)
+
+User-reported: running Fact Check on a busy X (Twitter) post page failed with Groq's free-tier `openai/gpt-oss-120b` rejecting the request - HTTP 413, "Request too large ... Limit 8000, Requested 11386" tokens per minute. The capture had attached the ENTIRE thread: on an X status page the main post and every reply sit in one shared timeline of short `article[data-testid="tweet"]` elements whose names carry no "comment" word (the container is only `data-testid="cellInnerDiv"`), so every generic extraction rule missed them and 16k+ characters of replies went out with the request - blowing small token budgets and mining "claims" out of random replies.
+
+- **The Fact Check quick action now captures the page with `excludeComments`** (sidepanel.js passes the flag on this one capture; ordinary page reading, Translate, Summarize etc. are unchanged).
+- **content.js gains an X main-post extractor** (`extractXMainPost`, modelled on the Reddit one): on x.com/twitter.com status pages (`/<user>/status/<id>`) it reads the first `article[data-testid="tweet"]` in the primary column - the post the URL points at, with author and timestamp; quoted posts are nested inside it and come along. Replies, and the author's own follow-up posts (indistinguishable from replies in this DOM), stay out.
+- **Comment sections named only by data-testid are skipped too** (`findCommentSkipElements`, used by reader mode and the whole-page fallback under the flag): an id/class named "comments" was already a strong noise word; this adds the test-id spelling. An element that holds most of the page's prose is kept, so forum software that renders a whole thread inside one "comments" component is not emptied.
+- The page text sent with the fact-check request is the article, so the mined Tavily claims come from it as well; a highlighted selection still checks exactly the selection as before.
+- e2e-page-privacy pins all three layers with an X look-alike served at `x.com` itself (a new fake `api.tavily.com` lets the full quick action run end to end): ordinary page reading still takes the whole thread (status quo control), the fact-check capture takes the main post only, the data-testid comment skip works on ordinary pages, and the provider request plus every Tavily claim query carry the main post and no reply.
+- Tests: 28 Node suites + check-package + all 9 playwright e2e suites (53 checks) + extension-e2e 38/38 + real-Chrome 11/11 green.
+- Build bumped to 1.10.173.
+
 ## SEC-03 storage claim retracted, isolation documented truthfully (v1.10.172)
 
 Follows the 2026-11-13 review round (user-approved option A): the v1.10.167 SEC-03 entry claimed that content scripts were restricted from reading `chrome.storage.local` via an access-level call. That claim was wrong and has been retracted.

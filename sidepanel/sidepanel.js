@@ -1330,7 +1330,7 @@ function withDeadline(promise, ms) {
   });
 }
 
-async function getActivePageContext(retryCount = 0, format = null) {
+async function getActivePageContext(retryCount = 0, format = null, excludeComments = false) {
   const tab = await getCurrentActiveTab();
   if (!tab?.id) return null;
   const initialTabId = tab.id;
@@ -1384,7 +1384,7 @@ async function getActivePageContext(retryCount = 0, format = null) {
     // frame), two frames were listening: the iframe's (usually empty)
     // extraction could answer first, making every later page read of that
     // tab fail its hasExtractedPageContent check and end as "capture failed".
-    chrome.tabs.sendMessage(initialTabId, { type: "EXTRACT_PAGE_CONTENT", format }, { frameId: 0 }, (value) => {
+    chrome.tabs.sendMessage(initialTabId, { type: "EXTRACT_PAGE_CONTENT", format, excludeComments }, { frameId: 0 }, (value) => {
       clearTimeout(timer);
       if (chrome.runtime.lastError) { settle(null); return; }
       settle(value || null);
@@ -1420,7 +1420,7 @@ async function getActivePageContext(retryCount = 0, format = null) {
       // active page. This prevents a slow content-script response from a
       // previous tab/navigation being attached to the next request.
       if (currentTab?.id !== initialTabId || String(currentTab.url || "") !== initialUrl) {
-        return retryCount < 2 ? getActivePageContext(retryCount + 1, format) : null;
+        return retryCount < 2 ? getActivePageContext(retryCount + 1, format, excludeComments) : null;
       }
       return makeContext(data);
     }
@@ -1444,7 +1444,7 @@ async function getActivePageContext(retryCount = 0, format = null) {
     }
     if (readyState && readyState !== "complete" && retryCount < 2) {
       await new Promise((resolve) => setTimeout(resolve, 700));
-      return getActivePageContext(retryCount + 1, format);
+      return getActivePageContext(retryCount + 1, format, excludeComments);
     }
   } catch (err) {
     console.debug("[AI Assistant] Content script unavailable:", err);
@@ -3420,7 +3420,16 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     if (sendPage) {
       // Capture the page at the moment the user submits the request. The API
       // request must never reuse the page context shown or captured earlier.
-      pageContext = await getActivePageContext(0, translateMode === true && !translateSource ? "markdown" : null);
+      pageContext = await getActivePageContext(
+        0,
+        translateMode === true && !translateSource ? "markdown" : null,
+        // Fact Check checks the article, not the discussion under it: a busy
+        // post page (X threads above all) otherwise sends thousands of reply
+        // characters that blow free-tier token limits and dig false claims out
+        // of the replies. The extractor keeps the main post / drops comment
+        // sections for this capture only (see content.js excludeComments).
+        factCheck === true,
+      );
       if (isCancelled()) return;
       if (pageContext) {
         updateContextBar(pageContext, true);
