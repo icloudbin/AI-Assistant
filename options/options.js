@@ -867,8 +867,11 @@ async function restoreHistory() {
     setTimeout(() => (msgEl.textContent = ""), condensed || dropped > 0 ? 8000 : 3000);
   } catch (err) {
     console.error("[AI Assistant] Unable to restore history:", err);
-    msgEl.style.color = "#f55b5b";
-    msgEl.textContent = t(currentLang, "restore_failed_template", { message: err?.message || t(currentLang, "unknownError") });
+    const cancelledByDelete = err?.message === t(currentLang, "restore_cancelled_by_delete");
+    msgEl.style.color = cancelledByDelete ? "#8b91a3" : "#f55b5b";
+    msgEl.textContent = cancelledByDelete
+      ? err.message
+      : t(currentLang, "restore_failed_template", { message: err?.message || t(currentLang, "unknownError") });
     restoreHistoryFile.value = "";
   } finally {
     backupHistoryBtn.disabled = false;
