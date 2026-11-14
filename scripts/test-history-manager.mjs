@@ -159,7 +159,7 @@ assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
   const byteLimited = limitStoredConversationMessages({ id: "bytes", messages: huge });
   const byteSize = new TextEncoder().encode(JSON.stringify(byteLimited.messages)).length;
   assert.ok(byteSize <= MAX_STORED_CONVERSATION_BYTES, `serialized history stays within byte budget (${byteSize})`);
-  assert.ok(byteLimited.messages.length < huge.length);
+  assert.ok(byteLimited.messages.some((message) => /Message truncated in saved history/.test(message.content)), "oversized message content is explicitly truncated instead of discarding the conversation");
 
   // A single oversized newest turn is skipped as a unit; earlier complete
   // turns remain available instead of the whole conversation becoming empty.
