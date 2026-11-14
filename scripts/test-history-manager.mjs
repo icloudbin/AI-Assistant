@@ -170,7 +170,9 @@ assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
     { id: "a-new", role: "assistant", content: "x".repeat(MAX_STORED_CONVERSATION_BYTES + 1000) },
   ];
   const retained = limitStoredConversationMessages({ id: "oversized-latest", messages: oversizedLatest });
-  assert.deepEqual(retained.messages.map((m) => m.id), ["u-old", "a-old"], "oversized newest turn is skipped while older full turn survives");
+  assert.deepEqual(retained.messages.map((m) => m.id), ["u-old", "a-old", "u-new", "a-new"], "oversized newest message is retained in a bounded form");
+  assert.match(retained.messages.at(-1).content, /Message truncated in saved history/, "truncated content is clearly marked");
+  assert.ok(new TextEncoder().encode(JSON.stringify(retained.messages)).length <= MAX_STORED_CONVERSATION_BYTES, "truncated turn remains within the per-conversation byte budget");
 
   // The aggregate budget is applied to the complete history, newest first.
   const globalInput = [
