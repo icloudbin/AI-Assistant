@@ -139,8 +139,8 @@ function messageTurns(messages) {
 
 const HISTORY_TRUNCATION_NOTICE = "\n\n[Message truncated in saved history to fit the storage limit.]";
 
-function fitMessageToByteBudget(message, maxBytes, encoder) {
-  let candidate = { ...message };
+function prepareMessageForHistory(message) {
+  const candidate = { ...message };
   // Display-only copies and attachment previews are the first things to trim;
   // preserve the user's actual question and assistant response where possible.
   delete candidate.displayContent;
@@ -148,6 +148,11 @@ function fitMessageToByteBudget(message, maxBytes, encoder) {
     candidate.attachments = condenseAttachments(candidate.attachments, QUOTA_ATTACHMENT_PREVIEW_CHARS);
     if (!candidate.attachments.length) delete candidate.attachments;
   }
+  return candidate;
+}
+
+function fitMessageToByteBudget(message, maxBytes, encoder) {
+  const candidate = prepareMessageForHistory(message);
   const sizeOf = (value) => {
     try { return encoder.encode(JSON.stringify(value)).length; }
     catch { return Infinity; }
@@ -174,19 +179,29 @@ function fitMessageToByteBudget(message, maxBytes, encoder) {
 }
 
 function fitTurnToByteBudget(turn, maxBytes, encoder) {
+  const minimumSizes = turn.map((message) => {
+    const minimum = prepareMessageForHistory(message);
+    if (typeof minimum.content === "string") minimum.content = HISTORY_TRUNCATION_NOTICE;
+    try { return encoder.encode(JSON.stringify(minimum)).length; }
+    catch { return Infinity; }
+  });
+  const minimumTotal = 2 + minimumSizes.reduce((sum, size) => sum + size, 0) + Math.max(0, turn.length - 1);
+  if (minimumTotal > maxBytes || minimumSizes.some((size) => !Number.isFinite(size))) return null;
+
   const fitted = [];
   let used = 2; // JSON array brackets
   for (let i = 0; i < turn.length; i++) {
-    const separators = i > 0 ? 1 : 0;
-    const reserve = (turn.length - i - 1) * 512;
-    const available = maxBytes - used - separators - reserve;
-    if (available <= 0) return null;
+    const separator = i > 0 ? 1 : 0;
+    const reserve = minimumSizes.slice(i + 1).reduce((sum, size) => sum + size, 0)
+      + Math.max(0, turn.length - i - 1);
+    const available = maxBytes - used - separator - reserve;
+    if (available < minimumSizes[i]) return null;
     const message = fitMessageToByteBudget(turn[i], available, encoder);
     if (!message) return null;
     const size = encoder.encode(JSON.stringify(message)).length;
-    if (used + separators + size + reserve > maxBytes) return null;
+    if (used + separator + size + reserve > maxBytes) return null;
     fitted.push(message);
-    used += separators + size;
+    used += separator + size;
   }
   return fitted;
 }
