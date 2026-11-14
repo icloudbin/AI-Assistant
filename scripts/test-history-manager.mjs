@@ -15,6 +15,8 @@ import {
   limitStoredConversationMessages,
   MAX_STORED_MESSAGES_PER_CONVERSATION,
   MAX_STORED_CONVERSATION_BYTES,
+  MAX_STORED_HISTORY_BYTES,
+  limitStoredHistoryBytes,
   STORED_ATTACHMENT_PREVIEW_CHARS,
   QUOTA_ATTACHMENT_PREVIEW_CHARS,
 } from "../sidepanel/history-manager.js";
@@ -158,6 +160,27 @@ assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
   const byteSize = new TextEncoder().encode(JSON.stringify(byteLimited.messages)).length;
   assert.ok(byteSize <= MAX_STORED_CONVERSATION_BYTES, `serialized history stays within byte budget (${byteSize})`);
   assert.ok(byteLimited.messages.length < huge.length);
+
+  // A single oversized newest turn is skipped as a unit; earlier complete
+  // turns remain available instead of the whole conversation becoming empty.
+  const oversizedLatest = [
+    { id: "u-old", role: "user", content: "older question" },
+    { id: "a-old", role: "assistant", content: "older answer" },
+    { id: "u-new", role: "user", content: "new question" },
+    { id: "a-new", role: "assistant", content: "x".repeat(MAX_STORED_CONVERSATION_BYTES + 1000) },
+  ];
+  const retained = limitStoredConversationMessages({ id: "oversized-latest", messages: oversizedLatest });
+  assert.deepEqual(retained.messages.map((m) => m.id), ["u-old", "a-old"], "oversized newest turn is skipped while older full turn survives");
+
+  // The aggregate budget is applied to the complete history, newest first.
+  const globalInput = [
+    { id: "old", updatedAt: 1, messages: [{ role: "user", content: "o".repeat(30 * 1024 * 1024) }] },
+    { id: "new", updatedAt: 2, messages: [{ role: "user", content: "n".repeat(30 * 1024 * 1024) }] },
+  ];
+  const global = limitStoredHistoryBytes(globalInput);
+  assert.ok(global.bytes <= MAX_STORED_HISTORY_BYTES, "entire serialized history stays within global budget");
+  assert.deepEqual(global.conversations.map((item) => item.id), ["new"], "newer conversation wins global budget");
+  assert.equal(global.dropped, 1, "global limit reports the number of omitted conversations");
 }
 
 // ---------- translationTopicTitle: "<label>: <excerpt of the source>" ----------
