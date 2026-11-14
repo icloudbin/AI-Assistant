@@ -27,7 +27,7 @@ import { saveSettingsBackup, restoreSettingsFromBackupOnce } from "../settings-s
 // in scripts/test-conversation-store.mjs).
 import { mergeConversationLists, sortedByNewest, resolveContextEpoch, withHistoryLock, withNamedLock, CONTEXT_ACTION_LOCK, createMessage, withMessageIds, migrateConversationIds } from "../conversation-store.js";
 import { markdownToHtml } from "./rendering/markdown.js";
-import { makeTopicTitle, translationTopicTitle, toStoredMessage, compressForQuota, limitStoredConversationMessages } from "./history-manager.js";
+import { makeTopicTitle, translationTopicTitle, toStoredMessage, compressForQuota, limitStoredConversationMessages, limitStoredHistoryBytes } from "./history-manager.js";
 import { normalizeHistoryGeneration, isHistoryGenerationCurrent } from "../history-generation.js";
 import { sanitizeAttachmentName, normalizeAttachments, migrateLegacyConversations, isImageDropPayload } from "../attachments.js";
 // Page images are fetched in the page's own context (no worker privilege) -
@@ -1926,11 +1926,17 @@ async function saveConversationsWithLock() {
   let merged = withoutDiscardedMessages(sortedByNewest(
     mergeConversationLists(migrateLegacyConversations(stored[HISTORY_STORAGE_KEY]), conversations, currentConversationId)
   )).map(limitStoredConversationMessages).filter((c) => c.messages?.length).slice(0, MAX_SAVED_CONVERSATIONS);
+  // unlimitedStorage bypasses Chrome's normal cap; keep a deterministic global
+  // ceiling so an ever-growing collection cannot make every history load/save
+  // and backup operation progressively more expensive. Newest conversations
+  // win; the same helper is used by ZIP restore.
+  const globallyLimited = limitStoredHistoryBytes(merged);
+  merged = globallyLimited.conversations;
   // Storage-quota escalation, most gentle first: (1) write as-is, (2) shrink
   // attachment previews and drop display-only copies (every conversation
   // kept), (3) only then drop the OLDEST conversations - half per attempt -
   // and tell the user how many were lost instead of dropping them silently.
-  let quotaDropped = 0;
+  let quotaDropped = globallyLimited.dropped;
   for (let attempt = 0; ; attempt++) {
     try {
       await chrome.storage.local.set({ [HISTORY_STORAGE_KEY]: merged });
