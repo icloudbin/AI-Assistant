@@ -1,5 +1,15 @@
 # Changelog
 
+## A dropped image + Translate translates the image, and user attachments displace automatic page visuals (v1.10.175)
+
+User-reported: dragging an image into the composer and clicking Translate means "translate the text inside this image" - not the whole page, and not the page's images. Instead the request failed outright: "HTTP 400 Too many images provided. This model supports up to 3 images". Two things stacked up: the Translate quick action - like every quick action - asked for the page visuals, so the request carried the user's dropped image PLUS every eligible image on the page (up to 8) PLUS the visible-page screenshot; and the whole-page translation pipeline grabbed the page's markdown text as the translation source (numbered-lines protocol), so even without the error the image's text was never what got translated.
+
+- **User attachments displace automatic page visuals.** When the user attached any image themselves, the quick actions no longer fetch page images or capture the visible-page screenshot (sidepanel.js gates both on the new `userImageCount`). The user's image goes out alone; without a user image, the existing page-visuals behavior is unchanged (e2e pins both directions with a blue page image and a red dropped one).
+- **Dropped image + Translate (no selection) is an image-source translation.** The page is neither captured nor sent (the context bar stops announcing it), the numbered-lines translation protocol does not run, and the question gains a `[CURRENT PAGE VISUALS]` note telling the model the source text is inside the attached image(s) - read the image, translate it, leave the page alone. A selection translation and the whole-page translation are unchanged.
+- e2e-page-privacy pins the new behavior end to end through the fake provider: the translate request carries the dropped image, the image-source note, no page text, no numbered lines and no page image; the Summarize positive control still sends the page's own image, and the same Summarize with a dropped image sends only the user's.
+- Tests: 28 Node suites + check-package + all 9 playwright e2e suites + extension-e2e 38/38 + real-Chrome 11/11 green.
+- Build bumped to 1.10.175.
+
 ## A repeat fact check no longer replays conversation history (v1.10.174)
 
 Follow-up to v1.10.173 (user report): the first fact check on groq's free-tier `openai/gpt-oss-120b` (8000 tokens per minute) returned a result, but every later attempt in the same conversation - on qwen, on gpt-oss-20b, and back on gpt-oss-120b itself - failed with "HTTP 413 ... TPM: Limit 8000, Requested 8919". Why the first worked and the rest did not: Groq's TPM limit counts the WHOLE request, and the request had grown - a fact check's request sits near that budget already (up to 18000 characters of Tavily evidence plus the system prompt), and the conversation replayed the earlier turns on top: the previous fact check's full verdict (hundreds of tokens), plus the stored questions of the failed attempts in between. Switching models keeps the same history, so switching back could not help, and the failure was deterministic rather than transient.

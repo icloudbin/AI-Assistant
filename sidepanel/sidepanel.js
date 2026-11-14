@@ -3375,6 +3375,20 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
       ? String(forcedDisplayQuestion).trim()
       : (questionForRequest || t(currentLang, "attachedFilesFallback"));
     const readyAttachments = attachments.filter((a) => a.status === "ready");
+    // Images the user attached themselves are explicit intent. The automatic
+    // page visuals (page images + screenshot) exist so a quick action can
+    // discuss a page's own visuals - they must never STACK on top of the
+    // user's own images and blow the model's per-request image limit
+    // ("HTTP 400 Too many images provided. This model supports up to 3
+    // images": a dropped image + a visual-heavy page + the screenshot).
+    const userImageCount = readyAttachments.filter((a) => a.kind === "image" && a.dataUrl).length;
+    // Dropped image(s) + the Translate quick action with no selection: the
+    // image is the translation source. The page is not the source (the user
+    // did not ask to translate the page), and the numbered-lines protocol has
+    // nothing to number for text that lives inside an image.
+    const translateImageSource = translateMode === true
+      && !(typeof translateSource === "string" && translateSource.trim())
+      && userImageCount > 0;
     const displayContent = attachmentList.length
       ? `${displayQuestion}\n\n📎 ${readyAttachments.map((a) => a.name).join(", ")}`
       : displayQuestion;
@@ -3417,7 +3431,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     if (isCancelled()) return;
 
     let pageContext = null;
-    if (sendPage) {
+    if (sendPage && !translateImageSource) {
       // Capture the page at the moment the user submits the request. The API
       // request must never reuse the page context shown or captured earlier.
       pageContext = await getActivePageContext(
@@ -3443,6 +3457,11 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
         updateContextBarUnavailable();
         pageContext = { captureFailed: true };
       }
+    }
+    if (translateImageSource) {
+      // Nothing from the page goes out in an image-source translation; stop
+      // announcing the page in the context bar.
+      updateContextBar(null);
     }
 
     const pageContextValid = !!pageContext && !pageContext.captureFailed;
@@ -3477,7 +3496,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     // themselves are unaffected.
     // (`attachPageVisuals` was worked out before the page question, which says
     // when a screenshot would go too.)
-    if (attachPageVisuals && sendPage && pageContextValid) {
+    if (attachPageVisuals && sendPage && pageContextValid && !userImageCount) {
       const pageImages = await fetchPageImages(pageContext.imageUrls, pageContext.tabId);
       automaticPageImages = pageImages.images;
       pageImagesSkipped = pageImages.skipped;
@@ -3488,7 +3507,7 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
         pageImagesSkipped = 0;
       }
     }
-    if (attachPageVisuals && sendPage) {
+    if (attachPageVisuals && sendPage && !userImageCount) {
       // Capture a visible-page image in addition to individually fetched <img>
       // elements. This also covers pages whose text extraction failed but whose
       // visible content is an image or canvas - but only of the tab the user
@@ -3516,7 +3535,9 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
     // current-page images are part of the requested analysis.
     const questionForApi = pageVisualInputCount
       ? `${baseQuestionForApi}\n\n[CURRENT PAGE VISUALS]\n${pageVisualInputCount} current-page visual input${pageVisualInputCount === 1 ? " is" : "s are"} attached. Analyze and incorporate the visible page images when they are relevant to the requested summary, translation, explanation, key points, or fact check. Do not describe images from earlier conversation turns.\n[/CURRENT PAGE VISUALS]`
-      : baseQuestionForApi;
+      : translateImageSource
+        ? `${baseQuestionForApi}\n\n[CURRENT PAGE VISUALS]\nThe source text to translate is contained inside the attached image input(s): read the text in the image and translate it into the target language. The current web page is not the source and must not be translated.\n[/CURRENT PAGE VISUALS]`
+        : baseQuestionForApi;
 
     // Page-context epoch. A page change starts a new epoch, and every later
     // request in that epoch sends ONLY turns from the epoch. Doing this on the
@@ -3572,8 +3593,8 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
         // non-null here by mistake. This is independent of attached images
         // (below), which are unrelated to this toggle and always sent when
         // present.
-        includePageContext: sendPage,
-        pageContext: sendPage ? pageContext : null,
+        includePageContext: sendPage && !translateImageSource,
+        pageContext: sendPage && !translateImageSource ? pageContext : null,
         // Only turns from the current page-context epoch. The UI history keeps
         // everything, but a previous page's assistant answers must not return
         // on the next follow-up after a page change.

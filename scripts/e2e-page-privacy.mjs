@@ -126,7 +126,7 @@ const HOSTS = {
 };
 const PAGE_MARKER = "PLAINMARK";
 const sentence = (marker) => `${marker} is the text of this test page, written as several complete sentences so that the page extractor treats it as readable article content.`;
-const articleHtml = (marker) => `<!doctype html><html><head><meta charset="utf-8"><title>${marker} Title</title></head><body><main><h1>${marker} Heading</h1>${`<p>${sentence(marker)}</p>`.repeat(6)}</main></body></html>`;
+const articleHtml = (marker) => `<!doctype html><html><head><meta charset="utf-8"><title>${marker} Title</title></head><body><main><h1>${marker} Heading</h1>${`<p>${sentence(marker)}</p>`.repeat(6)}<p><img src="/bigblue.png" width="200" height="200" alt="blue test image"></p></main></body></html>`;
 
 // An X (Twitter) status page look-alike, served at x.com itself (mapped to this
 // server in the browser's DNS rules) because the extractor keys on the real
@@ -160,6 +160,11 @@ const commentsHtml = () => `<!doctype html><html><head><meta charset="utf-8"><ti
 </body></html>`;
 
 const webServer = http.createServer((req, res) => {
+  if (new URL(req.url, "http://127.0.0.1").pathname === "/bigblue.png") {
+    res.writeHead(200, { "content-type": "image/png" });
+    res.end(BLUE_PNG);
+    return;
+  }
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
   const host = String(req.headers.host || "").split(":")[0];
   res.end(
@@ -203,6 +208,39 @@ const PAGE_READING_KEY = "includeCurrentPageContext";
 
 // A 1x1 PNG.
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+
+// Solid 200x200 PNGs (chunk length/CRC are BIG-endian per the PNG spec), used
+// to tell the page's own image (blue) from a user-dropped image (red).
+const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+const crc32 = (buf) => { let c = 0xffffffff; for (const b of buf) c = crcTable[(c ^ b) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+function pngChunk(type, data) {
+  const len = Buffer.alloc(4); len.writeUInt32BE(data.length, 0);
+  const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+  const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body), 0);
+  return Buffer.concat([len, body, crc]);
+}
+function solidPng(w, h, [r, g, b]) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8; ihdr[9] = 2;
+  const row = Buffer.alloc(1 + w * 3);
+  for (let x = 0; x < w; x++) { row[1 + x * 3] = r; row[2 + x * 3] = g; row[3 + x * 3] = b; }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", require("node:zlib").deflateSync(Buffer.concat(Array.from({ length: h }, () => row)))),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+const BLUE_PNG = solidPng(200, 200, [30, 60, 220]);
+const BLUE_SEGMENT = BLUE_PNG.toString("base64").slice(160, 220);
+const RED_PNG_B64 = solidPng(200, 200, [220, 30, 30]).toString("base64");
+const dropFile = (panel, b64, name) => panel.evaluate(([data, fileName]) => {
+  const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+  const dt = new DataTransfer();
+  dt.items.add(new File([bytes], fileName, { type: "image/png" }));
+  document.getElementById("chatForm").dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
+}, [b64, name]);
 
 // A stand-in for the browser's speech recognition: nothing is recorded or sent
 // anywhere; the page only counts how often recognition was started.
@@ -506,6 +544,45 @@ try {
       assert.ok(!request.includes("default answer"), "the fact-check request replayed an earlier reply");
       assert.ok(request.includes(X_MAIN), "the main post did not reach the provider");
       assert.ok(request.includes("EVIDENCEMARK"), "the Tavily evidence did not reach the provider");
+    });
+  });
+
+  // ===================== Translate with a dropped image =====================
+
+  await test("Translate with a dropped image translates the IMAGE, not the page (and stacks nothing)", async () => {
+    await scenario({ seed: { imageNoticeAcknowledged: true, pageVisualsEnabled: true }, web: HOSTS.plain }, async ({ panel }) => {
+      await waitBar(panel, `${PAGE_MARKER} Title`);
+      await dropFile(panel, RED_PNG_B64, "dropped.png");
+      await waitFor(async () => (await panel.$$eval("#attachmentList .attachment-state", (els) => els.map((e) => e.textContent))).some((t) => /ready/i.test(t)), "dropped image ready");
+      const before = provider.requests.length;
+      await quickAction(panel, "#quickTranslateBtn");
+      const made = provider.requests.slice(before).join("\n");
+      assert.ok(made.length >= 1, "no provider request");
+      assert.ok(/data:image\/png;base64,/.test(made), "the dropped image did not reach the request");
+      assert.ok(made.includes("contained inside the attached image"), "the question does not name the image as the source");
+      assert.ok(!made.includes(PAGE_MARKER), "the page text was sent although the image is the source");
+      assert.ok(!/\n\[1\] /.test(made), "the numbered-lines protocol ran although the source is an image");
+      assert.ok(!made.includes(BLUE_SEGMENT), "a page image was stacked onto the user's dropped image");
+    });
+  });
+
+  await test("Summarize sends the page's own image alone; with a user image attached, only the user's image goes", async () => {
+    await scenario({ seed: { imageNoticeAcknowledged: true, pageVisualsEnabled: true }, web: HOSTS.plain }, async ({ panel }) => {
+      await waitBar(panel, `${PAGE_MARKER} Title`);
+      // Positive control: no user image - the page's own (blue) image is sent.
+      let before = provider.requests.length;
+      await quickAction(panel, "#quickSummarizeBtn");
+      const control = provider.requests.slice(before).join("\n");
+      assert.ok(control.includes(BLUE_SEGMENT), "the page's own image was not sent with the quick action");
+      // The user drops their own image: from then on it goes ALONE.
+      await dropFile(panel, RED_PNG_B64, "dropped.png");
+      await waitFor(async () => (await panel.$$eval("#attachmentList .attachment-state", (els) => els.map((e) => e.textContent))).some((t) => /ready/i.test(t)), "dropped image ready");
+      before = provider.requests.length;
+      await quickAction(panel, "#quickSummarizeBtn");
+      const made = provider.requests.slice(before).join("\n");
+      assert.ok(/data:image\/png;base64,/.test(made), "the user image did not reach the request");
+      assert.ok(!made.includes(BLUE_SEGMENT), "the page's image was stacked onto the user's dropped image");
+      assert.ok(!/\n\[1\] /.test(made), "the numbered-lines protocol ran for a summarize");
     });
   });
 
