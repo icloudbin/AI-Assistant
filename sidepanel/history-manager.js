@@ -116,11 +116,6 @@ function toStoredMessage(message) {
   };
 }
 
-// Storage-quota pressure valve, applied to the merged list BEFORE any
-// conversation is dropped: shrink attachment previews further and drop the
-// display-only copy of every message (readers fall back to `content`).
-// Lossy for display, but every conversation and every turn is kept (ids and
-// timestamps are untouched, so the shortened copy is still the same message).
 // Persistent history bounds. unlimitedStorage disables Chrome's normal
 // quota guard, so enforce per-conversation AND whole-history serialized-byte
 // budgets, plus a per-conversation message-count cap.
@@ -228,7 +223,7 @@ function limitStoredConversationMessages(conversation) {
   }
 
   if (keptTurns.length === turns.length && totalMessages === messages.length
-      && keptTurns.every((turn, i) => turn.every((message, j) => message === turns[i][j]))) return conversation;
+      && keptTurns.every((turn, i) => turn.every((message, j) => message === turns[turns.length - 1 - i][j]))) return conversation;
   keptTurns.reverse();
   const kept = keptTurns.flat();
   // A leading assistant-only turn is not useful provider history. This can
