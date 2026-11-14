@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — history, prompt-boundary and storage hardening
+
+- **DATA-01-01:** ZIP restore records the history-generation tombstone before asynchronous archive parsing, then rechecks it while holding the shared history write lock. A restore that began before Delete All now cancels rather than resurrecting the deleted history; a restore started after deletion remains valid.
+- **SEC-02-01:** Requests containing attached images, screenshots or page visuals now carry explicit instructions that image pixels, OCR text, QR codes and depicted prompts are untrusted data. Visual inputs cannot authorize actions or override privacy/security rules; the visual marker shares the request's random boundary ID.
+- **SEC-02-02:** Custom Prompt is no longer concatenated into the system message. It is passed as a bounded user preference with explicit lower priority than extension security/privacy instructions and the user's current request.
+- **DATA-02-02:** Per-conversation history trimming now preserves complete turns and truncates oversized message text with a visible marker, instead of stopping at the first oversized message and potentially discarding the entire conversation.
+- **DATA-02-01:** Normal saves and ZIP restores enforce a shared 50 MiB serialized-history ceiling in addition to per-conversation limits. Newer conversations are retained first, and omitted conversations are included in the existing storage-limit notice.
+- Added regression assertions for stale restore cancellation, image prompt-injection boundaries, custom-prompt priority, oversized-message retention and the global history budget.
+
 ## P1+P2 fixes from the developer code-analysis round (v1.10.176)
 
 The 2026-11-14 code-analysis round (two parallel read-only review agents plus a full manual read, every finding verified empirically in local Chrome with real API keys before reporting) produced a prioritized list; this build fixes the P1 and both P2s. Six P3s and two design questions remain open (see the analysis report).
