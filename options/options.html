@@ -211,7 +211,7 @@
       <div class="history-management-title" data-i18n="customPrompt_label">Custom Prompt</div>
       <div class="field custom-prompt-field">
         <textarea id="customPrompt" maxlength="8000" placeholder="Example: You are a concise technical assistant. Always answer in English, use bullet points when helpful, and clearly distinguish facts from assumptions." data-i18n-placeholder="customPrompt_placeholder"></textarea>
-        <div class="hint backup-hint" data-i18n="customPrompt_hint">This prompt is sent to the selected model (DeepSeek, OpenRouter, or Groq) as a system instruction and can customize how the assistant interprets requests and formats its responses.</div>
+        <div class="hint backup-hint" data-i18n="customPrompt_hint">This prompt is sent to the selected model (DeepSeek, OpenRouter, or Groq) with each request as a bounded user preference and can customize how the assistant interprets requests and formats its responses; it cannot override the extension's safety and privacy rules.</div>
       </div>
     </div>
     <div class="actions">

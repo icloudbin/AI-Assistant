@@ -6,6 +6,7 @@
 // also keeps a message's merge identity (role + model + content) stable.
 // Run:  node scripts/test-history-manager.mjs
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   cleanForTopic,
   makeTopicTitle,
@@ -231,6 +232,78 @@ assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
   assert.equal(translationTopicTitle(label, null), label);
   // A missing label still returns text (never "undefined: ...").
   assert.equal(translationTopicTitle("", "Hello"), "Hello");
+}
+
+// ---------- the kept window is CONTIGUOUS (a skipped turn ends the walk) ----------
+{
+  // Turn sizes: newest 2, middle 199 (over the cap once the newest is kept),
+  // oldest 2. A middle turn that cannot be kept must END the walk instead of
+  // leaving a silent hole between the newest and oldest exchanges.
+  const holeMessages = [
+    { id: "u0", role: "user", content: "old q", createdAt: 10 },
+    { id: "a0", role: "assistant", content: "old a", createdAt: 11 },
+    { id: "u1", role: "user", content: "mid q", createdAt: 20 },
+    ...Array.from({ length: 198 }, (_, i) => ({ id: `m${i}`, role: "assistant", content: `mid ${i}`, createdAt: 21 + i })),
+    { id: "u2", role: "user", content: "new q", createdAt: 40 },
+    { id: "a2", role: "assistant", content: "new a", createdAt: 41 },
+  ];
+  const kept = limitStoredConversationMessages({ id: "hole", messages: holeMessages });
+  assert.deepEqual(
+    kept.messages.map((m) => m.id),
+    ["u2", "a2"],
+    "a turn that cannot be kept ends the walk: the retained window stays contiguous (no silent hole)"
+  );
+
+  // The same contiguity on the byte path: the middle turn's minimum exceeds
+  // what the newest turn left, so the older turn is not kept behind the gap.
+  const byteHole = [
+    { id: "old-u", role: "user", content: "old q", createdAt: 10 },
+    { id: "old-a", role: "assistant", content: "old a", createdAt: 11 },
+    { id: "mid-u", role: "user", content: "mid q", attachments: Array.from({ length: 30 }, (_, i) => ({ name: `f${i}.txt`, kind: "text", text: "a".repeat(900) })), createdAt: 20 },
+    { id: "n-u", role: "user", content: "z".repeat(MAX_STORED_CONVERSATION_BYTES - 600), createdAt: 40 },
+    { id: "n-a", role: "assistant", content: "new a", createdAt: 41 },
+  ];
+  const byteKept = limitStoredConversationMessages({ id: "byte-hole", messages: byteHole });
+  assert.deepEqual(
+    byteKept.messages.map((m) => m.id).filter((id) => id !== "n-u" && id !== "n-a"),
+    [],
+    "no older turn is kept behind a middle turn the budget cannot represent"
+  );
+}
+
+// ---------- a conversation whose only turn exceeds the message cap is force-kept ----------
+{
+  // 201 assistant messages form ONE turn; the count walk cannot keep it and
+  // used to silently empty the whole conversation. The newest 200 messages are
+  // now kept in bounded form instead.
+  const one = { id: "force", title: "t", createdAt: 1, updatedAt: 2, messages: [] };
+  for (let i = 0; i < 201; i++) one.messages.push({ id: `m${i}`, role: "assistant", content: `reply ${i}`, createdAt: i });
+  const forced = limitStoredConversationMessages(one);
+  assert.equal(forced.messages.length, MAX_STORED_MESSAGES_PER_CONVERSATION, "the newest turn is force-kept in bounded form, not dropped");
+  assert.equal(forced.messages[0].id, "m0", "the turn's first message anchors the kept window");
+  assert.equal(forced.messages.at(-1).id, "m200", "the newest messages are the ones kept");
+  assert.ok(
+    new TextEncoder().encode(JSON.stringify(forced.messages)).length <= MAX_STORED_CONVERSATION_BYTES,
+    "the force-kept turn respects the byte budget"
+  );
+
+  // A user-led oversized turn keeps its question as the anchor and the newest
+  // replies within the cap.
+  const two = { id: "force2", title: "t", createdAt: 1, updatedAt: 2, messages: [{ id: "u", role: "user", content: "q", createdAt: 0 }] };
+  for (let i = 0; i < 220; i++) two.messages.push({ id: `a${i}`, role: "assistant", content: `r${i}`, createdAt: i });
+  const forced2 = limitStoredConversationMessages(two);
+  assert.equal(forced2.messages.length, MAX_STORED_MESSAGES_PER_CONVERSATION, "bounded turn keeps the cap count");
+  assert.equal(forced2.messages[0].id, "u", "the user question anchors the kept window");
+  assert.equal(forced2.messages.at(-1).id, "a219", "the newest replies are the ones kept");
+}
+
+// ---------- history-manager.js keeps ONE export site ----------
+{
+  // A second inline export in this module is a SyntaxError ("Duplicate
+  // export") that kills the whole panel module tree - the v1.10.168 release
+  // shipped exactly that. Pin the convention: no inline exports at all.
+  const source = readFileSync(new URL("../sidepanel/history-manager.js", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /(^|\n)export (const|let|var|function|class)\b/, "no inline exports: everything goes through the bottom export block");
 }
 
 console.log("OK: history-manager.js — titles, structured-attachment projection, quota compression.");

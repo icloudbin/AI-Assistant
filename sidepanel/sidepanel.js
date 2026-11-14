@@ -1923,9 +1923,15 @@ async function saveConversationsWithLock() {
   // Snapshot the live history only after the read, so the freshest copy of
   // the current conversation is what gets merged and written.
   syncCurrentConversationFromHistory();
-  let merged = withoutDiscardedMessages(sortedByNewest(
+  const preLimit = withoutDiscardedMessages(sortedByNewest(
     mergeConversationLists(migrateLegacyConversations(stored[HISTORY_STORAGE_KEY]), conversations, currentConversationId)
-  )).map(limitStoredConversationMessages).filter((c) => c.messages?.length).slice(0, MAX_SAVED_CONVERSATIONS);
+  ));
+  const hadMessages = preLimit.filter((c) => c.messages?.length).length;
+  const limitedList = preLimit.map(limitStoredConversationMessages).filter((c) => c.messages?.length);
+  // A conversation the limiter could not represent at all (even its bounded
+  // force-keep failed) comes back empty and used to vanish without a trace.
+  const emptied = hadMessages - limitedList.length;
+  let merged = limitedList.slice(0, MAX_SAVED_CONVERSATIONS);
   // unlimitedStorage bypasses Chrome's normal cap; keep a deterministic global
   // ceiling so an ever-growing collection cannot make every history load/save
   // and backup operation progressively more expensive. Newest conversations
@@ -1936,7 +1942,10 @@ async function saveConversationsWithLock() {
   // attachment previews and drop display-only copies (every conversation
   // kept), (3) only then drop the OLDEST conversations - half per attempt -
   // and tell the user how many were lost instead of dropping them silently.
-  let quotaDropped = globallyLimited.dropped;
+  // The deterministic size-cap drops above are NOT a quota emergency - they
+  // get their own truthful notice below.
+  let sizeDropped = globallyLimited.dropped + emptied;
+  let quotaDropped = 0;
   for (let attempt = 0; ; attempt++) {
     try {
       await chrome.storage.local.set({ [HISTORY_STORAGE_KEY]: merged });
@@ -1964,6 +1973,9 @@ async function saveConversationsWithLock() {
   conversations = merged;
   renderHistorySelect();
   scheduleHistoryRender();
+  if (sizeDropped > 0) {
+    addBubble("notice", t(currentLang, "history_sizeLimitDropped_template", { count: String(sizeDropped) }));
+  }
   if (quotaDropped > 0) {
     addBubble("notice", t(currentLang, "history_quotaDropped_template", { count: String(quotaDropped) }));
   }

@@ -800,11 +800,15 @@ async function restoreHistory() {
     // `dropped` are declared inside it, so reading them after the lock (as this
     // used to) threw a ReferenceError that the catch below reported as
     // "Restore failed" even though the data had already been written.
-    const { condensed, dropped } = await withHistoryLock(async () => {
+    const { condensed, sizeDropped, dropped } = await withHistoryLock(async () => {
       const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY, HISTORY_GENERATION_STORAGE_KEY]);
       const currentGeneration = normalizeHistoryGeneration(stored[HISTORY_GENERATION_STORAGE_KEY]);
       if (!isHistoryGenerationCurrent(currentGeneration, restoreGeneration)) {
-        throw new Error(t(currentLang, "restore_cancelled_by_delete"));
+        // Expected outcome, not an error: the catch identifies this by CODE -
+        // never by comparing localized message text.
+        const cancelled = new Error(t(currentLang, "restore_cancelled_by_delete"));
+        cancelled.code = "restore_cancelled_by_delete";
+        throw cancelled;
       }
       const existing = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
 
@@ -824,21 +828,41 @@ async function restoreHistory() {
         }
       }
 
-      const merged = [...byId.values()]
-        .filter((c) => c?.messages?.length)
-        .map(limitStoredConversationMessages)
-        .filter((c) => c.messages?.length)
+      // Conversation-level bounds. A conversation the limiter cannot represent
+      // at all (even its bounded force-keep failed) is counted as emptied and
+      // reported instead of vanishing silently.
+      const preLimit = [...byId.values()].filter((c) => c?.messages?.length);
+      const limitedList = preLimit.map(limitStoredConversationMessages).filter((c) => c.messages?.length);
+      const emptied = preLimit.length - limitedList.length;
+      const merged = limitedList
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
         .slice(0, MAX_SAVED_CONVERSATIONS);
       const globallyLimited = limitStoredHistoryBytes(merged);
       let list = globallyLimited.conversations;
 
+      // Web Locks make the tombstone recheck above airtight. The no-locks
+      // fallback (withNamedLock runs the task bare when navigator.locks is
+      // missing) leaves a window in which a Delete All could interleave
+      // between that recheck and the write below - this second recheck right
+      // before the first write closes most of it; the lock remains the real
+      // guarantee.
+      const recheck = await chrome.storage.local.get(HISTORY_GENERATION_STORAGE_KEY);
+      const recheckedGeneration = normalizeHistoryGeneration(recheck[HISTORY_GENERATION_STORAGE_KEY]);
+      if (!isHistoryGenerationCurrent(recheckedGeneration, restoreGeneration)) {
+        const cancelled = new Error(t(currentLang, "restore_cancelled_by_delete"));
+        cancelled.code = "restore_cancelled_by_delete";
+        throw cancelled;
+      }
+
       // The side panel's save path escalates on storage-quota pressure
       // (compressForQuota, then halving) - a restore must too: a large backup
       // merged into an existing history used to fail with a raw QUOTA error
-      // and restore NOTHING. Same lossy-but-keeps-everything escalation.
+      // and restore NOTHING. Same lossy-but-keeps-everything escalation. The
+      // deterministic size-cap drops are NOT a quota emergency - they are
+      // reported with their own truthful notice.
       let condensed = false;
-      let dropped = globallyLimited.dropped;
+      let sizeDropped = globallyLimited.dropped + emptied;
+      let dropped = 0;
       for (let attempt = 0; ; attempt++) {
         try {
           await chrome.storage.local.set({ [HISTORY_STORAGE_KEY]: list });
@@ -855,22 +879,28 @@ async function restoreHistory() {
           list = list.slice(0, kept);
         }
       }
-      return { condensed, dropped };
+      return { condensed, sizeDropped, dropped };
     });
 
     msgEl.style.color = "#4ade80";
     let doneText = tPlural(currentLang, normalized.length, "restore_success_one", "restore_success_other");
     if (condensed) doneText += ` ${t(currentLang, "restore_quotaCondensed")}`;
+    if (sizeDropped > 0) doneText += ` ${t(currentLang, "history_sizeLimitDropped_template", { count: String(sizeDropped) })}`;
     if (dropped > 0) doneText += ` ${t(currentLang, "history_quotaDropped_template", { count: String(dropped) })}`;
     msgEl.textContent = doneText;
     restoreHistoryFile.value = "";
-    setTimeout(() => (msgEl.textContent = ""), condensed || dropped > 0 ? 8000 : 3000);
+    setTimeout(() => (msgEl.textContent = ""), condensed || sizeDropped > 0 || dropped > 0 ? 8000 : 3000);
   } catch (err) {
-    console.error("[AI Assistant] Unable to restore history:", err);
-    const cancelledByDelete = err?.message === t(currentLang, "restore_cancelled_by_delete");
+    const cancelledByDelete = err?.code === "restore_cancelled_by_delete";
+    if (cancelledByDelete) {
+      // An expected outcome of restoring across a Delete All - not an error.
+      console.info("[AI Assistant] History restore cancelled: the history was deleted while the backup was being read.");
+    } else {
+      console.error("[AI Assistant] Unable to restore history:", err);
+    }
     msgEl.style.color = cancelledByDelete ? "#8b91a3" : "#f55b5b";
     msgEl.textContent = cancelledByDelete
-      ? err.message
+      ? t(currentLang, "restore_cancelled_by_delete")
       : t(currentLang, "restore_failed_template", { message: err?.message || t(currentLang, "unknownError") });
     restoreHistoryFile.value = "";
   } finally {

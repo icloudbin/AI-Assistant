@@ -119,9 +119,14 @@ function toStoredMessage(message) {
 // Persistent history bounds. unlimitedStorage disables Chrome's normal
 // quota guard, so enforce per-conversation AND whole-history serialized-byte
 // budgets, plus a per-conversation message-count cap.
+// Declared WITHOUT inline `export`: this module must keep exactly ONE export
+// site - the bottom export {} block. A second inline export here is a
+// SyntaxError ("Duplicate export") that kills the whole panel module tree,
+// which the v1.10.168 release shipped; check-package's parse gate catches a
+// future duplicate, and test-history-manager pins the no-inline-export rule.
 const MAX_STORED_MESSAGES_PER_CONVERSATION = 200;
 const MAX_STORED_CONVERSATION_BYTES = 5 * 1024 * 1024;
-export const MAX_STORED_HISTORY_BYTES = 50 * 1024 * 1024;
+const MAX_STORED_HISTORY_BYTES = 50 * 1024 * 1024;
 
 function messageTurns(messages) {
   const turns = [];
@@ -262,34 +267,63 @@ function limitStoredConversationMessages(conversation) {
     return reserveBefore[index];
   };
 
-  // Keep complete turns, newest first. A turn that does not fit the remaining
-  // budget is trimmed (display/attachment copies dropped, oversized text
-  // truncated with a visible marker) instead of dropped as a whole - and the
-  // fit leaves every OLDER complete turn its reserved minimum, so bounding the
-  // newest turn cannot silently starve earlier exchanges.
+  // Keep complete turns, newest first, as ONE CONTIGUOUS window: the first
+  // turn that cannot be kept (over the message cap, unserializable, or beyond
+  // even its bounded form) ENDS the walk - continuing past the gap used to
+  // keep older turns behind a silent hole in the conversation. A turn that
+  // does not fit the remaining budget is trimmed (display/attachment copies
+  // dropped, oversized text truncated with a visible marker) instead of
+  // dropped as a whole - and the fit leaves every OLDER complete turn its
+  // reserved minimum, so bounding the newest turn cannot silently starve
+  // earlier exchanges.
   for (let i = turns.length - 1; i >= 0; i--) {
-    if (!countKeepable[i]) continue;
+    if (!countKeepable[i]) break;
     const turn = turns[i];
     const separator = keptTurns.length ? 1 : 0;
     let fitted = turn;
     let size;
     try { size = encoder.encode(JSON.stringify(turn)).length; }
-    catch { continue; }
+    catch { break; }
     if (totalBytes + separator + size > MAX_STORED_CONVERSATION_BYTES) {
       const available = MAX_STORED_CONVERSATION_BYTES - totalBytes - separator - reserveForOlder(i);
       fitted = size <= available ? turn : fitTurnToByteBudget(turn, available, encoder);
       if (fitted === null) {
         // The reserved older minimums leave not even this turn's minimum.
         // Keep the newest turn anyway rather than dropping the most recent
-        // exchange; older turns then compete for what is left, as before.
+        // exchange; if even the unreserved remainder cannot hold it, the
+        // walk ends here.
         fitted = fitTurnToByteBudget(turn, MAX_STORED_CONVERSATION_BYTES - totalBytes - separator, encoder);
-        if (!fitted) continue;
+        if (!fitted) break;
       }
       size = encoder.encode(JSON.stringify(fitted)).length;
     }
     keptTurns.push(fitted);
     totalBytes += separator + size;
     totalMessages += fitted.length;
+  }
+
+  // A conversation the walk above could not represent at all (e.g. a single
+  // turn beyond the message cap, or an unkeepable newest turn) used to come
+  // back EMPTY and be dropped silently by the callers' message filter. Keep
+  // the NEWEST turn in bounded form instead - its newest messages, capped and
+  // byte-fit - because a partial most-recent exchange beats losing the whole
+  // conversation with no trace. If even that fails (unserializable messages),
+  // the conversation stays empty and the callers count it into their notices.
+  if (!keptTurns.length && messages.length) {
+    const source = turns[turns.length - 1];
+    // The turn's first message (its user question) anchors the kept window -
+    // dropping it would leave orphan assistant replies that the provider-side
+    // history normalization discards wholesale - and the newest rest fills
+    // the cap.
+    const newest = source.length > MAX_STORED_MESSAGES_PER_CONVERSATION
+      ? [source[0], ...source.slice(-(MAX_STORED_MESSAGES_PER_CONVERSATION - 1))]
+      : source;
+    let forced = null;
+    try {
+      if (encoder.encode(JSON.stringify(newest)).length <= MAX_STORED_CONVERSATION_BYTES) forced = newest;
+    } catch { forced = null; }
+    if (!forced) forced = fitTurnToByteBudget(newest, MAX_STORED_CONVERSATION_BYTES, encoder);
+    if (forced) keptTurns.push(forced);
   }
 
   if (keptTurns.length === turns.length && totalMessages === messages.length
@@ -308,7 +342,7 @@ function limitStoredConversationMessages(conversation) {
 // Enforce one serialized-byte ceiling across all saved conversations. Input
 // order is irrelevant: newest conversations win. Oversized/unserializable
 // entries are skipped without preventing older entries from being considered.
-export function limitStoredHistoryBytes(conversations, maxBytes = MAX_STORED_HISTORY_BYTES) {
+function limitStoredHistoryBytes(conversations, maxBytes = MAX_STORED_HISTORY_BYTES) {
   const encoder = new TextEncoder();
   const ordered = [...(Array.isArray(conversations) ? conversations : [])]
     .sort((a, b) => (Number(b?.updatedAt) || 0) - (Number(a?.updatedAt) || 0));
@@ -353,8 +387,10 @@ export {
   toStoredMessage,
   compressForQuota,
   limitStoredConversationMessages,
+  limitStoredHistoryBytes,
   MAX_STORED_MESSAGES_PER_CONVERSATION,
   MAX_STORED_CONVERSATION_BYTES,
+  MAX_STORED_HISTORY_BYTES,
   STORED_ATTACHMENT_PREVIEW_CHARS,
   QUOTA_ATTACHMENT_PREVIEW_CHARS,
 };

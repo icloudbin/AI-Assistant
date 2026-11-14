@@ -499,8 +499,8 @@ async function main() {
       const optionsResult = await session.eval(`
         (async () => {
           // v1.10.140 (S-06): an import shows a review dialog; changes that
-          // weaken protection, replace an API key or rewrite the system prompt
-          // start UNCHECKED and apply only when ticked. Cancel changes nothing.
+          // weaken protection, replace an API key or rewrite the custom
+          // prompt start UNCHECKED and apply only when ticked. Cancel changes nothing.
           await window.chrome.storage.local.set({
             customPrompt: "existing prompt",
             apiKey: "old-key",
@@ -513,7 +513,7 @@ async function main() {
               exportedAt: new Date().toISOString(),
               settings: {
                 apiKey: "new-key",          // replaces a stored key -> must be confirmed
-                customPrompt: "",           // clears the system prompt -> must be confirmed
+                customPrompt: "",           // clears the custom prompt -> must be confirmed
                 composerHeight: 180,        // plain change -> applied without asking
                 includeCurrentPageContext: false, // protective direction -> applied
                 unknownKeyShouldBeIgnored: "malicious"

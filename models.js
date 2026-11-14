@@ -7,8 +7,10 @@
 // it keeps its own copy (PAGE_CONTEXT_CHAR_LIMIT); scripts/check-package.mjs
 // fails if the two values differ.
 export const MAX_PAGE_CONTEXT_CHARS = 120000;
-// The custom prompt is sent to the model as a SYSTEM instruction on every request;
-// settings import refuses a longer one and the request builder never sends more.
+// The custom prompt is sent with each request as a bounded USER preference,
+// subordinate to the extension's security/privacy rules - never as a system
+// instruction; settings import refuses a longer one and the request builder
+// never sends more.
 export const MAX_CUSTOM_PROMPT_CHARS = 8000;
 
 // UTF-16 slice() can cut an emoji / astral character in half. Every text cap
