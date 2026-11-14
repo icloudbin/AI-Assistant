@@ -178,13 +178,32 @@ function fitMessageToByteBudget(message, maxBytes, encoder) {
   return best;
 }
 
+// The smallest a message can be serialized for storage: display copies
+// dropped, attachment previews condensed, string content replaced by the
+// truncation notice. Infinity when even this shape cannot be serialized.
+// Shared by the per-turn fit and the older-turn reservation so the two
+// cannot drift apart.
+function minimumMessageSize(message, encoder) {
+  const minimum = prepareMessageForHistory(message);
+  if (typeof minimum.content === "string") minimum.content = HISTORY_TRUNCATION_NOTICE;
+  try { return encoder.encode(JSON.stringify(minimum)).length; }
+  catch { return Infinity; }
+}
+
+// Serialized size of a turn reduced to every message's minimum: the floor a
+// kept turn occupies no matter how its content is truncated.
+function turnMinimumSize(turn, encoder) {
+  let total = 2; // JSON array brackets
+  for (let i = 0; i < turn.length; i++) {
+    const size = minimumMessageSize(turn[i], encoder);
+    if (!Number.isFinite(size)) return Infinity;
+    total += size + (i > 0 ? 1 : 0);
+  }
+  return total;
+}
+
 function fitTurnToByteBudget(turn, maxBytes, encoder) {
-  const minimumSizes = turn.map((message) => {
-    const minimum = prepareMessageForHistory(message);
-    if (typeof minimum.content === "string") minimum.content = HISTORY_TRUNCATION_NOTICE;
-    try { return encoder.encode(JSON.stringify(minimum)).length; }
-    catch { return Infinity; }
-  });
+  const minimumSizes = turn.map((message) => minimumMessageSize(message, encoder));
   const minimumTotal = 2 + minimumSizes.reduce((sum, size) => sum + size, 0) + Math.max(0, turn.length - 1);
   if (minimumTotal > maxBytes || minimumSizes.some((size) => !Number.isFinite(size))) return null;
 
@@ -215,21 +234,57 @@ function limitStoredConversationMessages(conversation) {
   let totalBytes = 2;
   let totalMessages = 0;
 
-  // Keep complete turns, newest first. If a turn exceeds the per-conversation
-  // byte ceiling, trim its display/attachment copies and then truncate only
-  // oversized text fields. This keeps a usable conversation even when its
-  // newest single message would otherwise exceed the entire budget.
+  // Which turns fit the per-conversation message count. A fitted turn keeps
+  // every message, so this walk is independent of any truncation below.
+  const countKeepable = new Array(turns.length).fill(false);
+  let countable = 0;
   for (let i = turns.length - 1; i >= 0; i--) {
+    if (countable + turns[i].length > MAX_STORED_MESSAGES_PER_CONVERSATION) continue;
+    countKeepable[i] = true;
+    countable += turns[i].length;
+  }
+  // Older turns' serialized minimums, computed lazily: only conversations that
+  // actually exceed the byte budget pay for the reservation. reserveBefore[i]
+  // is what every count-keepable turn OLDER than i is promised.
+  let reserveBefore = null;
+  const reserveForOlder = (index) => {
+    if (!reserveBefore) {
+      reserveBefore = new Array(turns.length);
+      let accumulated = 0;
+      for (let j = 0; j < turns.length; j++) {
+        reserveBefore[j] = accumulated;
+        if (countKeepable[j]) {
+          const minimum = turnMinimumSize(turns[j], encoder);
+          if (Number.isFinite(minimum)) accumulated += 1 + minimum;
+        }
+      }
+    }
+    return reserveBefore[index];
+  };
+
+  // Keep complete turns, newest first. A turn that does not fit the remaining
+  // budget is trimmed (display/attachment copies dropped, oversized text
+  // truncated with a visible marker) instead of dropped as a whole - and the
+  // fit leaves every OLDER complete turn its reserved minimum, so bounding the
+  // newest turn cannot silently starve earlier exchanges.
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (!countKeepable[i]) continue;
     const turn = turns[i];
-    if (totalMessages + turn.length > MAX_STORED_MESSAGES_PER_CONVERSATION) continue;
     const separator = keptTurns.length ? 1 : 0;
     let fitted = turn;
     let size;
     try { size = encoder.encode(JSON.stringify(turn)).length; }
     catch { continue; }
     if (totalBytes + separator + size > MAX_STORED_CONVERSATION_BYTES) {
-      fitted = fitTurnToByteBudget(turn, MAX_STORED_CONVERSATION_BYTES - totalBytes - separator, encoder);
-      if (!fitted) continue;
+      const available = MAX_STORED_CONVERSATION_BYTES - totalBytes - separator - reserveForOlder(i);
+      fitted = size <= available ? turn : fitTurnToByteBudget(turn, available, encoder);
+      if (fitted === null) {
+        // The reserved older minimums leave not even this turn's minimum.
+        // Keep the newest turn anyway rather than dropping the most recent
+        // exchange; older turns then compete for what is left, as before.
+        fitted = fitTurnToByteBudget(turn, MAX_STORED_CONVERSATION_BYTES - totalBytes - separator, encoder);
+        if (!fitted) continue;
+      }
       size = encoder.encode(JSON.stringify(fitted)).length;
     }
     keptTurns.push(fitted);

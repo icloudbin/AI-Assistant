@@ -161,8 +161,9 @@ assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
   assert.ok(byteSize <= MAX_STORED_CONVERSATION_BYTES, `serialized history stays within byte budget (${byteSize})`);
   assert.ok(byteLimited.messages.some((message) => /Message truncated in saved history/.test(message.content)), "oversized message content is explicitly truncated instead of discarding the conversation");
 
-  // A single oversized newest turn is skipped as a unit; earlier complete
-  // turns remain available instead of the whole conversation becoming empty.
+  // An oversized newest turn is bounded (truncated with a visible marker), not
+  // skipped; earlier complete turns remain available instead of the whole
+  // conversation becoming empty.
   const oversizedLatest = [
     { id: "u-old", role: "user", content: "older question" },
     { id: "a-old", role: "assistant", content: "older answer" },
@@ -173,6 +174,34 @@ assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
   assert.deepEqual(retained.messages.map((m) => m.id), ["u-old", "a-old", "u-new", "a-new"], "oversized newest message is retained in a bounded form");
   assert.match(retained.messages.at(-1).content, /Message truncated in saved history/, "truncated content is clearly marked");
   assert.ok(new TextEncoder().encode(JSON.stringify(retained.messages)).length <= MAX_STORED_CONVERSATION_BYTES, "truncated turn remains within the per-conversation byte budget");
+
+  // The same reservation holds when an older turn's content is longer than its
+  // own minimum: bounding the newest turn must leave older turns their floor
+  // instead of consuming the whole remaining budget.
+  const olderLong = [
+    { id: "u-old", role: "user", content: "y".repeat(2000) },
+    { id: "a-old", role: "assistant", content: "z".repeat(2000) },
+    { id: "u-new", role: "user", content: "new question" },
+    { id: "a-new", role: "assistant", content: "w".repeat(MAX_STORED_CONVERSATION_BYTES + 1000) },
+  ];
+  const reservedOlder = limitStoredConversationMessages({ id: "reserved-older", messages: olderLong });
+  assert.deepEqual(reservedOlder.messages.map((m) => m.id), ["u-old", "a-old", "u-new", "a-new"], "older complete turns keep their reserved floor when the newest turn is bounded");
+  assert.match(reservedOlder.messages[0].content, /Message truncated in saved history/, "an older turn beyond its floor is truncated, not dropped");
+  assert.match(reservedOlder.messages.at(-1).content, /Message truncated in saved history/, "the newest oversized message is still bounded");
+  assert.ok(new TextEncoder().encode(JSON.stringify(reservedOlder.messages)).length <= MAX_STORED_CONVERSATION_BYTES, "reservation keeps the whole conversation within the byte budget");
+
+  // An older oversized turn with a newer small turn keeps both turns: the
+  // older turn is bounded, the newer one stays whole.
+  const olderOversized = [
+    { id: "u-old", role: "user", content: "x".repeat(MAX_STORED_CONVERSATION_BYTES + 1000) },
+    { id: "a-old", role: "assistant", content: "old answer" },
+    { id: "u-new", role: "user", content: "new question" },
+    { id: "a-new", role: "assistant", content: "new answer" },
+  ];
+  const keptBoth = limitStoredConversationMessages({ id: "older-oversized", messages: olderOversized });
+  assert.deepEqual(keptBoth.messages.map((m) => m.id), ["u-old", "a-old", "u-new", "a-new"], "an older oversized turn is bounded, not dropped");
+  assert.match(keptBoth.messages[0].content, /Message truncated in saved history/, "the older oversized message is truncated");
+  assert.equal(keptBoth.messages.at(-1).content, "new answer", "the newer small turn stays whole");
 
   // The aggregate budget is applied to the complete history, newest first.
   const globalInput = [
