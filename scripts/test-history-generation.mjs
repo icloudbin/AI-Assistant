@@ -20,4 +20,8 @@ const sidepanel = readFileSync(new URL("sidepanel/sidepanel.js", root), "utf8");
 const options = readFileSync(new URL("options/options.js", root), "utf8");
 assert.match(sidepanel, /isHistoryGenerationCurrent\(storedGeneration, historyGeneration\)/, "save must reject stale snapshots");
 assert.match(options, /HISTORY_GENERATION_STORAGE_KEY\]: generation,[\s\S]*HISTORY_STORAGE_KEY\]: \[\]/, "delete must publish generation and empty history together");
-console.log("OK: history-generation.js — stale snapshot rejection and atomic deletion tombstone.");
+console.log("OK: history-generation.js — stale snapshot rejection, atomic deletion, and stale restore cancellation.");
+
+assert.match(options, /restoreGeneration = normalizeHistoryGeneration\(startState\[HISTORY_GENERATION_STORAGE_KEY\]\)/, "restore captures the generation before ZIP parsing");
+assert.match(options, /readBackupFile\(restoreHistoryFile\.files\?\.\[0\]\)[\s\S]*withHistoryLock\(async \(\) => \{[\s\S]*isHistoryGenerationCurrent\(currentGeneration, restoreGeneration\)/, "restore rechecks the generation inside the shared write lock after parsing");
+assert.match(options, /restore_cancelled_by_delete/, "stale restore is explicitly cancelled instead of writing history");
