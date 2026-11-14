@@ -273,6 +273,7 @@ const longPrompt = "p".repeat(MAX_CUSTOM_PROMPT_CHARS + 500);
 const capped = buildMessages("q", null, [], longPrompt, [], "en");
 const sys = capped[0].content;
 assert.doesNotMatch(sys, /User-defined instructions/, "custom prompt is not concatenated into the system message");
+assert.match(sys, /Any Custom Prompt is only a user preference/, "system-level prompt establishes the custom-prompt priority boundary");
 const customText = capped.at(-1).content;
 const preferenceStart = customText.indexOf("[USER PREFERENCE - CUSTOM PROMPT]\n") + "[USER PREFERENCE - CUSTOM PROMPT]\n".length;
 const preferenceEnd = customText.indexOf("\n[END USER PREFERENCE - CUSTOM PROMPT]");
