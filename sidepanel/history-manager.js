@@ -142,6 +142,60 @@ function messageTurns(messages) {
   return turns;
 }
 
+const HISTORY_TRUNCATION_NOTICE = "\\n\\n[Message truncated in saved history to fit the storage limit.]";
+
+function fitMessageToByteBudget(message, maxBytes, encoder) {
+  let candidate = { ...message };
+  // Display-only copies and attachment previews are the first things to trim;
+  // preserve the user's actual question and assistant response where possible.
+  delete candidate.displayContent;
+  if (Array.isArray(candidate.attachments)) {
+    candidate.attachments = condenseAttachments(candidate.attachments, QUOTA_ATTACHMENT_PREVIEW_CHARS);
+    if (!candidate.attachments.length) delete candidate.attachments;
+  }
+  const sizeOf = (value) => {
+    try { return encoder.encode(JSON.stringify(value)).length; }
+    catch { return Infinity; }
+  };
+  if (sizeOf(candidate) <= maxBytes) return candidate;
+  if (typeof candidate.content !== "string") return null;
+
+  const original = candidate.content;
+  let low = 0;
+  let high = original.length;
+  let best = null;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const content = cutAtCodePointBoundary(original, middle).trimEnd() + HISTORY_TRUNCATION_NOTICE;
+    const trial = { ...candidate, content };
+    if (sizeOf(trial) <= maxBytes) {
+      best = trial;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return best;
+}
+
+function fitTurnToByteBudget(turn, maxBytes, encoder) {
+  const fitted = [];
+  let used = 2; // JSON array brackets
+  for (let i = 0; i < turn.length; i++) {
+    const separators = i > 0 ? 1 : 0;
+    const reserve = (turn.length - i - 1) * 64;
+    const available = maxBytes - used - separators - reserve;
+    if (available <= 0) return null;
+    const message = fitMessageToByteBudget(turn[i], available, encoder);
+    if (!message) return null;
+    const size = encoder.encode(JSON.stringify(message)).length;
+    if (used + separators + size + reserve > maxBytes) return null;
+    fitted.push(message);
+    used += separators + size;
+  }
+  return fitted;
+}
+
 function limitStoredConversationMessages(conversation) {
   if (!conversation || !Array.isArray(conversation.messages)) return conversation;
   const messages = conversation.messages;
@@ -151,22 +205,30 @@ function limitStoredConversationMessages(conversation) {
   let totalBytes = 2;
   let totalMessages = 0;
 
-  // Keep complete turns, newest first. If one turn is too large, skip that
-  // turn and continue: a single oversized message must not erase the entire
-  // conversation or prevent older complete turns from being retained.
+  // Keep complete turns, newest first. If a turn exceeds the per-conversation
+  // byte ceiling, trim its display/attachment copies and then truncate only
+  // oversized text fields. This keeps a usable conversation even when its
+  // newest single message would otherwise exceed the entire budget.
   for (let i = turns.length - 1; i >= 0; i--) {
     const turn = turns[i];
     if (totalMessages + turn.length > MAX_STORED_MESSAGES_PER_CONVERSATION) continue;
+    const separator = keptTurns.length ? 1 : 0;
+    let fitted = turn;
     let size;
-    try { size = encoder.encode(JSON.stringify(turn)).length + (keptTurns.length ? 1 : 0); }
+    try { size = encoder.encode(JSON.stringify(turn)).length; }
     catch { continue; }
-    if (totalBytes + size > MAX_STORED_CONVERSATION_BYTES) continue;
-    keptTurns.push(turn);
-    totalBytes += size;
-    totalMessages += turn.length;
+    if (totalBytes + separator + size > MAX_STORED_CONVERSATION_BYTES) {
+      fitted = fitTurnToByteBudget(turn, MAX_STORED_CONVERSATION_BYTES - totalBytes - separator, encoder);
+      if (!fitted) continue;
+      size = encoder.encode(JSON.stringify(fitted)).length;
+    }
+    keptTurns.push(fitted);
+    totalBytes += separator + size;
+    totalMessages += fitted.length;
   }
 
-  if (keptTurns.length === turns.length && totalMessages === messages.length) return conversation;
+  if (keptTurns.length === turns.length && totalMessages === messages.length
+      && keptTurns.every((turn, i) => turn.every((message, j) => message === turns[i][j]))) return conversation;
   keptTurns.reverse();
   const kept = keptTurns.flat();
   // A leading assistant-only turn is not useful provider history. This can
