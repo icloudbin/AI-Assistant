@@ -12,6 +12,7 @@ import {
   makeTopicTitle,
   translationTopicTitle,
   toStoredMessage,
+  normalizeStoredPageContext,
   compressForQuota,
   limitStoredConversationMessages,
   MAX_STORED_MESSAGES_PER_CONVERSATION,
@@ -304,6 +305,53 @@ assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
   // shipped exactly that. Pin the convention: no inline exports at all.
   const source = readFileSync(new URL("../sidepanel/history-manager.js", import.meta.url), "utf8");
   assert.doesNotMatch(source, /(^|\n)export (const|let|var|function|class)\b/, "no inline exports: everything goes through the bottom export block");
+}
+
+
+ // DATA-04: a count-overflow middle turn makes all older turns unreachable;
+ // they must not reserve serialized bytes from the newest retained suffix.
+{
+  const old = [
+    { id: "old-u", role: "user", content: "old question" },
+    { id: "old-a", role: "assistant", content: "old answer" },
+  ];
+  const middle = [
+    { id: "mid-u", role: "user", content: "middle question" },
+    ...Array.from({ length: 198 }, (_, i) => ({ id: `mid-${i}`, role: "assistant", content: "m" })),
+  ];
+  const newest = [
+    { id: "new-u", role: "user", content: "new question" },
+    { id: "new-a", role: "assistant", content: "n".repeat(MAX_STORED_CONVERSATION_BYTES - 1200) },
+  ];
+  const result = limitStoredConversationMessages({ id: "count-gap", messages: [...old, ...middle, ...newest] });
+  assert.deepEqual(result.messages.map((m) => m.id), ["new-u", "new-a"]);
+  assert.ok(result.messages[1].content.length > MAX_STORED_CONVERSATION_BYTES - 1800,
+    "unreachable older turns do not reserve budget from the newest turn");
+}
+
+// DATA-05: metadata is bounded on both save and restore without mutating input.
+{
+  const pageContext = { title: "T".repeat(5000), url: "https://example.test/" + "u".repeat(5000), tabId: 42 };
+  const stored = toStoredMessage({ id: "page-meta", role: "user", content: "question", pageContext });
+  assert.equal([...stored.pageContext.title].length, 300);
+  assert.equal(stored.pageContext.url.length, 2048);
+  assert.equal("tabId" in stored.pageContext, false);
+  assert.equal(pageContext.title.length, 5000);
+  const restored = normalizeStoredPageContext(pageContext, true);
+  assert.equal([...restored.title].length, 300);
+  assert.equal(restored.url.length, 2048);
+  assert.equal(restored.tabId, 42);
+}
+
+// DATA-03: pin both count-cap paths and require Restore to sort before slicing.
+{
+  const sidepanelSource = readFileSync(new URL("../sidepanel/sidepanel.js", import.meta.url), "utf8");
+  const optionsSource = readFileSync(new URL("../options/options.js", import.meta.url), "utf8");
+  assert.match(sidepanelSource, /countDropped = Math\.max\(0, limitedList\.length - MAX_SAVED_CONVERSATIONS\)/);
+  assert.match(sidepanelSource, /sizeDropped = countDropped \+ globallyLimited\.dropped \+ emptied/);
+  assert.doesNotMatch(optionsSource, /\.filter\(Boolean\)\s*\.slice\(0, MAX_SAVED_CONVERSATIONS\)/);
+  assert.match(optionsSource, /newestFirst\.length - MAX_SAVED_CONVERSATIONS/);
+  assert.match(optionsSource, /sizeDropped = countDropped \+ globallyLimited\.dropped \+ emptied/);
 }
 
 console.log("OK: history-manager.js — titles, structured-attachment projection, quota compression.");
