@@ -26,7 +26,7 @@ import { encryptSecrets, decryptSecrets, MIN_PASSPHRASE_LENGTH } from "../settin
 import { withHistoryLock, withMessageIds, isValidMessageId, isValidTimestamp } from "../conversation-store.js";
 import { normalizeHistoryGeneration, isHistoryGenerationCurrent } from "../history-generation.js";
 import { nextHistoryGeneration } from "../history-generation.js";
-import { compressForQuota, cleanForTopic, limitStoredConversationMessages, limitStoredHistoryBytes, normalizeStoredPageContext } from "../sidepanel/history-manager.js";
+import { compressForQuota, cleanForTopic, limitStoredConversationMessages, limitStoredHistoryBytes, normalizeStoredPageContext, repairRestoredDuplicates } from "../sidepanel/history-manager.js";
 import { migrateLegacyMessage, normalizeAttachments } from "../attachments.js";
 import { sanitizePiiMap } from "../privacy/pii-filter.js";
 import { cutAtCodePointBoundary, MAX_CUSTOM_PROMPT_CHARS } from "../models.js";
@@ -779,24 +779,9 @@ async function restoreHistory() {
     const startState = await chrome.storage.local.get(HISTORY_GENERATION_STORAGE_KEY);
     const restoreGeneration = normalizeHistoryGeneration(startState[HISTORY_GENERATION_STORAGE_KEY]);
     const restored = await readBackupFile(restoreHistoryFile.files?.[0]);
-    const seenRestoredIds = new Set();
-    const normalized = restored
-      .map(normalizeRestoredConversation)
-      .filter(Boolean)
-      .map((conversation, index) => {
-        if (!seenRestoredIds.has(conversation.id)) {
-          seenRestoredIds.add(conversation.id);
-          return conversation;
-        }
-        // Conversation IDs are Map keys during merge. Repair duplicates in
-        // the imported archive so one malformed entry cannot overwrite another.
-        let id;
-        do {
-          id = `restored-duplicate-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
-        } while (seenRestoredIds.has(id));
-        seenRestoredIds.add(id);
-        return { ...conversation, id };
-      });
+    // Duplicate-id repair happens INSIDE the lock below, where the ids already
+    // in storage are known (a repaired id must not collide with them either).
+    const normalized = restored.map(normalizeRestoredConversation).filter(Boolean);
 
     if (!normalized.length) {
       throw new Error(t(currentLang, "zip_error_noUsableConversations"));
@@ -809,7 +794,7 @@ async function restoreHistory() {
     // `dropped` are declared inside it, so reading them after the lock (as this
     // used to) threw a ReferenceError that the catch below reported as
     // "Restore failed" even though the data had already been written.
-    const { condensed, sizeDropped, dropped } = await withHistoryLock(async () => {
+    const { condensed, sizeDropped, dropped, restoredCount } = await withHistoryLock(async () => {
       const stored = await chrome.storage.local.get([HISTORY_STORAGE_KEY, HISTORY_GENERATION_STORAGE_KEY]);
       const currentGeneration = normalizeHistoryGeneration(stored[HISTORY_GENERATION_STORAGE_KEY]);
       if (!isHistoryGenerationCurrent(currentGeneration, restoreGeneration)) {
@@ -821,6 +806,17 @@ async function restoreHistory() {
       }
       const existing = Array.isArray(stored[HISTORY_STORAGE_KEY]) ? stored[HISTORY_STORAGE_KEY] : [];
 
+      // DATA-06: conversation IDs are Map keys during the merge below. The
+      // repair runs under the lock so a repaired id also avoids the ids
+      // already in storage, not just the archive's own ids. Newest-wins: the
+      // newest copy of a shared id keeps it, an older snapshot of the same
+      // conversation is dropped, and genuinely different conversations sharing
+      // an id each keep their own entry.
+      const storageIds = new Set(
+        existing.map((c) => (c && typeof c.id === "string" ? c.id : "")).filter(Boolean)
+      );
+      const deduped = repairRestoredDuplicates(normalized, storageIds);
+
       // Merge by conversation ID. Imported copies replace matching IDs only when
       // they are not older than the local copy - same newest-wins rule as
       // mergeConversationLists() in conversation-store.js. Unconditionally
@@ -830,7 +826,7 @@ async function restoreHistory() {
       for (const convo of existing) {
         if (convo?.id) byId.set(String(convo.id), convo);
       }
-      for (const convo of normalized) {
+      for (const convo of deduped) {
         const prev = byId.get(String(convo.id));
         if (!prev || (Number(convo.updatedAt) || 0) >= (Number(prev.updatedAt) || 0)) {
           byId.set(String(convo.id), convo);
@@ -888,11 +884,11 @@ async function restoreHistory() {
           list = list.slice(0, kept);
         }
       }
-      return { condensed, sizeDropped, dropped };
+      return { condensed, sizeDropped, dropped, restoredCount: deduped.length };
     });
 
     msgEl.style.color = "#4ade80";
-    let doneText = tPlural(currentLang, normalized.length, "restore_success_one", "restore_success_other");
+    let doneText = tPlural(currentLang, restoredCount, "restore_success_one", "restore_success_other");
     if (condensed) doneText += ` ${t(currentLang, "restore_quotaCondensed")}`;
     if (sizeDropped > 0) doneText += ` ${t(currentLang, "history_sizeLimitDropped_template", { count: String(sizeDropped) })}`;
     if (dropped > 0) doneText += ` ${t(currentLang, "history_quotaDropped_template", { count: String(dropped) })}`;
@@ -1444,7 +1440,7 @@ async function importSettings() {
 
     // A settings file can come from anywhere (S-06): show what it would change
     // and apply the changes that weaken protection, replace an API key or
-    // rewrite the system prompt only when the user ticks them.
+    // change the custom user-preference prompt only when the user ticks them.
     const tooLong = dropOverlongPrompt(restored);
     const items = planSettingsImport(restored, await chrome.storage.local.get(Object.keys(restored)));
     const tooLongNote = tooLong.length ? ` ${t(currentLang, "settingsImport_promptTooLong_template", { max: String(MAX_CUSTOM_PROMPT_CHARS) })}` : "";

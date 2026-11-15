@@ -13,6 +13,7 @@ import {
   translationTopicTitle,
   toStoredMessage,
   normalizeStoredPageContext,
+  repairRestoredDuplicates,
   compressForQuota,
   limitStoredConversationMessages,
   MAX_STORED_MESSAGES_PER_CONVERSATION,
@@ -308,28 +309,33 @@ assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
 }
 
 
- // DATA-04: a count-overflow middle turn makes all older turns unreachable;
- // they must not reserve serialized bytes from the newest retained suffix.
+// DATA-04: a count-overflow middle turn makes all older turns unreachable;
+// they must not reserve serialized bytes from the newest retained suffix. The
+// newest turn is sized to ACTUALLY overflow the byte budget so the fit path -
+// the only code the pre-pass break changes - is exercised: 40 unreachable
+// older turns would have over-reserved ~8 KB of budget on the pre-fix code.
 {
-  const old = [
-    { id: "old-u", role: "user", content: "old question" },
-    { id: "old-a", role: "assistant", content: "old answer" },
-  ];
+  const oldTurns = Array.from({ length: 40 }, (_, t) => [
+    { id: `old-${t}-u`, role: "user", content: `old question ${t}` },
+    { id: `old-${t}-a`, role: "assistant", content: `old answer ${t}` },
+  ]);
   const middle = [
     { id: "mid-u", role: "user", content: "middle question" },
     ...Array.from({ length: 198 }, (_, i) => ({ id: `mid-${i}`, role: "assistant", content: "m" })),
   ];
   const newest = [
     { id: "new-u", role: "user", content: "new question" },
-    { id: "new-a", role: "assistant", content: "n".repeat(MAX_STORED_CONVERSATION_BYTES - 1200) },
+    { id: "new-a", role: "assistant", content: "n".repeat(MAX_STORED_CONVERSATION_BYTES - 60) },
   ];
-  const result = limitStoredConversationMessages({ id: "count-gap", messages: [...old, ...middle, ...newest] });
+  const result = limitStoredConversationMessages({ id: "count-gap", messages: [...oldTurns.flat(), ...middle, ...newest] });
   assert.deepEqual(result.messages.map((m) => m.id), ["new-u", "new-a"]);
-  assert.ok(result.messages[1].content.length > MAX_STORED_CONVERSATION_BYTES - 1800,
-    "unreachable older turns do not reserve budget from the newest turn");
+  assert.ok(result.messages[1].content.length > MAX_STORED_CONVERSATION_BYTES - 1000,
+    `unreachable older turns do not reserve budget from the newest turn (kept ${result.messages[1].content.length})`);
 }
 
 // DATA-05: metadata is bounded on both save and restore without mutating input.
+// BMP input: 300 code points == 300 UTF-16 units. Astral input caps at 300
+// units (fewer code points) and is always surrogate-safe (cutAtCodePointBoundary).
 {
   const pageContext = { title: "T".repeat(5000), url: "https://example.test/" + "u".repeat(5000), tabId: 42 };
   const stored = toStoredMessage({ id: "page-meta", role: "user", content: "question", pageContext });
@@ -341,6 +347,13 @@ assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
   assert.equal([...restored.title].length, 300);
   assert.equal(restored.url.length, 2048);
   assert.equal(restored.tabId, 42);
+  // End-to-end: tabId never reaches STORAGE - the per-save limiter pass strips
+  // it from a tabId-bearing stored message (round-17 #9 stays closed).
+  const stripped = limitStoredConversationMessages({
+    id: "tab", messages: [{ id: "m", role: "user", content: "q", pageContext: { title: "T", url: "https://e/", tabId: 42 } }],
+  });
+  assert.equal("tabId" in stripped.messages[0].pageContext, false, "the limiter strips tabId from stored metadata");
+  assert.equal(stripped.messages[0].pageContext.title, "T", "the stripped copy keeps title and url");
 }
 
 // DATA-03: pin both count-cap paths and require Restore to sort before slicing.
@@ -354,19 +367,55 @@ assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
   assert.match(optionsSource, /sizeDropped = countDropped \+ globallyLimited\.dropped \+ emptied/);
 }
 
+// ---------- DATA-06 repair: restore dedup is newest-wins and order-independent ----------
+{
+  const now = () => 1700000000000;
+  const stale = { id: "c-100", title: "t", updatedAt: 100, messages: [{ id: "m1", role: "user", content: "only old msg" }] };
+  const fresh = { id: "c-100", title: "t", updatedAt: 300, messages: [{ id: "m1", role: "user", content: "a" }, { id: "m2", role: "assistant", content: "b" }, { id: "m3", role: "user", content: "c" }] };
+  // Older entry first (a hand-concatenated backup): the NEWEST copy keeps the
+  // real id and the stale snapshot is dropped - one conversation, not two.
+  const olderFirst = repairRestoredDuplicates([stale, fresh], new Set(), now);
+  assert.equal(olderFirst.length, 1, "an older snapshot of the same conversation is dropped, not duplicated");
+  assert.equal(olderFirst[0].id, "c-100", "the real id stays on the newest copy regardless of archive order");
+  assert.equal(olderFirst[0].messages.length, 3, "the newest copy is the one kept");
+  // Reversed order: the same outcome.
+  const newestFirst = repairRestoredDuplicates([fresh, stale], new Set(), now);
+  assert.deepEqual(newestFirst.map((c) => c.id), ["c-100"], "the repair is order-independent");
+  // Exact duplicate pair: one conversation.
+  const exact = repairRestoredDuplicates([
+    { id: "x", title: "t", updatedAt: 1, messages: [{ id: "a", role: "user", content: "same" }] },
+    { id: "x", title: "t", updatedAt: 2, messages: [{ id: "a", role: "user", content: "same" }] },
+  ], new Set(), now);
+  assert.equal(exact.length, 1, "an exact duplicate pair is one conversation");
+  // Two genuinely different conversations sharing an id: both survive, the
+  // newest keeps the real id, the older gets a repaired id that also avoids
+  // the ids already in storage.
+  const divergentA = { id: "dup", title: "a", updatedAt: 100, messages: [{ id: "a1", role: "user", content: "conversation one" }] };
+  const divergentB = { id: "dup", title: "b", updatedAt: 200, messages: [{ id: "b1", role: "user", content: "conversation two" }] };
+  const repaired = repairRestoredDuplicates([divergentA, divergentB], new Set(["taken"]), now);
+  assert.equal(repaired.length, 2, "genuinely different conversations sharing an id both survive");
+  assert.equal(repaired.find((c) => c.messages[0].id === "b1").id, "dup", "the newest copy keeps the real id");
+  const repairedId = repaired.find((c) => c.messages[0].id === "a1").id;
+  assert.match(repairedId, /^restored-duplicate-1700000000000-/, "the older copy is repaired with an injectable-now id");
+  assert.notStrictEqual(repairedId, "taken", "the repaired id avoids the storage ids");
+}
 
- // DATA-06 / DOC-01: restored conversation IDs are validated and legacy
- // comments describe the custom prompt's actual lower-priority placement.
+// DATA-06 / DOC-01: restored conversation IDs are validated and legacy
+// comments describe the custom prompt's actual lower-priority placement.
 {
   const optionsSource = readFileSync(new URL("../options/options.js", import.meta.url), "utf8");
   const backgroundSource = readFileSync(new URL("../background.js", import.meta.url), "utf8");
   const settingsImportSource = readFileSync(new URL("../options/settings-import.js", import.meta.url), "utf8");
+  const historyManagerSource = readFileSync(new URL("../sidepanel/history-manager.js", import.meta.url), "utf8");
   assert.match(optionsSource, /typeof conversation\.id === "string" \? conversation\.id\.trim\(\) : ""/);
   assert.match(optionsSource, /isValidMessageId\(candidateId\) \? candidateId : fallbackId/);
-  assert.match(optionsSource, /seenRestoredIds\.has\(conversation\.id\)/);
+  assert.match(historyManagerSource, /function repairRestoredDuplicates/, "the repair is a testable pure helper");
+  assert.match(historyManagerSource, /\n  repairRestoredDuplicates,/, "exported through the single bottom export block");
+  assert.match(optionsSource, /repairRestoredDuplicates\(normalized, storageIds\)/, "restore runs the repair under the lock with the storage ids");
+  assert.match(optionsSource, /change the custom user-preference prompt only when the user ticks them/, "no stale system-prompt claim in the settings-import comment");
   assert.doesNotMatch(backgroundSource, /custom prompt travels in the same system message/i);
   assert.match(backgroundSource, /lower-priority user-preference/);
-  assert.doesNotMatch(settingsImportSource, /custom prompt.*SYSTEM instruction/i);
+  assert.doesNotMatch(settingsImportSource, /custom prompt[\s\S]{0,80}SYSTEM instruction/i);
   assert.doesNotMatch(settingsImportSource, /cutting a system prompt/i);
   assert.match(settingsImportSource, /cutting a user preference/);
 }

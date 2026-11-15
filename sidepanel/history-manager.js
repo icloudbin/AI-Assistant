@@ -402,12 +402,46 @@ function compressForQuota(list) {
   }));
 }
 
+// DATA-06 repair for restored archives: conversation IDs are Map keys during
+// the restore merge, so a shared id must end on exactly ONE conversation.
+// Input order does not matter: the NEWEST copy of an id keeps it (the merge is
+// newest-wins too). An exact or older-snapshot duplicate of a kept copy (every
+// message id already present in it) is dropped - restoring one conversation,
+// not two - and a genuinely different conversation sharing the id keeps a
+// fresh id so neither entry is lost. Repair ids also avoid the ids already in
+// storage (`storageIds`), and `now` is injectable so tests get stable ids.
+function repairRestoredDuplicates(conversations, storageIds = new Set(), now = Date.now) {
+  const kept = [];
+  const seen = new Set();
+  const ordered = [...(Array.isArray(conversations) ? conversations : [])]
+    .sort((a, b) => (Number(b?.updatedAt) || 0) - (Number(a?.updatedAt) || 0));
+  for (const conversation of ordered) {
+    if (seen.has(conversation.id)) {
+      const original = kept.find((c) => c.id === conversation.id);
+      const keptMessageIds = new Set(original.messages.map((m) => m?.id));
+      // An exact duplicate or an older snapshot of the kept copy adds nothing.
+      if (conversation.messages.every((m) => keptMessageIds.has(m?.id))) continue;
+      let id;
+      do {
+        id = `restored-duplicate-${now()}-${kept.length}-${Math.random().toString(36).slice(2, 8)}`;
+      } while (seen.has(id) || storageIds.has(id));
+      seen.add(id);
+      kept.push({ ...conversation, id });
+      continue;
+    }
+    seen.add(conversation.id);
+    kept.push(conversation);
+  }
+  return kept;
+}
+
 export {
   cleanForTopic,
   makeTopicTitle,
   translationTopicTitle,
   toStoredMessage,
   normalizeStoredPageContext,
+  repairRestoredDuplicates,
   compressForQuota,
   limitStoredConversationMessages,
   limitStoredHistoryBytes,
