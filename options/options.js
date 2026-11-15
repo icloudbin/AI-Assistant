@@ -692,8 +692,10 @@ function normalizeRestoredConversation(conversation, index) {
   if (!messages.length) return null;
 
   const fallbackId = `restored-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+  const candidateId = typeof conversation.id === "string" ? conversation.id.trim() : "";
+  const restoredId = isValidMessageId(candidateId) ? candidateId : fallbackId;
   return {
-    id: String(conversation.id || fallbackId),
+    id: restoredId,
     // Same 80-character cap as the live title path (makeTopicTitle) - an
     // uncapped restored title persisted into chrome.storage.local and was
     // re-serialized and rendered on every load (round-17 #21).
@@ -777,9 +779,24 @@ async function restoreHistory() {
     const startState = await chrome.storage.local.get(HISTORY_GENERATION_STORAGE_KEY);
     const restoreGeneration = normalizeHistoryGeneration(startState[HISTORY_GENERATION_STORAGE_KEY]);
     const restored = await readBackupFile(restoreHistoryFile.files?.[0]);
+    const seenRestoredIds = new Set();
     const normalized = restored
       .map(normalizeRestoredConversation)
-      .filter(Boolean);
+      .filter(Boolean)
+      .map((conversation, index) => {
+        if (!seenRestoredIds.has(conversation.id)) {
+          seenRestoredIds.add(conversation.id);
+          return conversation;
+        }
+        // Conversation IDs are Map keys during merge. Repair duplicates in
+        // the imported archive so one malformed entry cannot overwrite another.
+        let id;
+        do {
+          id = `restored-duplicate-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+        } while (seenRestoredIds.has(id));
+        seenRestoredIds.add(id);
+        return { ...conversation, id };
+      });
 
     if (!normalized.length) {
       throw new Error(t(currentLang, "zip_error_noUsableConversations"));

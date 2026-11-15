@@ -354,5 +354,22 @@ assert.equal(JSON.stringify(quotaIn), before, "input not mutated");
   assert.match(optionsSource, /sizeDropped = countDropped \+ globallyLimited\.dropped \+ emptied/);
 }
 
+
+ // DATA-06 / DOC-01: restored conversation IDs are validated and legacy
+ // comments describe the custom prompt's actual lower-priority placement.
+{
+  const optionsSource = readFileSync(new URL("../options/options.js", import.meta.url), "utf8");
+  const backgroundSource = readFileSync(new URL("../background.js", import.meta.url), "utf8");
+  const settingsImportSource = readFileSync(new URL("../options/settings-import.js", import.meta.url), "utf8");
+  assert.match(optionsSource, /typeof conversation\.id === "string" \? conversation\.id\.trim\(\) : ""/);
+  assert.match(optionsSource, /isValidMessageId\(candidateId\) \? candidateId : fallbackId/);
+  assert.match(optionsSource, /seenRestoredIds\.has\(conversation\.id\)/);
+  assert.doesNotMatch(backgroundSource, /custom prompt travels in the same system message/i);
+  assert.match(backgroundSource, /lower-priority user-preference/);
+  assert.doesNotMatch(settingsImportSource, /custom prompt.*SYSTEM instruction/i);
+  assert.doesNotMatch(settingsImportSource, /cutting a system prompt/i);
+  assert.match(settingsImportSource, /cutting a user preference/);
+}
+
 console.log("OK: history-manager.js — titles, structured-attachment projection, quota compression.");
 process.exit(0);

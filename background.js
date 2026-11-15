@@ -508,11 +508,11 @@ chrome.runtime.onConnect.addListener((port) => {
       // Attached files arrive as structured data (see attachments.js). Clean
       // them BEFORE the privacy filter so it also sees single-line names.
       attachments = normalizeAttachments(attachments);
-      // The custom prompt travels in the same system message as everything else,
-      // so it goes through the same filter, in the same call as the payload (the
-      // placeholders it gets are numbered together with the rest and restored in
-      // the reply like any other). The providers use ctx.customPrompt, never the
-      // raw stored value.
+      // The custom prompt is redacted with the other outbound text in this
+      // request, but providers place its body in a lower-priority user-preference
+      // block inside the user turn. The system message contains only the rule
+      // that keeps this preference subordinate to security/privacy protections.
+      // The providers use ctx.customPrompt, never the raw stored value.
       let customPrompt = "";
       try {
         customPrompt = String((await chrome.storage.local.get("customPrompt")).customPrompt || "");
