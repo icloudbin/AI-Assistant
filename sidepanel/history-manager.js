@@ -241,7 +241,20 @@ function fitTurnToByteBudget(turn, maxBytes, encoder) {
 
 function limitStoredConversationMessages(conversation) {
   if (!conversation || !Array.isArray(conversation.messages)) return conversation;
-  const messages = conversation.messages;
+  let metadataChanged = false;
+  const messages = conversation.messages.map((message) => {
+    if (!message?.pageContext || typeof message.pageContext !== "object") return message;
+    const normalized = normalizeStoredPageContext(message.pageContext);
+    const previous = message.pageContext;
+    const unchanged = normalized
+      && normalized.title === previous.title
+      && normalized.url === previous.url
+      && !("tabId" in previous)
+      && Object.keys(previous).length === 2;
+    if (unchanged) return message;
+    metadataChanged = true;
+    return { ...message, pageContext: normalized };
+  });
   const encoder = new TextEncoder();
   const turns = messageTurns(messages);
   const keptTurns = [];
@@ -335,7 +348,7 @@ function limitStoredConversationMessages(conversation) {
     if (forced) keptTurns.push(forced);
   }
 
-  if (keptTurns.length === turns.length && totalMessages === messages.length
+  if (!metadataChanged && keptTurns.length === turns.length && totalMessages === messages.length
       && keptTurns.every((turn, i) => turn.every((message, j) => message === turns[turns.length - 1 - i][j]))) return conversation;
   keptTurns.reverse();
   const kept = keptTurns.flat();
