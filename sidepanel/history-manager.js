@@ -62,6 +62,17 @@ function translationTopicTitle(label, source) {
 // identified by its `id` (see conversation-store.js), so shortening a preview
 // can never make a stored message look like a different one.
 const STORED_ATTACHMENT_PREVIEW_CHARS = HISTORY_ATTACHMENT_PREVIEW_CHARS;
+const STORED_PAGE_TITLE_CHARS = 300;
+const STORED_PAGE_URL_CHARS = 2048;
+
+function normalizeStoredPageContext(pageContext, includeTabId = false) {
+  if (!pageContext || typeof pageContext !== "object" || typeof pageContext.url !== "string") return null;
+  return {
+    title: cutAtCodePointBoundary(String(pageContext.title || ""), STORED_PAGE_TITLE_CHARS),
+    url: cutAtCodePointBoundary(pageContext.url, STORED_PAGE_URL_CHARS),
+    ...(includeTabId && Number.isInteger(pageContext.tabId) ? { tabId: pageContext.tabId } : {}),
+  };
+}
 
 function toStoredMessage(message) {
   const content = message.content;
@@ -101,9 +112,7 @@ function toStoredMessage(message) {
     // within a session, where both copies carry one). Persisting it made the
     // first follow-up after a browser restart wrongly reset the context
     // epoch on the same page (round-17 #9).
-    pageContext: message.pageContext
-      ? (({ tabId: _tabId, ...rest }) => rest)(message.pageContext)
-      : null,
+    pageContext: normalizeStoredPageContext(message.pageContext),
     // Page-context epoch: a page change starts a new epoch, and every later
     // request sends only turns from the current epoch. Persisting it is what
     // keeps the reset in force on the FOLLOW-UP after a page change, not just
@@ -232,7 +241,20 @@ function fitTurnToByteBudget(turn, maxBytes, encoder) {
 
 function limitStoredConversationMessages(conversation) {
   if (!conversation || !Array.isArray(conversation.messages)) return conversation;
-  const messages = conversation.messages;
+  let metadataChanged = false;
+  const messages = conversation.messages.map((message) => {
+    if (!message?.pageContext || typeof message.pageContext !== "object") return message;
+    const normalized = normalizeStoredPageContext(message.pageContext);
+    const previous = message.pageContext;
+    const unchanged = normalized
+      && normalized.title === previous.title
+      && normalized.url === previous.url
+      && !("tabId" in previous)
+      && Object.keys(previous).length === 2;
+    if (unchanged) return message;
+    metadataChanged = true;
+    return { ...message, pageContext: normalized };
+  });
   const encoder = new TextEncoder();
   const turns = messageTurns(messages);
   const keptTurns = [];
@@ -244,7 +266,7 @@ function limitStoredConversationMessages(conversation) {
   const countKeepable = new Array(turns.length).fill(false);
   let countable = 0;
   for (let i = turns.length - 1; i >= 0; i--) {
-    if (countable + turns[i].length > MAX_STORED_MESSAGES_PER_CONVERSATION) continue;
+    if (countable + turns[i].length > MAX_STORED_MESSAGES_PER_CONVERSATION) break;
     countKeepable[i] = true;
     countable += turns[i].length;
   }
@@ -326,7 +348,7 @@ function limitStoredConversationMessages(conversation) {
     if (forced) keptTurns.push(forced);
   }
 
-  if (keptTurns.length === turns.length && totalMessages === messages.length
+  if (!metadataChanged && keptTurns.length === turns.length && totalMessages === messages.length
       && keptTurns.every((turn, i) => turn.every((message, j) => message === turns[turns.length - 1 - i][j]))) return conversation;
   keptTurns.reverse();
   const kept = keptTurns.flat();
@@ -385,6 +407,7 @@ export {
   makeTopicTitle,
   translationTopicTitle,
   toStoredMessage,
+  normalizeStoredPageContext,
   compressForQuota,
   limitStoredConversationMessages,
   limitStoredHistoryBytes,

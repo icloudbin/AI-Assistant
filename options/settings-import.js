@@ -6,10 +6,10 @@
 //
 // A settings file can come from anywhere. Imported blindly it can switch the
 // privacy filter off, turn on page reading / screenshots / automatic web
-// research, replace an API key, or write a custom prompt - which is sent to the
-// model as a SYSTEM instruction. So every difference is listed, and the ones
-// that weaken protection or change what the model is told are applied only when
-// the user ticks them.
+// research, replace an API key, or change the custom user-preference
+// instructions sent with a request. So every difference is listed, and the
+// ones that weaken protection or change the model's instructions are applied
+// only when the user ticks them.
 
 import {
   AUTO_WEB_RESEARCH_KEY,
@@ -34,8 +34,8 @@ const PROTECTION_SWITCHES = {
   [AUTO_WEB_RESEARCH_KEY]: { isOn: (v) => v !== false, onIsProtective: false },
 };
 
-// Over-long custom prompts are not imported (cutting a system prompt in the
-// middle would silently change its meaning). Returns the keys that were dropped.
+// Over-long custom prompts are not imported (cutting a user preference in
+// the middle would silently change its meaning). Returns the keys that were dropped.
 export function dropOverlongPrompt(restored) {
   if (typeof restored.customPrompt === "string" && restored.customPrompt.length > MAX_CUSTOM_PROMPT_CHARS) {
     delete restored.customPrompt;

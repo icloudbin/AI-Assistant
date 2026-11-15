@@ -26,7 +26,7 @@ import { encryptSecrets, decryptSecrets, MIN_PASSPHRASE_LENGTH } from "../settin
 import { withHistoryLock, withMessageIds, isValidMessageId, isValidTimestamp } from "../conversation-store.js";
 import { normalizeHistoryGeneration, isHistoryGenerationCurrent } from "../history-generation.js";
 import { nextHistoryGeneration } from "../history-generation.js";
-import { compressForQuota, cleanForTopic, limitStoredConversationMessages, limitStoredHistoryBytes } from "../sidepanel/history-manager.js";
+import { compressForQuota, cleanForTopic, limitStoredConversationMessages, limitStoredHistoryBytes, normalizeStoredPageContext } from "../sidepanel/history-manager.js";
 import { migrateLegacyMessage, normalizeAttachments } from "../attachments.js";
 import { sanitizePiiMap } from "../privacy/pii-filter.js";
 import { cutAtCodePointBoundary, MAX_CUSTOM_PROMPT_CHARS } from "../models.js";
@@ -683,14 +683,7 @@ function normalizeRestoredConversation(conversation, index) {
           // Same shape the side panel writes (see toStoredMessage()): the
           // page title/url/tab the message was sent with, the page-context
           // epoch, and the plain-text render flag for translation replies.
-          pageContext:
-            m.pageContext && typeof m.pageContext === "object" && typeof m.pageContext.url === "string"
-              ? {
-                  title: String(m.pageContext.title || ""),
-                  url: m.pageContext.url,
-                  ...(Number.isInteger(m.pageContext.tabId) ? { tabId: m.pageContext.tabId } : {}),
-                }
-              : null,
+          pageContext: normalizeStoredPageContext(m.pageContext, true),
           ...(Number.isInteger(m.contextEpoch) ? { contextEpoch: m.contextEpoch } : {}),
           ...(m.plain === true ? { plain: true } : {}),
         }))
@@ -699,8 +692,10 @@ function normalizeRestoredConversation(conversation, index) {
   if (!messages.length) return null;
 
   const fallbackId = `restored-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+  const candidateId = typeof conversation.id === "string" ? conversation.id.trim() : "";
+  const restoredId = isValidMessageId(candidateId) ? candidateId : fallbackId;
   return {
-    id: String(conversation.id || fallbackId),
+    id: restoredId,
     // Same 80-character cap as the live title path (makeTopicTitle) - an
     // uncapped restored title persisted into chrome.storage.local and was
     // re-serialized and rendered on every load (round-17 #21).
@@ -784,10 +779,24 @@ async function restoreHistory() {
     const startState = await chrome.storage.local.get(HISTORY_GENERATION_STORAGE_KEY);
     const restoreGeneration = normalizeHistoryGeneration(startState[HISTORY_GENERATION_STORAGE_KEY]);
     const restored = await readBackupFile(restoreHistoryFile.files?.[0]);
+    const seenRestoredIds = new Set();
     const normalized = restored
       .map(normalizeRestoredConversation)
       .filter(Boolean)
-      .slice(0, MAX_SAVED_CONVERSATIONS);
+      .map((conversation, index) => {
+        if (!seenRestoredIds.has(conversation.id)) {
+          seenRestoredIds.add(conversation.id);
+          return conversation;
+        }
+        // Conversation IDs are Map keys during merge. Repair duplicates in
+        // the imported archive so one malformed entry cannot overwrite another.
+        let id;
+        do {
+          id = `restored-duplicate-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+        } while (seenRestoredIds.has(id));
+        seenRestoredIds.add(id);
+        return { ...conversation, id };
+      });
 
     if (!normalized.length) {
       throw new Error(t(currentLang, "zip_error_noUsableConversations"));
@@ -834,10 +843,10 @@ async function restoreHistory() {
       const preLimit = [...byId.values()].filter((c) => c?.messages?.length);
       const limitedList = preLimit.map(limitStoredConversationMessages).filter((c) => c.messages?.length);
       const emptied = preLimit.length - limitedList.length;
-      const merged = limitedList
-        .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
-        .slice(0, MAX_SAVED_CONVERSATIONS);
-      const globallyLimited = limitStoredHistoryBytes(merged);
+      const newestFirst = limitedList.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+      const countDropped = Math.max(0, newestFirst.length - MAX_SAVED_CONVERSATIONS);
+      const capped = newestFirst.slice(0, MAX_SAVED_CONVERSATIONS);
+      const globallyLimited = limitStoredHistoryBytes(capped);
       let list = globallyLimited.conversations;
 
       // Web Locks make the tombstone recheck above airtight. The no-locks
@@ -861,7 +870,7 @@ async function restoreHistory() {
       // deterministic size-cap drops are NOT a quota emergency - they are
       // reported with their own truthful notice.
       let condensed = false;
-      let sizeDropped = globallyLimited.dropped + emptied;
+      let sizeDropped = countDropped + globallyLimited.dropped + emptied;
       let dropped = 0;
       for (let attempt = 0; ; attempt++) {
         try {

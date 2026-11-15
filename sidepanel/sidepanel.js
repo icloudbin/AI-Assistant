@@ -1931,6 +1931,7 @@ async function saveConversationsWithLock() {
   // A conversation the limiter could not represent at all (even its bounded
   // force-keep failed) comes back empty and used to vanish without a trace.
   const emptied = hadMessages - limitedList.length;
+  const countDropped = Math.max(0, limitedList.length - MAX_SAVED_CONVERSATIONS);
   let merged = limitedList.slice(0, MAX_SAVED_CONVERSATIONS);
   // unlimitedStorage bypasses Chrome's normal cap; keep a deterministic global
   // ceiling so an ever-growing collection cannot make every history load/save
@@ -1944,7 +1945,7 @@ async function saveConversationsWithLock() {
   // and tell the user how many were lost instead of dropping them silently.
   // The deterministic size-cap drops above are NOT a quota emergency - they
   // get their own truthful notice below.
-  let sizeDropped = globallyLimited.dropped + emptied;
+  let sizeDropped = countDropped + globallyLimited.dropped + emptied;
   let quotaDropped = 0;
   for (let attempt = 0; ; attempt++) {
     try {
