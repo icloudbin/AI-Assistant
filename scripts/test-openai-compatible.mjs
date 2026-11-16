@@ -4,8 +4,9 @@
 // integration-tested in the browser; here the shared machinery is driven
 // with synthetic Response bodies. Run:  node scripts/test-openai-compatible.mjs
 import assert from "node:assert/strict";
-import { readSse, openAICompatibleStreamError, providerHttpError, extractOpenAIDelta, fetchWithHeadersTimeout, streamGroq, readBoundedText, isModelUnavailableError, classifyProviderFailure } from "../providers/openai-compatible.js";
+import { readSse, openAICompatibleStreamError, providerHttpError, extractOpenAIDelta, fetchWithHeadersTimeout, streamGroq, readBoundedText, isModelUnavailableError, classifyProviderFailure, STREAM_MAX_BYTES, STREAM_MAX_REASONING_CHARS } from "../providers/openai-compatible.js";
 import { MODELS, findKnownModel } from "../models.js";
+import { t } from "../i18n.js";
 
 const encoder = new TextEncoder();
 function sse(chunks) {
@@ -159,6 +160,157 @@ const delta = (json) => json.choices?.[0]?.delta?.content ?? "";
     /16 characters per SSE line safety limit/i,
     "oversized SSE lines are rejected and reported in characters"
   );
+}
+
+// ---------- the byte limit is a BACKSTOP; reasoning has its own limit ----------
+// A provider wraps EVERY streamed token in an envelope of ~250-320 bytes, so the
+// old 4 MiB cap held only ~13-17k tokens of reasoning AND answer together and
+// rejected long answers and reasoning-heavy replies, although the catalog itself
+// asks Groq's GPT-OSS models for up to 65,536 output tokens. The envelopes below
+// are modelled on the chunk shape each provider documents (one token per event).
+const ENVELOPES = {
+  deepseek: (d) => ({ id: "3b4c1a7e5d9f2a61c0e8b7d4f1a92c35", object: "chat.completion.chunk", created: 1731660000, model: "deepseek-chat", system_fingerprint: "fp_a49d71b8a1", choices: [{ index: 0, delta: d, logprobs: null, finish_reason: null }] }),
+  groq: (d) => ({ id: "chatcmpl-5f0c3a9e-7b1d-4c28-9e44-0d6a1b2c3d4e", object: "chat.completion.chunk", created: 1731660000, model: "openai/gpt-oss-120b", system_fingerprint: "fp_f4ae844694", choices: [{ index: 0, delta: d, logprobs: null, finish_reason: null }], x_groq: { id: "req_01k9zq8d2xfk3b7m5n1p4r6s8t" } }),
+};
+// A lazily generated stream (nothing is held in memory): `reasoningTokens`
+// reasoning events, then `contentTokens` content events, then the terminal
+// events. `bytes()` is the number of bytes handed to the reader so far.
+function envelopeStream(env, reasoningTokens, contentTokens) {
+  const total = reasoningTokens + contentTokens;
+  let i = 0;
+  let sent = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      let text = "";
+      if (i >= total) {
+        text = `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`;
+      } else {
+        for (let n = 0; n < 200 && i < total; n++, i++) {
+          const d = i < reasoningTokens ? { content: null, reasoning_content: " think" } : { content: " word" };
+          text += `data: ${JSON.stringify(ENVELOPES[env](d))}\n\n`;
+        }
+      }
+      const bytes = encoder.encode(text);
+      sent += bytes.length;
+      controller.enqueue(bytes);
+      if (i >= total && text.includes("[DONE]")) controller.close();
+    },
+  });
+  return { resp: { body: stream, headers: { get: () => "text/event-stream" } }, bytes: () => sent };
+}
+const reasoningEvent = (text, field = "reasoning_content") => `data: ${JSON.stringify({ choices: [{ delta: { [field]: text } }] })}\n\n`;
+{
+  // The largest output the catalog itself requests, one token per event.
+  const maxTokens = Math.max(...MODELS.map((m) => m.maxOutputTokens || 0));
+  assert.ok(maxTokens >= 65536, `catalog sanity: the largest maxOutputTokens is ${maxTokens}`);
+  const ctx = makeCtx();
+  const { resp, bytes } = envelopeStream("groq", 0, maxTokens);
+  await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
+  assert.equal(ctx.chunks.join("").length, maxTokens * " word".length, "a reply of the catalog's largest size is delivered in full");
+  assert.ok(bytes() > 16 * 1024 * 1024, `the stream is far beyond the old 4 MiB cap (${bytes()} bytes)`);
+  assert.ok(bytes() < STREAM_MAX_BYTES, "and stays inside the backstop (raise STREAM_MAX_BYTES if the catalog ever asks for more output)");
+}
+{
+  // 16k tokens of reasoning before a 3k-token answer (~4.8 MiB on the wire):
+  // rejected by the old cap with nothing shown.
+  const ctx = makeCtx();
+  const { resp } = envelopeStream("deepseek", 16000, 3000);
+  await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError);
+  assert.equal(ctx.chunks.join(""), " word".repeat(3000), "the answer arrives; the reasoning is dropped");
+}
+{
+  // The backstop still exists at its default: events that carry neither content
+  // nor reasoning are seen by no other limit.
+  const junk = encoder.encode(`: ${"x".repeat(200 * 1024)}\n\n`);
+  let sent = 0;
+  const body = new ReadableStream({ pull(controller) { sent += junk.length; controller.enqueue(junk); } });
+  const ctx = makeCtx();
+  await assert.rejects(
+    () => readSse({ body, headers: { get: () => "text/event-stream" } }, extractOpenAIDelta, ctx, openAICompatibleStreamError),
+    /64\.0 MiB safety limit/i,
+    "the default byte backstop still ends a stream that never finishes"
+  );
+  assert.ok(sent > STREAM_MAX_BYTES && sent < STREAM_MAX_BYTES + 4 * junk.length, `stopped right after the backstop (${sent} bytes read)`);
+}
+for (const field of ["reasoning_content", "reasoning"]) {
+  // Over the reasoning limit: the request ends with its own message (it must
+  // not promise a partial reply - none was shown) and the stream is released.
+  const ctx = makeCtx();
+  ctx.streamMaxReasoningChars = 100;
+  const events = Array.from({ length: 6 }, () => reasoningEvent("r".repeat(30), field));
+  events.push('data: {"choices":[{"delta":{"content":"never shown"}}]}\n\ndata: [DONE]\n\n');
+  const { resp, cancelled } = sse(events);
+  await assert.rejects(
+    () => readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError),
+    (err) => {
+      assert.match(err.message, /more than 100 characters of internal reasoning/i, `${field}: unit-explicit reasoning message`);
+      assert.doesNotMatch(err.message, /partial reply/i, `${field}: no promise of a partial reply`);
+      return true;
+    },
+    `${field}: an endless reasoning stream is cut off`
+  );
+  assert.equal(ctx.chunks.length, 0, `${field}: nothing was shown`);
+  assert.equal(cancelled.count, 1, `${field}: the connection is released`);
+}
+{
+  // Exactly AT the limit is allowed; one character more is not. Visible text of
+  // the same event is never lost to the reasoning limit.
+  const run = async (reasoningChars) => {
+    const ctx = makeCtx();
+    ctx.streamMaxReasoningChars = 100;
+    const { resp } = sse([
+      reasoningEvent("r".repeat(reasoningChars)),
+      'data: {"choices":[{"delta":{"content":"Answer","reasoning_content":"r"}}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+    ]);
+    const outcome = await readSse(resp, extractOpenAIDelta, ctx, openAICompatibleStreamError).then(() => "ok", (e) => e.message);
+    return { outcome, shown: ctx.chunks.join("") };
+  };
+  const atLimit = await run(99);   // 99 + 1 = 100 characters in total
+  assert.equal(atLimit.outcome, "ok", "a total exactly at the limit completes");
+  assert.equal(atLimit.shown, "Answer", "the reasoning text never reaches the output");
+  const over = await run(100);     // 100 + 1 = 101
+  assert.match(over.outcome, /internal reasoning/i, "one character over the limit ends the request");
+  assert.equal(over.shown, "Answer", "the visible text that shared the event with the last reasoning is kept");
+}
+{
+  // The DEFAULT limit: 10 x 100,000 characters is exactly the limit and still
+  // completes; an 11th event crosses it.
+  const chunk = reasoningEvent("r".repeat(STREAM_MAX_REASONING_CHARS / 10));
+  const tail = ['data: {"choices":[{"delta":{"content":"ok"}}]}\n\n', "data: [DONE]\n\n"];
+  const ctxOk = makeCtx();
+  await readSse(sse([...Array(10).fill(chunk), ...tail]).resp, extractOpenAIDelta, ctxOk, openAICompatibleStreamError);
+  assert.equal(ctxOk.chunks.join(""), "ok", "reasoning exactly at the default limit completes");
+  const ctxOver = makeCtx();
+  await assert.rejects(
+    () => readSse(sse([...Array(11).fill(chunk), ...tail]).resp, extractOpenAIDelta, ctxOver, openAICompatibleStreamError),
+    /1,000,000 characters of internal reasoning/i,
+    "the default reasoning limit is 1,000,000 characters"
+  );
+}
+{
+  // A JSON-labelled 200 body is buffered only up to a bound (real error bodies
+  // are tiny). Within it the provider's message surfaces as before; text beyond
+  // it is not kept, so an oversized body cannot grow the buffer to the backstop.
+  const parts = ['{\n', ...Array.from({ length: 20 }, (_, i) => `  "pad${i}": "${"x".repeat(20)}",\n`), '  "error": { "message": "late gateway error" }\n}\n'];
+  const run = (cap) => {
+    const ctx = makeCtx();
+    if (cap) ctx.streamMaxJsonChars = cap;
+    const stream = new ReadableStream({ start(c) { for (const part of parts) c.enqueue(encoder.encode(part)); c.close(); } });
+    return readSse({ body: stream, headers: { get: () => "application/json" } }, extractOpenAIDelta, ctx, openAICompatibleStreamError);
+  };
+  await assert.rejects(run(0), /late gateway error/, "within the default bound the error body is read as before");
+  await assert.rejects(run(100), /empty response/i, "past the bound the body is no longer buffered (nothing to parse)");
+}
+{
+  // The new message exists, with its {limit}, in all six languages.
+  const en = t("en", "bg_error_reasoningTooLarge", { limit: "1,000,000 characters" });
+  assert.ok(en.includes("1,000,000 characters") && !en.includes("bg_error_reasoningTooLarge") && !en.includes("{limit}"), "en: resolved and filled in");
+  for (const lang of ["zh-CN", "zh-TW", "fr", "ja", "es"]) {
+    const msg = t(lang, "bg_error_reasoningTooLarge", { limit: "1,000,000 characters" });
+    assert.ok(msg.includes("1,000,000 characters") && !msg.includes("{limit}") && !msg.includes("bg_error_reasoningTooLarge"), `${lang}: resolved and filled in`);
+    assert.notEqual(msg, en, `${lang}: translated, not the English fallback`);
+  }
 }
 
 // ---------- provider error mid-stream: throws AND releases the body ----------

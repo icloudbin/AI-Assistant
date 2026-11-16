@@ -335,6 +335,7 @@ const translations = {
     bg_error_noResponse: `The provider did not respond within {seconds} s.`,
     bg_error_streamTimeout: `The AI service stopped responding before finishing the reply. The partial reply is shown; please try again.`,
     bg_error_streamTooLarge: `The reply exceeded the {limit} safety limit. The partial reply is shown; please shorten the request or split it into smaller parts.`,
+    bg_error_reasoningTooLarge: `The model produced more than {limit} of internal reasoning without finishing its answer. Please try again, shorten the request, or choose a different model.`,
     bg_error_piiFilter: `The privacy filter failed; the request was not sent.`,
   },
 
@@ -614,6 +615,7 @@ const translations = {
     bg_error_noResponse: `{seconds} 秒内未收到服务商的响应。`,
     bg_error_streamTimeout: `AI 服务在完成回复前停止响应。已显示部分回复，请重试。`,
     bg_error_streamTooLarge: `回复超过 {limit} 的安全上限。已显示部分回复；请缩短请求或将内容拆分成更小的部分。`,
+    bg_error_reasoningTooLarge: `模型在完成回答之前产生了超过 {limit} 的内部推理内容。请重试、缩短请求，或选择其他模型。`,
     bg_error_piiFilter: `隐私过滤失败，请求未发送。`,
   },
 
@@ -893,6 +895,7 @@ const translations = {
     bg_error_noResponse: `{seconds} 秒內未收到服務商的回應。`,
     bg_error_streamTimeout: `AI 服務在完成回覆前停止回應。已顯示部分回覆，請重試。`,
     bg_error_streamTooLarge: `回覆超過 {limit} 的安全上限。已顯示部分回覆；請縮短請求或將內容拆分成較小的部分。`,
+    bg_error_reasoningTooLarge: `模型在完成回答之前產生了超過 {limit} 的內部推理內容。請重試、縮短請求，或選擇其他模型。`,
     bg_error_piiFilter: `隱私過濾失敗，請求未送出。`,
   },
 
@@ -1168,6 +1171,7 @@ const translations = {
     bg_error_emptyResponse: `Le service d’IA a renvoyé une réponse vide. Réessayez ou choisissez un autre modèle.`,
     bg_error_streamCut: `La connexion au modèle s’est interrompue avant la fin de la réponse. La réponse partielle est affichée et peut être incomplète.`,
     bg_error_streamTooLarge: `La réponse a dépassé la limite de sécurité de {limit}. La réponse partielle est affichée ; veuillez raccourcir la demande ou la diviser en parties plus petites.`,
+    bg_error_reasoningTooLarge: `Le modèle a produit plus de {limit} de raisonnement interne sans terminer sa réponse. Réessayez, raccourcissez la demande ou choisissez un autre modèle.`,
     bg_error_modelUnavailable: `Le modèle sélectionné est actuellement indisponible - le fournisseur l’a peut-être retiré (les modèles d’aperçu peuvent disparaître à tout moment). Veuillez choisir un autre modèle dans le menu déroulant et réessayer.`,
     model_preview_suffix: `aperçu`,
     bg_error_noResponse: `Le fournisseur n’a pas répondu dans les {seconds} s.`,
@@ -1447,6 +1451,7 @@ const translations = {
     bg_error_emptyResponse: `AI サービスから空の応答が返されました。もう一度お試しいただくか、別のモデルを選択してください。`,
     bg_error_streamCut: `モデルとの接続が応答の完了前に切断されました。部分的な応答のみ表示されており、内容が不完全な可能性があります。`,
     bg_error_streamTooLarge: `返答が安全上限の {limit} を超えました。部分的な返答が表示されています。リクエストを短くするか、小さな部分に分けてください。`,
+    bg_error_reasoningTooLarge: `モデルが回答を完了する前に、{limit} を超える内部推論を生成しました。もう一度お試しいただくか、リクエストを短くするか、別のモデルを選択してください。`,
     bg_error_modelUnavailable: `選択されたモデルは現在利用できません。プロバイダーが提供を終了した可能性があります（プレビューモデルは予告なく削除されることがあります）。ドロップダウンから別のモデルを選び、もう一度お試しください。`,
     model_preview_suffix: `プレビュー`,
     bg_error_noResponse: `{seconds} 秒以内にプロバイダーから応答がありませんでした。`,
@@ -1726,6 +1731,7 @@ const translations = {
     bg_error_emptyResponse: `El servicio de IA devolvió una respuesta vacía. Inténtalo de nuevo o elige otro modelo.`,
     bg_error_streamCut: `La conexión con el modelo se cortó antes de terminar la respuesta. Se muestra la respuesta parcial y puede estar incompleta.`,
     bg_error_streamTooLarge: `La respuesta superó el límite de seguridad de {limit}. Se muestra la respuesta parcial; acorte la solicitud o divídala en partes más pequeñas.`,
+    bg_error_reasoningTooLarge: `El modelo generó más de {limit} de razonamiento interno sin terminar su respuesta. Inténtalo de nuevo, acorta la solicitud o elige otro modelo.`,
     bg_error_modelUnavailable: `El modelo seleccionado no está disponible actualmente; es posible que el proveedor lo haya retirado (los modelos de vista previa pueden eliminarse con poca antelación). Elija otro modelo en el menú desplegable e inténtelo de nuevo.`,
     model_preview_suffix: `vista previa`,
     bg_error_noResponse: `El proveedor no respondió en {seconds} s.`,

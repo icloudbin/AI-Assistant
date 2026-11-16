@@ -343,15 +343,39 @@ export function extractOpenAIDelta(json) {
 const STREAM_IDLE_TIMEOUT_MS = 90 * 1000;
 const STREAM_TOTAL_TIMEOUT_MS = 15 * 60 * 1000;
 
-// Per-request resource limits. Bytes count the complete upstream response
-// (including SSE framing); line size bounds one SSE event before JSON.parse;
-// content size counts user-visible text rather than provider metadata.
-export const STREAM_MAX_BYTES = 4 * 1024 * 1024;
+// Per-request resource limits. Content size counts user-visible text rather
+// than provider metadata; reasoning size counts the thinking text that is read
+// and dropped; line size bounds one SSE event before JSON.parse.
+//
+// STREAM_MAX_BYTES counts the complete upstream response INCLUDING the SSE
+// framing, and is only the BACKSTOP behind those character limits (a stream of
+// events that carry neither content nor reasoning, which no other limit sees).
+// It must not be the limit that real replies run into: a provider wraps EVERY
+// streamed token in its own envelope (id, model, fingerprint, ... - about
+// 250-320 bytes for the DeepSeek, Groq and OpenRouter chunk shapes), so the old
+// 4 MiB cap held only ~13-17k tokens of reasoning AND answer together - a
+// fifth to a quarter of the 65,536 output tokens the catalog itself asks Groq's
+// GPT-OSS models for - and cut off long answers and reasoning-heavy replies (a model
+// that thought for 16k tokens before a 3k-token answer was rejected with
+// nothing shown). 64 MiB holds the catalog's largest request about three
+// times over; the total timeout still bounds a runaway stream in time.
+export const STREAM_MAX_BYTES = 64 * 1024 * 1024;
 export const STREAM_MAX_CONTENT_CHARS = 1_000_000;
+export const STREAM_MAX_REASONING_CHARS = 1_000_000;
 export const STREAM_MAX_SSE_LINE_CHARS = 256 * 1024;
+// A 200 response labelled application/json is buffered whole, only to find a
+// gateway's error message in it. Real error bodies are a few hundred bytes;
+// without a bound the buffer could grow to STREAM_MAX_BYTES.
+const STREAM_MAX_JSON_BODY_CHARS = 1024 * 1024;
 
 function streamLimitError(lang, limit) {
   return new Error(t(lang, "bg_error_streamTooLarge", { limit: String(limit) }));
+}
+
+// The model kept thinking past the reasoning limit. Its own message: unlike the
+// visible-text limit it must not promise a partial reply (there may be none).
+function reasoningLimitError(lang, chars) {
+  return new Error(t(lang, "bg_error_reasoningTooLarge", { limit: `${Number(chars).toLocaleString()} characters` }));
 }
 
 async function readSse(resp, extractDelta, ctx, extractError = null) {
@@ -373,12 +397,24 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
   let emitted = false;
   let receivedBytes = 0;
   let contentChars = 0;
+  let reasoningChars = 0;
+  // Buffers the body of a JSON-labelled response up to maxJsonChars (see
+  // STREAM_MAX_JSON_BODY_CHARS); anything beyond is not needed for an error.
+  const keepJson = (text) => {
+    if (jsonText === null || jsonText.length >= maxJsonChars) return;
+    const room = maxJsonChars - jsonText.length;
+    jsonText += text.length > room ? text.slice(0, room) : text;
+  };
   const maxBytes = Number.isSafeInteger(ctx.streamMaxBytes) && ctx.streamMaxBytes > 0
     ? ctx.streamMaxBytes : STREAM_MAX_BYTES;
   const maxContentChars = Number.isSafeInteger(ctx.streamMaxContentChars) && ctx.streamMaxContentChars > 0
     ? ctx.streamMaxContentChars : STREAM_MAX_CONTENT_CHARS;
+  const maxReasoningChars = Number.isSafeInteger(ctx.streamMaxReasoningChars) && ctx.streamMaxReasoningChars > 0
+    ? ctx.streamMaxReasoningChars : STREAM_MAX_REASONING_CHARS;
   const maxSseLineChars = Number.isSafeInteger(ctx.streamMaxSseLineChars) && ctx.streamMaxSseLineChars > 0
     ? ctx.streamMaxSseLineChars : STREAM_MAX_SSE_LINE_CHARS;
+  const maxJsonChars = Number.isSafeInteger(ctx.streamMaxJsonChars) && ctx.streamMaxJsonChars > 0
+    ? ctx.streamMaxJsonChars : STREAM_MAX_JSON_BODY_CHARS;
   // A well-formed OpenAI-compatible stream always ends with an explicit
   // terminal event: the "data: [DONE]" marker and/or a chunk carrying
   // finish_reason. A network failure mid-stream (connection reset, offline)
@@ -470,6 +506,14 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
       if (ctx.lineTranslator) ctx.lineTranslator.push(content);
       else ctx.sendChunk(content);
     }
+    // The reasoning text is dropped, but a model that never stops thinking
+    // must still end: count it against its own limit (after the content of the
+    // same event, so no visible text is lost to it).
+    const reasoning = delta && typeof delta === "object" ? delta.reasoning : "";
+    if (typeof reasoning === "string" && reasoning) {
+      reasoningChars += reasoning.length;
+      if (reasoningChars > maxReasoningChars) throw reasoningLimitError(ctx.lang, maxReasoningChars);
+    }
   };
 
   // STOP: cancel the stream right away so the connection to the provider is
@@ -495,7 +539,7 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
       receivedBytes += value?.byteLength || 0;
       if (receivedBytes > maxBytes) throw streamLimitError(ctx.lang, `${(maxBytes / (1024 * 1024)).toFixed(1)} MiB`);
       const decoded = decoder.decode(value, { stream: true });
-      if (jsonText !== null) jsonText += decoded;
+      keepJson(decoded);
       const lines = (buffer + decoded).split("\n");
       buffer = lines.pop() || "";
       for (const line of lines) {
@@ -526,7 +570,7 @@ async function readSse(resp, extractDelta, ctx, extractError = null) {
     // no content - they must not fail the answer.
     if (!sawTerminal) {
       const tail = decoder.decode();
-      if (jsonText !== null) jsonText += tail;
+      keepJson(tail);
       buffer += tail;
       if (buffer.length > maxSseLineChars) throw streamLimitError(ctx.lang, `${Number(maxSseLineChars).toLocaleString()} characters per SSE line`);
       if (buffer.trim()) handleLine(buffer);
