@@ -71,11 +71,22 @@ function sseResponse(reply) {
 
 // Runs one ASK through the real handler. `providerReplies` is the sequence of
 // raw model replies (a string) or HTTP failures ({ status }) for successive
-// provider calls. Returns the reply as the side panel would show it.
-async function runTranslation(source, providerReplies) {
+// provider calls - or a function (requestBody, callIndex) => reply for tests
+// whose reply depends on the request (one reply per numbered batch).
+// `opts` overrides parts of the payload (history, translateMode, question,
+// pageContext). Returns the reply as the side panel would show it, plus the
+// parsed body of every provider request (`requests`).
+async function runTranslation(source, providerReplies, opts = {}) {
   let call = 0;
-  globalThis.fetch = async () => {
-    const reply = providerReplies[Math.min(call++, providerReplies.length - 1)];
+  const requests = [];
+  globalThis.fetch = async (_url, init) => {
+    let body = null;
+    try { body = JSON.parse(init.body); } catch { /* not a JSON provider call */ }
+    requests.push(body);
+    const index = call++;
+    const reply = typeof providerReplies === "function"
+      ? providerReplies(body, index)
+      : providerReplies[Math.min(index, providerReplies.length - 1)];
     if (typeof reply === "object") return new Response(JSON.stringify({ error: { message: "boom" } }), { status: reply.status });
     return sseResponse(reply);
   };
@@ -94,12 +105,12 @@ async function runTranslation(source, providerReplies) {
     type: "ASK",
     payload: {
       requestId: "r1",
-      question: "Translate to French",
-      pageContext: null,
-      includePageContext: false,
-      history: [],
+      question: opts.question ?? "Translate to French",
+      pageContext: opts.pageContext ?? null,
+      includePageContext: !!opts.pageContext,
+      history: opts.history ?? [],
       modelId: "deepseek-flash",
-      translateMode: true,
+      translateMode: opts.translateMode ?? true,
       translateSource: source,
       noWebResearch: true,
     },
@@ -112,6 +123,7 @@ async function runTranslation(source, providerReplies) {
   return {
     reply,
     calls: call,
+    requests,
     notices: posted.filter((m) => m.type === "NOTICE"),
     error: posted.find((m) => m.type === "ERROR"),
     done: posted.some((m) => m.type === "DONE"),
@@ -198,6 +210,74 @@ await test("a whole SENTENCE echoed back is still a missing line (replayed once,
   assert.equal(r.calls, 2, "an echoed sentence is replayed once");
   assert.equal(r.reply, ["Hello world.", "Deuxieme ligne ici."].join("\n"));
   assert.equal(r.notices.length, 1, "the replay echoed it too, so the missing-lines notice stays");
+});
+
+// ---------------------------------------------------------------------------
+// A translation request carries NO conversation history. Every numbered batch
+// (and the off-screen replay of an incomplete one) used to re-send the earlier
+// turns - the stored reply of one previous page translation is tens of
+// thousands of characters, so a 15-batch page paid for it 15 times and crossed
+// the token-per-minute budget of the free tiers. The text to translate is in
+// the request itself; no earlier turn changes how it must be translated.
+// ---------------------------------------------------------------------------
+const HISTORY = [
+  { role: "user", content: "HISTORY-MARKER-USER: summarize this page" },
+  { role: "assistant", content: `HISTORY-MARKER-ASSISTANT ${"an earlier, long reply. ".repeat(400)}` },
+];
+const carriesHistory = (requests) => requests.some((b) => JSON.stringify(b).includes("HISTORY-MARKER"));
+// A model stand-in that answers every "[n] text" line of the request it
+// receives, so a multi-batch translation can be driven end to end.
+const answerNumberedLines = (body) => {
+  const last = body?.messages?.[body.messages.length - 1];
+  const text = typeof last?.content === "string" ? last.content : (last?.content || []).map((p) => p.text || "").join("");
+  return [...text.matchAll(/^\[(\d+)\] (.+)$/gm)].map((m) => `[${m[1]}] FR ${m[2]}`).join("\n");
+};
+// ~28k characters of translatable lines: several 8000-character batches.
+const LONG_LINES = Array.from({ length: 400 }, (_, i) => `Paragraph ${i + 1}: the quick brown fox jumps over the lazy dog, again and again.`);
+const LONG_SOURCE = LONG_LINES.join("\n");
+const LONG_TRANSLATED = LONG_LINES.map((l) => `FR ${l}`).join("\n");
+
+await test("single-batch translation sends no history (and the control question still does)", async () => {
+  const r = await runTranslation(SOURCE, [COMPLETE_REPLY], { history: HISTORY });
+  assert.ok(r.done, `request did not finish: ${JSON.stringify(r.error)}`);
+  assert.equal(r.reply, TRANSLATED);
+  assert.equal(r.requests.length, 1);
+  assert.ok(!carriesHistory(r.requests), "earlier turns must not ride along with a translation");
+  assert.deepEqual(r.requests[0].messages.map((m) => m.role), ["system", "user"], "exactly the system prompt and the translation request");
+
+  // Control: the SAME history on an ordinary question is still sent - the test
+  // above would pass vacuously if the harness could never see the history.
+  const ctl = await runTranslation(null, ["Plain answer."], { history: HISTORY, translateMode: false, question: "What did we discuss?" });
+  assert.ok(ctl.done, `control request did not finish: ${JSON.stringify(ctl.error)}`);
+  assert.deepEqual(ctl.requests[0].messages.map((m) => m.role), ["system", "user", "assistant", "user"]);
+  assert.ok(carriesHistory(ctl.requests), "an ordinary follow-up question keeps its history");
+});
+
+await test("every batch of a long selection translation is free of history", async () => {
+  const r = await runTranslation(LONG_SOURCE, answerNumberedLines, { history: HISTORY });
+  assert.ok(r.done, `request did not finish: ${JSON.stringify(r.error)}`);
+  assert.ok(r.requests.length >= 3, `expected a multi-batch translation, got ${r.requests.length} request(s)`);
+  assert.ok(!carriesHistory(r.requests), "no batch may carry earlier turns");
+  assert.ok(r.requests.every((b) => b.messages.length === 2), "each batch is [system, user]");
+  assert.equal(r.reply, LONG_TRANSLATED, "all 400 lines are translated, in order");
+  assert.equal(r.notices.length, 0);
+});
+
+await test("every batch of a long PAGE translation is free of history", async () => {
+  const page = { title: "Doc", url: "https://example.com/doc", text: LONG_SOURCE };
+  const r = await runTranslation(null, answerNumberedLines, { history: HISTORY, pageContext: page });
+  assert.ok(r.done, `request did not finish: ${JSON.stringify(r.error)}`);
+  assert.ok(r.requests.length >= 3, `expected a multi-batch translation, got ${r.requests.length} request(s)`);
+  assert.ok(!carriesHistory(r.requests), "no batch may carry earlier turns");
+  assert.equal(r.reply, LONG_TRANSLATED);
+});
+
+await test("the off-screen replay of an incomplete batch is free of history too", async () => {
+  const r = await runTranslation(SOURCE, [INCOMPLETE_REPLY, COMPLETE_REPLY], { history: HISTORY });
+  assert.ok(r.done, `request did not finish: ${JSON.stringify(r.error)}`);
+  assert.equal(r.calls, 2, "the incomplete first attempt is replayed once");
+  assert.ok(!carriesHistory(r.requests), "neither the first attempt nor the replay carries earlier turns");
+  assert.equal(r.reply, TRANSLATED);
 });
 
 console.log(`\n${results.filter(Boolean).length}/${results.length} passed`);

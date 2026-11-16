@@ -621,7 +621,17 @@ chrome.runtime.onConnect.addListener((port) => {
       // therefore sends no history: its request then has exactly the size that
       // succeeded the first time. Ordinary follow-up questions keep the full
       // history, including those fact-check turns.
-      const requestHistory = factCheck?.enabled ? [] : history;
+      //
+      // A translation is self-contained in the same way: the text to translate
+      // travels in THIS request (the selection, or the page cut into numbered
+      // batches), and no earlier turn changes how it has to be translated.
+      // The history, however, was re-sent with EVERY batch (and with the
+      // off-screen replay of an incomplete one): the stored reply of one earlier
+      // page translation is tens of thousands of characters, so a 15-batch page
+      // carried that reply 15 times (measured: ~32k extra characters per 8k-char
+      // batch, ~490k in total) - more tokens billed, and a request that crosses
+      // the token-per-minute budget of the free tiers for no benefit.
+      const requestHistory = (factCheck?.enabled || translateMode === true) ? [] : history;
       let translationBatches = [];
       let translationPrepared = null;
       let translateUsingSelection = false;
