@@ -137,6 +137,22 @@ const DOB_DATE = [
 const DOB_LABEL = "(?:\\b(?:date[\\s_-]*of[\\s_-]*birth|birth[\\s_-]*date|birthday|d\\.?o\\.?b|born(?:\\s+on)?)\\b\\.?|出生日期|出生年月日|出生年月|出生时间|生日|出生于|出生)";
 // Common Chinese surnames: "<surname>先生/女士/老师..." is a name, "产品经理" is not.
 const CN_SURNAMES = "王李张刘陈杨黄赵吴周徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾萧田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤";
+// An organisation or department after a label ("客户：华为技术有限公司",
+// "联系人：技术支持部") is not a person, just as "Client: Acme Corp" is not (see
+// GENERIC_NAME_WORDS). Bounded on purpose, like that list: only a run of Chinese
+// characters that ENDS in one of these words is left alone, so a name followed
+// by any separator ("姓名：张三伟，电话") or a plain 2-5 character name is
+// unaffected. The single-character endings (部 局 厅 处 院 馆 厂 店) also need three
+// characters before them: "王大店" is not worth the leak, "销售部" stays redacted.
+const CN_ORG_WORDS = [
+  "公司", "集团", "企业", "银行", "支行", "分行", "总部", "大学", "学院", "学校", "医院", "研究院", "研究所", "事务所",
+  "协会", "委员会", "基金会", "工作室", "科技", "部门", "办公室", "工厂", "商店", "超市", "酒店", "饭店", "药店", "书店",
+  "中心", "政府", "法院", "检察院", "派出所",
+];
+const CN_ORG_RE = new RegExp(`(?:${CN_ORG_WORDS.join("|")})$|^[一-龥]{3,}[部局厅处院馆厂店]$`);
+// A person's name is never longer than this (with its middle dot); a longer run
+// after the label is a phrase, and only its first CN_NAME_MAX characters are taken.
+const CN_NAME_MAX = 5;
 
 
 // ---------- helpers for the rules below ----------
@@ -188,6 +204,26 @@ const NON_PERSON_LABEL_RE = /(?:\b(?:product|brand|file|company|project|domain|h
 // "Name:" lines took ~6 s of synchronous time in the service worker). Same
 // idea as the 14-character window of the IPv4 "Version 1.2.3.4" check.
 const NON_PERSON_LABEL_WINDOW = 40;
+
+// A label word that is really a code identifier: "client = Client(api_key)",
+// "author = Author.objects.get(pk=1)", "client = Client::new()", "client: Client".
+// Its "value" is then a class that is called, reached into or scoped - a SINGLE
+// capitalised token followed IMMEDIATELY (no space) by "(", "::" or ".name", the
+// label itself written like a variable (lower-case initial) - or a type that
+// merely repeats its label. A person's name is none of these: "Contact: John
+// Smith (john@x.com)" has a space and two words, "Contact: Alice(VIP)" has a
+// capitalised label, "Name: John.Smith" goes on with a capital, and nobody is
+// called "Client". Redacting the class left the user's code unreadable to the
+// model ("client = [NAME#1](api_key)") and, for "patient = Patient(...)", took
+// the class while a real name inside the call went by. Only the next two
+// characters are looked at: no slice of the document's remainder (see the
+// window note above).
+const CODE_CONTINUATION_RE = /^(?:\(|::|\.[a-z_$])/;
+function isCodeValue(head, seq, whole, end) {
+  if (/\s/.test(seq)) return false;
+  if (/^[a-z]/.test(head) && CODE_CONTINUATION_RE.test(whole.slice(end, end + 2))) return true;
+  return seq.toLowerCase() === head.replace(/\s*[:=]\s*$/, "").toLowerCase();
+}
 
 // Is `value` (right after a key such as "password:" or "SECRET_KEY=") a secret,
 // as opposed to ordinary text ("required", "4096", "<your key>")?
@@ -530,13 +566,18 @@ const RULES = [
   // dropped altogether (far too common in ordinary prose).
   [new RegExp(`((?:\\b[Mm]y name is|\\bI am called|\\bI'm called|\\bI’m called)\\s+)${NAME_SEQ}`, "g"), "$1[NAME]"],
   [new RegExp(`(\\b(?:[Ff][Uu][Ll][Ll][ _-]?[Nn][Aa][Mm][Ee]|[Ff][Ii][Rr][Ss][Tt][ _-]?[Nn][Aa][Mm][Ee]|[Ll][Aa][Ss][Tt][ _-]?[Nn][Aa][Mm][Ee]|[Ss][Uu][Rr][Nn][Aa][Mm][Ee]|[Nn][Aa][Mm][Ee]|[Cc][Oo][Nn][Tt][Aa][Cc][Tt]|[Cc][Uu][Ss][Tt][Oo][Mm][Ee][Rr]|[Cc][Ll][Ii][Ee][Nn][Tt]|[Pp][Aa][Tt][Ii][Ee][Nn][Tt]|[Cc][Aa][Rr][Dd][Hh][Oo][Ll][Dd][Ee][Rr]|[Rr][Ee][Cc][Ii][Pp][Ii][Ee][Nn][Tt]|[Ss][Ee][Nn][Dd][Ee][Rr]|[Aa][Uu][Tt][Hh][Oo][Rr]|[Aa][Pp][Pp][Ll][Ii][Cc][Aa][Nn][Tt]|[Ee][Mm][Pp][Ll][Oo][Yy][Ee][Ee])\\s*[:=]\\s*)(${NAME_SEQ})`, "g"), (m, head, seq, offset, whole) => (
-    splitNameSeq(seq) && !NON_PERSON_LABEL_RE.test(whole.slice(Math.max(0, offset - NON_PERSON_LABEL_WINDOW), offset)) ? `${head}[NAME]` : m
+    splitNameSeq(seq) && !NON_PERSON_LABEL_RE.test(whole.slice(Math.max(0, offset - NON_PERSON_LABEL_WINDOW), offset)) && !isCodeValue(head, seq, whole, offset + m.length) ? `${head}[NAME]` : m
   )],
   [new RegExp(`(\\b(?:Dear|Hi|Hello|Hey|Regards,|Sincerely,|Best,|Thanks,|Cheers,)\\s+)(${NAME_SEQ_SHORT})`, "g"), (m, cue, name) => (isGenericTarget(name.split(/\s+/)[0]) ? m : `${cue}[NAME]`)],
   [new RegExp(`(\\b(?:Mr|Mrs|Ms|Miss|Dr|Prof)\\.?\\s+)(${NAME_SEQ})`, "g"), (m, title, name) => (
     TITLE_BRAND_WORDS.has(name.split(/\s+/)[0].toLowerCase()) ? m : `${title}[NAME]`
   )],
-  [/((?:姓名|名字|联系人|收件人|寄件人|持卡人|客户|申请人|患者|用户名)\s*[:：]\s*)[一-龥·]{2,5}/g, "$1[NAME]"],
+  // The whole run is read (up to 40 characters) so that an organisation can be
+  // told from a name; for anything else exactly the first CN_NAME_MAX characters
+  // are replaced, as before.
+  [/((?:姓名|名字|联系人|收件人|寄件人|持卡人|客户|申请人|患者|用户名)\s*[:：]\s*)([一-龥·]{2,40})/g, (m, head, run) => (
+    CN_ORG_RE.test(run) ? m : `${head}[NAME]${run.slice(CN_NAME_MAX)}`
+  )],
   [/((?:我叫|我的名字是|本人)\s*)[一-龥·]{2,4}/g, "$1[NAME]"],
   [new RegExp(`[${CN_SURNAMES}][一-龥]?(?=先生|女士|小姐)`, "g"), "[NAME]"],
   [new RegExp(`[${CN_SURNAMES}](?=老师|经理|总监|医生|教授|博士)`, "g"), "[NAME]"],

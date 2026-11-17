@@ -351,6 +351,95 @@ check("solid uncued Luhn-valid 9-digit stays (not a SIN)", R("ref 046454286 here
 check("solid cued 9-digit redacts as [SIN]", R("SIN: 046454286") === "SIN: [SIN]", JSON.stringify(R("SIN: 046454286")));
 check("grouped SIN still redacts without a cue", R("call 046 454 286") === "call [SIN]", JSON.stringify(R("call 046 454 286")));
 
+// ---- code that merely uses a label word / organizations after a Chinese label ----
+// "client = Client(api_key)" used to come back as "client = [NAME#1](api_key)": the
+// class the user asks about replaced by a placeholder the model cannot read.
+// "客户：华为技术有限公司" came back as "客户：[NAME#1]限公司": a company cut in the
+// middle of its name. Real names after the same labels must keep redacting.
+{
+  const CODE_KEEP = [
+    "client = Client(api_key)",
+    "client = Client()\nclient.connect()",
+    'name = Name("x")',
+    "sender = Sender(config)",
+    "author = Author.objects.get(pk=1)",
+    "patient = Patient(record)",
+    "employee = Employee(1)",
+    "client = Client::new()",
+    "const client = Client.create()",
+    "author: Author",          // a type that repeats its label
+    "sender: Sender",
+    "client: Client",
+    "Client = Client()",
+  ];
+  for (const input of CODE_KEEP) check(`code stays: ${JSON.stringify(input)}`, R(input) === input, `-> ${R(input)}`);
+
+  // [input, a value that must not survive]. The guard is narrow: one token, no
+  // space before the "(" / ".name" / "::", a variable-style (lower-case) label.
+  const NAMES_STILL_REDACT = [
+    ["Name: John Smith", "John"],
+    ["name = Alice", "Alice"],
+    ["client: Alice", "Alice"],
+    ["Author: Alice Smith.", "Alice"],
+    ["Contact: Alice Smith (VIP)", "Alice"],     // two words and a space
+    ["Contact: Smith (VIP)", "Smith"],            // a space before the "("
+    ["Contact: Alice(VIP)", "Alice"],             // capitalised label: a person, not a variable
+    ["Name: John.Smith", "John"],                 // ".Smith" continues with a capital, like a name
+    ["client = Alice Smith", "Smith"],
+  ];
+  for (const [input, secret] of NAMES_STILL_REDACT) {
+    const out = R(input);
+    check(`name still redacts: ${JSON.stringify(input)}`, !out.includes(secret) && out.includes("[NAME"), `-> ${out}`);
+  }
+
+  const CN_KEEP = [
+    "客户：华为技术有限公司",
+    "客户：深圳市腾讯计算机系统有限公司",
+    "客户：北京大学",
+    "申请人：中国银行",
+    "联系人：技术支持部",
+    "联系人：人力资源部",
+    "客户：华为技术有限公司，北京",      // a separator after the company changes nothing
+  ];
+  for (const input of CN_KEEP) check(`organization stays: ${input}`, R(input) === input, `-> ${R(input)}`);
+
+  const CN_NAMES = [
+    ["姓名：张三伟，电话 13800138000", "张三伟"],
+    ["联系人：李四 地址：北京", "李四"],
+    ["申请人：王小明\n", "王小明"],
+    ["患者：赵六。", "赵六"],
+    ["收件人：张三(销售)", "张三"],
+    ["姓名：欧阳小明", "欧阳小明"],
+    ["联系人：张三联系电话：13800138000", "张三"],   // label-value pairs glued together by a scraper
+    ["联系人：销售部", "销售部"],                      // three characters: deliberately still redacted (see CN_ORG_RE)
+  ];
+  for (const [input, secret] of CN_NAMES) {
+    const out = R(input);
+    check(`Chinese name still redacts: ${input.replace(/\n/g, "\\n")}`, !out.includes(secret) && out.includes("[NAME"), `-> ${out}`);
+  }
+
+  // Numbering and restore round-trip with a session: the suffix after the
+  // replaced characters is kept, so the original comes back exactly, and an
+  // organization never takes a placeholder number.
+  const input = "客户：华为技术有限公司\n联系人：张三联系电话：13800138000\nclient = Client(api_key)\nName: John Smith";
+  const sess = createRedactionSession();
+  const out = R(input, sess);
+  // Numbers follow the RULES order (the English label rule runs before the Chinese one).
+  check("mixed text: company and code stay, both people are numbered", out === "客户：华为技术有限公司\n联系人：[NAME#2]话：[PHONE#1]\nclient = Client(api_key)\nName: [NAME#1]", JSON.stringify(out));
+  check("mixed text: restores to exactly what was typed", restorePlaceholders(out, sess) === input, restorePlaceholders(out, sess));
+  const none = createRedactionSession();
+  R("客户：华为技术有限公司\nclient = Client(api_key)", none);
+  check("an organization or a class name takes no placeholder number", none.byPlaceholder.size === 0, String(none.byPlaceholder.size));
+
+  // The same rules on text that contains full-width characters (matched on the
+  // folded shadow copy, spliced into the real text).
+  const fw = "联系人：张三，客户：华为技术有限公司，电话０９０－１２３４－５６７８，client = Client(x)";
+  const fwSess = createRedactionSession();
+  const fwOut = R(fw, fwSess);
+  check("full-width text: person and phone redacted, company and code kept", !fwOut.includes("张三") && fwOut.includes("客户：华为技术有限公司") && fwOut.includes("client = Client(x)") && fwOut.includes("[PHONE#1]"), fwOut);
+  check("full-width text: restores to exactly what was typed", restorePlaceholders(fwOut, fwSess) === fw, restorePlaceholders(fwOut, fwSess));
+}
+
 // ---- restoreNamePlaceholders: names only, other placeholders untouched ----// ---- restoreNamePlaceholders: names only, other placeholders untouched ----
 {
   const s = createRedactionSession();
