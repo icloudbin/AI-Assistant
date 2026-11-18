@@ -7,6 +7,7 @@ None of these are loaded by the extension (they are not referenced from `manifes
 | Command | Covers |
 | --- | --- |
 | `node scripts/test-auto-web-research.mjs` | ARCH-02: missing values default to ON; only an explicit `false` opts out |
+| `node scripts/test-research-trigger.mjs` | Web-research trigger: instructions to search the web vs. refusals ("Don't search the web") and look-alike phrases ("web search engines", "联网搜索功能"), English and Chinese; questions the page already answers stay local; linear cost on 1 MB inputs |
 | `node scripts/test-request-keep-alive.mjs` | ARCH-01: immediate heartbeat, shared reference holds, serialized calls, retry after failure, and idempotent release |
 | `node scripts/test-stop-streaming.mjs` | B-02: STOP aborts an already-started stream (`fetchWithHeadersTimeout` + `readSse`), and timeout paths that must not change |
 | `node scripts/test-translate-replay.mjs` | B-03: replayed single-batch translation keeps trailing static lines |

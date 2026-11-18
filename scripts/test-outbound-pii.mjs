@@ -449,6 +449,88 @@ tavilyReply = () => new Response(JSON.stringify({ results: [{ url: "https://e.co
   check("auto research ON by default: implicit preflight queries Tavily", r.sent.some((s) => s.url.includes("tavily")));
 }
 
+// --- Web-research trigger: what the user said, and what the page answers ---
+// Code review #2. The "explicit search" test matched WORDS, not intent: a
+// refusal ("Don't search the web") or a topic ("What does the author say about
+// web research?") counted as an order, which skips the opt-out setting and
+// restores real names for the Tavily query; and with the setting ON the
+// automatic lookup ignored a refusal and fired for questions the page already
+// answers. (The phrase tables live in test-research-trigger.mjs; these checks
+// drive the real ASK handler.)
+{
+  const tavily = (res) => res.sent.filter((s) => s.url.includes("tavily"));
+  const tavBody = (res) => tavily(res).map((s) => s.body).join(" ");
+  const modelBody = (res) => res.sent.filter((s) => !s.url.includes("tavily")).map((s) => s.body).join(" ");
+  const asked = (question, extra = {}) => ask({ question, pageContext: null, includePageContext: false, ...extra });
+
+  // 1. Opt-out setting OFF: a Tavily call can only come from an explicit order.
+  store.autoWebResearchEnabled = false;
+  for (const q of [
+    "Don't search the web, just answer from what you know",
+    "Please do not look it up online",
+    "不要联网搜索，直接回答",
+    "Which web search engines does the article mention?",
+    "What does the author say about web research?",
+    "Summarize the section about online research methods",
+    "联网搜索功能是怎么实现的？",
+    "文章里提到了哪些网上搜索技巧？",
+  ]) {
+    r = await asked(q);
+    check(`opt-out OFF, not an order: ${q.slice(0, 50)}`, tavily(r).length === 0 && r.final.type === "DONE", `tavily calls: ${tavily(r).length}`);
+  }
+  for (const q of [
+    "Please search the internet for reviews of the Pixel 9",
+    "Can you look it up online for me?",
+    "Could you please do a quick web search for this error message?",
+    "帮我上网查一下最新的iPhone价格",
+    "你能不能联网搜索一下这个报错",
+  ]) {
+    r = await asked(q);
+    check(`opt-out OFF, a genuine order still goes to Tavily: ${q.slice(0, 44)}`, tavily(r).length > 0);
+  }
+  delete store.autoWebResearchEnabled;
+
+  // 2. Setting ON (default), no page: the automatic lookup fires for any
+  // question the page cannot answer - unless the user said not to search.
+  for (const q of [
+    "Don't search the web: what is the capital of Portugal?",
+    "Without searching the internet, what is the capital of Portugal?",
+    "不要联网搜索，葡萄牙的首都是哪里？",
+  ]) {
+    r = await asked(q);
+    check(`a refusal keeps the question off Tavily: ${q.slice(0, 44)}`, tavily(r).length === 0 && r.final.type === "DONE", `tavily calls: ${tavily(r).length}`);
+  }
+  r = await asked("What is the capital of Portugal?");
+  check("control: the same question without the refusal is looked up automatically", tavily(r).length > 0);
+
+  // 3. A topic phrase must not pass for an order: that match restored the name.
+  r = await asked("My name is Jane Doe. Summarize the section about online research methods.");
+  check("a topic phrase is not an order: nothing, and so no name, goes to Tavily", tavily(r).length === 0 && !tavBody(r).includes("Jane Doe"), tavBody(r).slice(0, 120));
+  check("... and the model still gets the request, name redacted", r.final.type === "DONE" && !modelBody(r).includes("Jane Doe") && modelBody(r).includes("[NAME#1]"));
+
+  // 4. Setting ON, a page that answers the question: no lookup. (A page
+  // question in Chinese used to search about twice as often as in English:
+  // "运费能退吗" counted 费能 and 能退 as missing words.)
+  const page = (text) => ({ tabId: 1, title: "Banana bread", url: "https://example.com/banana", text });
+  const en = page("Classic banana bread: mix 3 ripe bananas with 1/3 cup melted butter, 3/4 cup sugar, 1 egg and 1 teaspoon baking soda. Add 1 1/2 cups flour and bake at 350F for 60 minutes in a greased loaf pan.");
+  const zh = page("香蕉面包做法：三根熟香蕉捣成泥，加入三分之一杯融化的黄油、四分之三杯糖、一个鸡蛋、一茶匙香草精和一茶匙小苏打，再加一杯半面粉，倒入涂油的面包模具，350华氏度烘烤60分钟。");
+  for (const [label, pc, q] of [
+    ["en", en, "How many bananas do I need?"],
+    ["zh", zh, "需要烤多长时间？"],
+    ["zh", zh, "要用几根香蕉？"],
+  ]) {
+    r = await asked(q, { pageContext: pc, includePageContext: true });
+    check(`the page answers it, no automatic lookup [${label}]: ${q}`, tavily(r).length === 0 && r.final.type === "DONE", `tavily calls: ${tavily(r).length}`);
+  }
+  for (const [label, pc, q] of [
+    ["en", en, "What is the price of ripe bananas at Walmart today?"],
+    ["zh", zh, "今天沃尔玛的香蕉多少钱一斤？"],
+  ]) {
+    r = await asked(q, { pageContext: pc, includePageContext: true });
+    check(`control: the page cannot answer it, so it is looked up [${label}]: ${q}`, tavily(r).length > 0);
+  }
+}
+
 // --- Web-search evidence rides inside an UNTRUSTED boundary (v1.10.129) ----
 // Tavily results are third-party content (SEO poisoning): they must sit in
 // the same random-boundary quarantine as page text, never beside the user's

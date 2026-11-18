@@ -91,6 +91,7 @@ AI-Assistant/
     ├── test-pii-restore.mjs
     ├── test-providers-messages.mjs
     ├── test-request-keep-alive.mjs
+    ├── test-research-trigger.mjs
     ├── test-settings-crypto.mjs
     ├── test-settings-import.mjs
     ├── test-settings-storage-keys.mjs

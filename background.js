@@ -700,12 +700,12 @@ chrome.runtime.onConnect.addListener((port) => {
         // (quick actions Summarize/Translate/Explain/Key Points and their
         // context-menu equivalents): those operate purely on the supplied
         // page or selection text and never need web evidence, so Tavily is
-        // skipped entirely. Without this flag their fixed instruction prompts
-        // ("Summarize the CURRENT webpage...") match the "current" keyword in
-        // ONLINE_RESEARCH_REQUEST_PATTERN (context-menu text actions have no
-        // page context either, so the research preflight returned true
-        // unconditionally) and fired a Tavily search on every click - and
-        // failed outright for users without a Tavily API key.
+        // skipped entirely. Without this flag the research preflight judged
+        // their fixed instruction prompts ("Summarize the CURRENT webpage...")
+        // as if they were questions (context-menu text actions have no page
+        // context either, so it returned true unconditionally) and fired a
+        // Tavily search on every click - and failed outright for users
+        // without a Tavily API key.
         const research = await runTavilyQuestionResearch({
           question,
           pageContext: requestPageContext,
@@ -980,21 +980,216 @@ async function tavilySearchRequest(query, apiKey, signal, topic, maxResults) {
 
 const ONLINE_RESEARCH_MAX_RESULTS = 6;
 const ONLINE_RESEARCH_MAX_EVIDENCE_CHARS = 18000;
-// Explicit requests to go online. Only a clear instruction to search the web
-// counts ("search the web", "look it up online", "联网搜索", "上网查"). Words
-// such as latest / current / official / search / research are ordinary page
-// vocabulary ("Where is the search box?", "What does the latest changelog
-// entry say?") and are NOT explicit; the content-based check in
-// onlineResearchTrigger handles them as an implicit (optional) lookup.
-// Compound nouns are excluded on purpose: "Search this web PAGE for the
-// pricing section" and "Check the web page for spelling errors" are about the
-// CURRENT page, not the web, so "web/online" directly followed by page/site/
-// ... never counts, and the polysemous "check" verb is not a trigger at all.
-// Bare 联网 / 在线查询 are connectivity vocabulary ("这个设备怎么联网",
-// "路由器联网失败是什么意思"): 联网 must pair with a search verb (联网搜索/
-// 联网查), and 在线查询 is not a trigger.
-const ONLINE_RESEARCH_REQUEST_PATTERN =
-  /\b(?:search|google|browse|look\s*(?:it|this|that|them)?\s*up|find)\b[^.?!\n]{0,24}\b(?:the\s+)?(?:web|internet|online)\b(?!\s*(?:page|site|browser|store|form|link|address|server)\b)|\b(?:search|look\s*up|find)\s+online\b|\bonline\s+(?:search|research|lookup)\b|\bweb\s+(?:search|research)\b|联网(?:搜|查|找|检索)|上网(?:查|搜|找|检索)|网上(?:查|搜|找|搜索|检索)|在线(?:搜索|检索)/i;
+// What the user said about searching the web: an instruction to do it, a refusal
+// to do it, or nothing at all. An instruction is "search the web for ...", "look
+// it up online", "can you google that on the internet", "联网搜索...", "帮我上网查一下...";
+// a refusal is "Don't search the web", "no need to look it up online", "不要联网搜索".
+// The WORDS are ordinary vocabulary: "Which web search engines does the article
+// mention?", "Find all the online stores on this page", "联网搜索功能是怎么实现的？",
+// "How do I search the web safely?". Matching words alone misfired in both
+// directions, and an explicit request is the expensive kind to get wrong: it
+// skips the "Automatically search the web" opt-out and restores real names for
+// the Tavily query. A false positive sent out a question nobody asked to search,
+// and a refusal was searched anyway.
+//
+// So the SHAPE is matched, and when it is unclear the answer is "nothing" (the
+// implicit page-coverage check below still researches what the page cannot
+// answer, and it honours the opt-out):
+//   1. The search verb starts its clause, or follows only request framing
+//      ("please", "can you", "go ahead and", "帮我", "你能"). Framing is a
+//      whitelist on purpose: a question word ("how do I", "怎么") or a subject
+//      ("the article explains how to") in front rules the instruction out.
+//      Likewise a refusal is a negation ("don't", "no need to", "不要", "别") in
+//      front of the verb, with nothing else in between.
+//   2. The web is the PLACE searched ("search the web", "look it up online",
+//      "find X on the internet"), not a noun inside the object, so what follows
+//      it must not extend it into a compound ("web page", "online stores",
+//      "internet archive", "联网搜索功能").
+//   3. Verb and place form one unit: no quote, bracket, conjunction or negation
+//      between them.
+// Noun forms ("do a web search for ...", "run an online search") count only after
+// an action verb, for the same reason.
+const EXPLICIT_CLAUSE_BREAK_RE = /[.?!;:,\n。！？；：，、]/u;
+const EXPLICIT_COORDINATOR_RE =
+  /\b(?:and then|and|then|also|but|so|afterwards|after that|next|finally)\b|然后|接着|随后|之后|并且|而且|并|同时|另外|顺便|顺带|再|以及/u;
+
+// The words that may stand between the start of a clause and a search verb.
+//   framing  - may begin a request                  "please", "can you", "帮我", "你能"
+//   lead     - may precede a negation               "i" in "i don't want you to", "我不想"
+//   negation - turns the verb into a refusal        "don't", "no need to", "不要", "别"
+//   after    - may follow a negation                "you" and "to" in "don't want you to", "再"
+const PREFIX_TOKENS = [];
+const addPrefixTokens = (kind, patterns, tail = "(?![\\p{L}'])") => {
+  for (const p of patterns) PREFIX_TOKENS.push({ kind, re: new RegExp(`(?:${p})${tail}`, 'uy') });
+};
+addPrefixTokens('framing', [
+  'please', 'pls', 'plz', 'kindly', 'just', 'now', 'hey', 'hi', 'hello', 'ok', 'okay',
+  'go ahead', 'go', 'do', 'try to', 'try', 'feel free to', "let'?s", 'help me(?: to)?',
+  'remember to', 'be sure to', 'make sure (?:you|to)', "don'?t forget to",
+  '(?:can|could|would|will) you',
+  'you (?:can|could|should|must|may|might|will|need to|have to|ought to)',
+  "(?:i|we)(?: (?:want|need|would like|ask|expect)|'d like) you to",
+]);
+addPrefixTokens('lead', ['i', 'we', 'you', "you'?re", 'you are', "there'?s", 'there is']);
+addPrefixTokens('negation', [
+  "don'?t", 'do not', 'never', 'no need to', 'no need for you to', "needn'?t", 'need not',
+  'without', 'avoid', 'stop', 'skip', 'refrain from', "shouldn'?t", 'should not', "mustn'?t",
+  'must not', 'instead of', 'rather than', "let'?s not", "i'?d rather you (?:didn'?t|did not|wouldn'?t)",
+]);
+addPrefixTokens('after', [
+  'to', 'you', 'ever', 'even', 'really', 'actually', 'need', 'have', 'want', 'bother', 'try',
+  'go', 'ahead', 'be', 'allowed', 'supposed', 'required', 'going', 'me',
+]);
+// Chinese tokens have no word boundaries to check.
+addPrefixTokens('framing', [
+  '请', '帮我', '帮忙', '麻烦', '劳驾', '拜托', '烦请', '你', '能不能', '可不可以', '可以', '能否', '能', '要', '得',
+  '需要', '应该', '务必', '一定', '最好', '先', '去', '给我', '替我', '为我', '想让你', '我想', '我要', '我希望你',
+  '我需要你', '希望你', '需要你', '让你', '叫你', '尽量', '尽可能', '直接', '立刻', '立即', '马上', '现在', '赶紧',
+  '好好', '认真', '也', '还', '就', '不妨', '试试', '试着', '尝试', '开始',
+], '');
+addPrefixTokens('lead', ['我', '您'], '');
+addPrefixTokens('negation', [
+  '不要', '别', '勿', '无需', '无须', '不用', '不必', '不需要', '禁止', '没必要', '没有必要', '不想', '不许', '不准',
+  '切勿', '不应该', '不该',
+], '');
+addPrefixTokens('after', ['再', '去', '要', '给我', '帮我', '用', '使用', '进行', '做', '需要', '必要'], '');
+
+// 'request' when `text` (the clause in front of a verb, cut at the last
+// conjunction) is nothing but request framing, 'refusal' when it is a negation
+// with only lead-in and follow-on words around it, null otherwise. Dynamic
+// programming over positions with a bit set of states (1 = framing only, 2 =
+// lead-in words, 4 = negated), so "你能不能" parses as 你 + 能不能 whichever token is
+// longest, and nothing can backtrack exponentially on a long run of framing words.
+function classifyPrefix(text) {
+  const s = String(text).trim();
+  if (!s) return 'request';
+  if (s.length > 60) return null; // no request framing or refusal is this long
+  const reach = new Array(s.length + 1).fill(0);
+  reach[0] = 1;
+  for (let i = 0; i < s.length; i++) {
+    const states = reach[i];
+    if (!states) continue;
+    if (/[\s-]/u.test(s[i])) { reach[i + 1] |= states; continue; }
+    for (const { kind, re } of PREFIX_TOKENS) {
+      re.lastIndex = i;
+      const m = re.exec(s);
+      if (!m) continue;
+      const to = kind === 'framing' ? states
+        : kind === 'after' ? states & 4
+          : states & 3 ? (kind === 'lead' ? 2 : 4) : 0;
+      if (to) reach[i + m[0].length] |= to;
+    }
+  }
+  const end = reach[s.length];
+  return end & 1 ? 'request' : end & 4 ? 'refusal' : null;
+}
+
+// The clause text in front of `index` (up to 100 characters back), cut at the
+// last punctuation mark, and then at the last conjunction.
+function framingBefore(query, index) {
+  const clause = query.slice(Math.max(0, index - 100), index).split(EXPLICIT_CLAUSE_BREAK_RE).pop();
+  return { clause, framing: clause.split(EXPLICIT_COORDINATOR_RE).pop() };
+}
+
+const EXPLICIT_PLACE_RE = /(?:\b(on|in|over|across|through|via|using|from)\s+)?(?:\bthe\s+)?\b(web|internet)\b|\bonline\b/gu;
+// A refusal may also use the -ing form ("without searching the web").
+const EXPLICIT_VERB_RE =
+  /\b(?:search|google|browse|find|use|look\s*(?:(?:it|this|that|them|these|those)\s*)?up)\b|\b(?<ing>searching|googling|browsing|finding|using|looking\s*(?:(?:it|this|that|them|these|those)\s*)?up)\b/gu;
+const EXPLICIT_GAP_BLOCK_RE = /["“”`()[\]{}]|(?:^|\s)['‘]|\b(?:and|then|but|or|so|not|never|no|without)\b|n't\b/u;
+const EXPLICIT_NOUN_REQUEST_RE =
+  /(?:\b(?<verb>do|run|perform|conduct|make|use|try|start|launch)\s+(?:(?:a|an|the|some|your|this|that|a\s+bit\s+of|a\s+little)\s+)?(?:(?:quick|fresh|new|live|real-?time|proper|full|deep|thorough|basic|simple)\s+)?)?\b(?:web|online|internet)\s+(?:search|research|lookup)\b/gu;
+// What may follow the place: the end, punctuation, CJK text, a dash or bracket
+// after a space, or a function word that continues the instruction ("for ...",
+// "and ...", "to ..."). Anything else is a noun the place modifies ("web page",
+// "online stores", "web-based").
+const EXPLICIT_FOLLOW_RE =
+  /(?:\s*(?:$|[.,;:!?)\]…]|[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])|\s+(?:[(\-–—]|(?:for|about|on|to|and|then|but|before|after|first|please|pls|now|again|too|also|if|whether|that|which|what|who|when|where|how|why|in|with|using|via|from|by|at|as|so|because|since|until|while|regarding|concerning|just|only|right|quickly|thanks)(?![\p{L}\p{N}])))/uy;
+// A bare "web search: ..." / "web search for ..." with no verb is a command only
+// in this shape.
+const EXPLICIT_COMMAND_FOLLOW_RE = /\s*:|\s+[-–—]\s|\s+for(?![\p{L}\p{N}])/uy;
+
+function matchesAt(re, query, index) {
+  re.lastIndex = index;
+  return re.test(query);
+}
+
+// 'request' | 'refusal' | null for what `query` says about searching the web in
+// English. A request anywhere wins over a refusal.
+function englishSearchStance(query) {
+  let stance = null;
+  let seen = 0;
+  const note = (kind) => { if (kind === 'request') return true; if (kind) stance = kind; return false; };
+  for (const place of query.matchAll(EXPLICIT_PLACE_RE)) {
+    if (++seen > 1000) break;
+    if (!matchesAt(EXPLICIT_FOLLOW_RE, query, place.index + place[0].length)) continue;
+    const { clause } = framingBefore(query, place.index);
+    let verb = null;
+    for (const v of clause.matchAll(EXPLICIT_VERB_RE)) verb = v;
+    if (!verb) continue;
+    const gap = clause.slice(verb.index + verb[0].length);
+    const directObject = place[2] !== undefined && place[1] === undefined;
+    if (directObject) {
+      if (gap.trim()) continue; // "search the web": nothing between verb and place
+    } else if (verb[0] === 'use' || verb.groups.ing === 'using' || gap.length > 40 || EXPLICIT_GAP_BLOCK_RE.test(gap)) {
+      continue;
+    }
+    const kind = classifyPrefix(clause.slice(0, verb.index).split(EXPLICIT_COORDINATOR_RE).pop());
+    if (verb.groups.ing && kind !== 'refusal') continue; // "searching the web" is not an instruction
+    if (note(kind)) return 'request';
+  }
+  seen = 0;
+  for (const m of query.matchAll(EXPLICIT_NOUN_REQUEST_RE)) {
+    if (++seen > 1000) break;
+    const follow = m.groups.verb ? EXPLICIT_FOLLOW_RE : EXPLICIT_COMMAND_FOLLOW_RE;
+    if (!matchesAt(follow, query, m.index + m[0].length)) continue;
+    if (note(classifyPrefix(framingBefore(query, m.index).framing))) return 'request';
+  }
+  return stance;
+}
+
+const EXPLICIT_VP_ZH_RE = /(?:[在到去从]?网上|联网|上网)(?:搜索|搜寻|检索|查询|查找|搜|查|找)|在线(?:搜索|检索)/gu;
+// "不要联网", "别上网": a refusal needs no verb after the place.
+const EXPLICIT_BARE_ZH_RE = /(?:联网|上网)(?![搜查找检])/gu;
+// "联网搜索功能", "网上搜索技巧": the search is a noun here.
+const EXPLICIT_NOUN_HEAD_ZH_RE =
+  /^(?:功能|技巧|方法|引擎|工具|服务|模式|设置|插件|能力|权限|接口|原理|教程|方式|习惯|行为|记录|历史|软件|平台|网站|选项|开关|按钮|策略|机制|算法|语法|命令|指令|技术|特性|需求|场景|案例|流程|步骤|过程|系统|数据库|结果|api)/u;
+// With nothing in front of it, "网上找工作靠谱吗" is a topic, not an order; an
+// interrogative or evaluative word later in the clause gives that away.
+const EXPLICIT_TOPIC_TAIL_ZH_RE =
+  /吗|呢|是什么|为什么|怎么|如何|怎样|哪些|哪个|是否|有没有|是不是|会不会|能不能|好不好|行不行|靠谱|区别|优缺点|好处|坏处|风险|原理|方法|技巧/u;
+
+function chineseSearchStance(query) {
+  let stance = null;
+  let seen = 0;
+  for (const m of query.matchAll(EXPLICIT_VP_ZH_RE)) {
+    if (++seen > 1000) break;
+    const end = m.index + m[0].length;
+    if (EXPLICIT_NOUN_HEAD_ZH_RE.test(query.slice(end, end + 4))) continue;
+    const { framing } = framingBefore(query, m.index);
+    const kind = classifyPrefix(framing);
+    if (kind === 'request') {
+      if (!framing.trim() && EXPLICIT_TOPIC_TAIL_ZH_RE.test(query.slice(end, end + 60).split(EXPLICIT_CLAUSE_BREAK_RE)[0])) continue;
+      return 'request';
+    }
+    if (kind) stance = kind;
+  }
+  seen = 0;
+  for (const m of query.matchAll(EXPLICIT_BARE_ZH_RE)) {
+    if (++seen > 1000) break;
+    if (classifyPrefix(framingBefore(query, m.index).framing) === 'refusal') stance = 'refusal';
+  }
+  return stance;
+}
+
+// `query` is the NFKC-normalised, lower-cased question. Returns 'request' when the
+// user told the assistant to search the web, 'refusal' when they told it not to,
+// and null when they said nothing about it.
+function searchStance(query) {
+  const english = englishSearchStance(query);
+  if (english === 'request') return 'request';
+  const chinese = chineseSearchStance(query);
+  return chinese === 'request' ? 'request' : english || chinese;
+}
 
 // Words that carry no topic information. Ordinary question phrasing ("what does
 // it say about ...") must not be counted as "not covered by the page", which
@@ -1014,26 +1209,69 @@ const ONLINE_RESEARCH_STOP_WORDS = new Set([
   'brief', 'briefly', 'concise', 'content', 'current', 'detail', 'detailed', 'details',
   'help', 'info', 'information', 'like', 'make', 'need', 'sense', 'short', 'simple',
   'simply', 'site', 'terms', 'thing', 'things', 'use', 'using', 'want', 'webpage', 'website',
+  // Question phrasing: "How many bananas do I need?" has one topic word, not
+  // three, and "How long ..." does not look for the word "long" on the page.
+  'am', 'another', 'because', 'being', 'between', 'both', 'during', 'each', 'every', 'had',
+  'having', 'just', 'long', 'many', 'may', 'might', 'much', 'must', 'off', 'often', 'only',
+  'other', 'out', 'over', 'own', 'per', 'quite', 'really', 'same', 'shall', 'since', 'such',
+  'too', 'under', 'until', 'up', 'very', 'way', 'ways', 'whether', 'while', 'whom', 'whose',
+  'write', 'written',
+  // The page itself, or the attribute being asked for. A page that states a
+  // purpose, a cause or the steps seldom contains the word "purpose", "cause"
+  // or "steps" ("What is the purpose of the cut?" vs "...to support the real
+  // economy"), so these never count as missing topic words.
+  'advantage', 'advantages', 'author', 'authors', 'benefit', 'benefits', 'cause', 'causes',
+  'chapter', 'cover', 'covered', 'covers', 'definition', 'difference', 'differences',
+  'disadvantage', 'disadvantages', 'discuss', 'discussed', 'discusses', 'effect', 'effects',
+  'example', 'examples', 'feature', 'features', 'happen', 'happens', 'mean', 'meaning',
+  'means', 'mention', 'mentioned', 'mentions', 'method', 'methods', 'paragraph',
+  'paragraphs', 'passage', 'purpose', 'reason', 'reasons', 'section', 'sections', 'step',
+  'steps', 'talk', 'talks', 'tutorial',
 ]);
 
 // CJK text has no spaces between words, so a whole sentence used to be a single
 // "term" that never appeared verbatim on a page - every Chinese/Japanese
 // question therefore triggered web research. These filler strings are removed
 // and what remains is compared as overlapping two-character grams instead.
+//
+// A filler word between two content words costs a missing gram on BOTH sides of
+// it ("运费能退吗" -> 费能, 能退), which made a Chinese question trigger a search
+// about twice as often as the same English one. So the closed classes -
+// question words, measure words, particles, auxiliaries - are removed, and so
+// are the generic nouns for the thing being asked (作用, 区别, 原因, ...): a
+// page that states the reason seldom contains the word "reason".
 const CJK_RUN_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu;
-const CJK_FILLER_RE = new RegExp(
-  [
-    '请问', '什么', '如何', '是否', '怎么', '怎样', '为什么', '可以', '能否', '这个', '那个',
-    '文章', '页面', '网页', '内容', '主要', '观点', '总结', '解释', '介绍', '说明', '告诉', '哪些',
-    'について', 'ください', '教えて', 'ですか', 'です', 'ます', 'とは', 'これ', 'それ',
-    'ページ', '記事', '内容', '要約', '説明',
-    '有', '和', '的', '了', '吗', '呢', '吧', '啊', '请', '这', '那', '是', '在', '我', '你', '他', '她', '它',
-    'は', 'が', 'を', 'に', 'で', 'と', 'も', 'の', 'か',
-  ]
-    .sort((a, b) => b.length - a.length)
-    .join('|'),
-  'gu'
-);
+const CJK_FILLERS = [
+  '请问', '什么', '如何', '是否', '怎么', '怎样', '为什么', '可以', '能否', '这个', '那个',
+  '文章', '页面', '网页', '内容', '主要', '观点', '总结', '解释', '介绍', '说明', '告诉', '哪些',
+  'について', 'ください', '教えて', 'ですか', 'です', 'ます', 'とは', 'これ', 'それ',
+  'ページ', '記事', '内容', '要約', '説明',
+  '有', '和', '的', '了', '吗', '呢', '吧', '啊', '请', '这', '那', '是', '在', '我', '你', '他', '她', '它',
+  'は', 'が', 'を', 'に', 'で', 'と', 'も', 'の', 'か',
+  // Question words, measure phrases, time words.
+  '什么时候', '多长时间', '怎么样', '怎么办', '什么样', '为何', '何时', '何处', '多少', '多久', '多长',
+  '多大', '多高', '多远', '多快', '时候', '时间', '是不是', '有没有', '会不会', '能不能', '可不可以',
+  '好不好', '行不行', '对不对', '哪个', '哪种', '哪里', '哪儿', '哪几', '哪天', '哪年', '几个', '几种',
+  '几步', '几次', '几天', '几年', '几根', '几条', '几位', '几只', '几件', '几岁',
+  // Words about the page itself, and discourse glue.
+  '这篇', '本文', '该文', '此文', '这款', '这种', '这次', '这些', '那些', '那种', '那次', '这里', '那里',
+  '作者', '文中', '文里', '里面', '其中', '提到', '提及', '讲了', '说了', '谈到', '涉及', '一下', '一些',
+  '一个', '一种', '有关', '关于', '对于', '针对', '已经', '正在', '应该', '需要', '必须', '可能', '如果',
+  '但是', '因为', '所以', '还是', '或者', '以及', '并且', '而且', '之后', '之前', '以后', '以前', '比较',
+  '一般', '通常', '具体', '大概', '要用', '想要', '使用', '用来',
+  // The attribute being asked for.
+  '作用', '意思', '含义', '原因', '目的', '区别', '特点', '好处', '坏处', '优点', '缺点', '步骤', '方法',
+  '办法',
+];
+// Single characters that are particles and auxiliaries in a Chinese question but
+// part of content words in Japanese (会社, 必要, 能力, 被害), so only runs without
+// kana or hangul lose them.
+const ZH_PARTICLE_FILLERS = ['要', '用', '会', '能', '对', '把', '被', '让', '给', '很', '都', '也', '就', '还'];
+const KANA_OR_HANGUL_RE = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const fillerPattern = (words) =>
+  new RegExp([...new Set(words)].sort((a, b) => b.length - a.length).join('|'), 'gu');
+const CJK_FILLER_RE = fillerPattern(CJK_FILLERS);
+const ZH_FILLER_RE = fillerPattern([...CJK_FILLERS, ...ZH_PARTICLE_FILLERS]);
 
 // Splits a normalized question into comparable terms: whole words for
 // space-delimited scripts, two-character grams for CJK runs.
@@ -1044,7 +1282,8 @@ function researchTerms(query) {
     if (!ONLINE_RESEARCH_STOP_WORDS.has(word)) terms.add(word);
   }
   for (const run of query.match(CJK_RUN_RE) || []) {
-    for (const piece of run.replace(CJK_FILLER_RE, ' ').split(/\s+/)) {
+    const filler = KANA_OR_HANGUL_RE.test(run) ? CJK_FILLER_RE : ZH_FILLER_RE;
+    for (const piece of run.replace(filler, ' ').split(/\s+/)) {
       for (let i = 0; i + 2 <= piece.length; i++) terms.add(piece.slice(i, i + 2));
     }
   }
@@ -1081,16 +1320,22 @@ function splitResearchQuestion(question, attachments) {
 // cannot be safely inspected and retried after it has already been shown, so
 // this preflight is the reliable point to make the automatic decision.
 //
-// Returns "explicit" when the user asked for fresh/online information,
+// Returns "explicit" when the user told the assistant to search the web,
 // "implicit" when the page (plus any attachment) simply does not cover the
-// question, or null when no research is needed. The distinction matters when
-// no Tavily key is configured: an explicit request shows a NOTICE that research
-// was skipped, while an implicit (automatic) lookup is skipped silently. Either
-// way the model is still called.
+// question, or null when no research is needed - which includes the user
+// having said NOT to search ("Don't search the web", "不要联网搜索"): an
+// automatic lookup must not send out a question its author kept offline.
+// The explicit/implicit distinction matters when no Tavily key is configured:
+// an explicit request shows a NOTICE that research was skipped, while an
+// implicit (automatic) lookup is skipped silently. Either way the model is
+// still called.
 function onlineResearchTrigger(question, pageContext, attachmentText = '') {
   const query = String(question || '').normalize('NFKC').toLowerCase();
   if (query.length < 3) return null;
-  if (ONLINE_RESEARCH_REQUEST_PATTERN.test(query)) return 'explicit';
+  // What the user said about searching the web beats any guess about the page.
+  const stance = searchStance(query);
+  if (stance === 'request') return 'explicit';
+  if (stance === 'refusal') return null;
 
   const pageText = `${pageContext?.text || ''}\n${attachmentText}`.normalize('NFKC').toLowerCase().trim();
 
