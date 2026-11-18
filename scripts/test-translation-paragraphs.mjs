@@ -421,6 +421,135 @@ assert.deepEqual(browserPreferred, { text: "One\n\nTwo", format: "text", truncat
   assert.equal(dropped.missing, 1, "a reply that dropped the inline code is not accepted");
 }
 
+// ---- an echo in the TARGET language's own script is not a miss (#5) -----------
+// A correct model leaves a line alone when it is already in the language being
+// translated INTO: a Chinese line on a page translated into Chinese, a kanji
+// heading in a translation into Japanese. mayStayUntranslated only waved
+// Latin-script text through, so every such echo counted as untranslated. On a
+// bilingual page that fired the single-batch replay (a whole second request,
+// whose echo was judged missing again) and a false "N lines were not
+// translated" notice for a translation that was complete. The side panel now
+// sends the target ("zh-CN", "ja", ...) and LineTranslator accepts an echo that
+// is written in that language's script. Everything else still counts as a miss,
+// and so does everything when no target is given.
+{
+  // The model echoes exactly what it was sent; `options` is the optional third
+  // constructor argument.
+  const echoOf = (line, options) => {
+    const p = prepareLineTranslation(line);
+    assert.ok(p, `${JSON.stringify(line)} is offered to the model`);
+    let out = "";
+    const lt = new LineTranslator(p, (d) => { out += d; }, options);
+    lt.push(`[1] ${p.lines[0].safe}`);
+    lt.finish();
+    assert.equal(out, line, `${JSON.stringify(line)}: the original line is written unchanged either way`);
+    return lt;
+  };
+
+  const alreadyInTarget = {
+    "zh-CN": [
+      "你好世界",
+      "欢迎来到产品页面。",
+      "使用 React 18 构建",                                       // a short Latin name inside a Chinese sentence
+      "我们使用 Visual Studio Code 和 GitHub Copilot 开发",        // several of them: each phrase is short
+      "使用 Visual Studio Code、GitHub Copilot、Docker Desktop 和 Kubernetes Dashboard 进行开发", // a list: judged one name at a time
+      "详见 README.",
+      "运行 `npm install` 安装依赖",                              // a protected span inside
+      "他说 Hello world 然后走了",
+    ],
+    "zh-TW": ["請仔細閱讀使用說明。", "歡迎使用 GitHub"],
+    "zh-Hant": ["請仔細閱讀使用說明。"],                           // any zh-* code names Chinese
+    "ja": [
+      "こんにちは世界",
+      "お問い合わせ",
+      "東京",                                                    // a bare kanji label
+      "個人情報保護方針",                                          // a typical footer link: 8 kanji
+      "Visual Studio Code をインストール",
+    ],
+  };
+  for (const [targetLanguage, lines] of Object.entries(alreadyInTarget)) {
+    for (const line of lines) {
+      const lt = echoOf(line, { targetLanguage });
+      assert.equal(lt.missing, 0, `${targetLanguage} ${JSON.stringify(line)}: already in the target language, so not a missing line`);
+      assert.equal(lt.translated, 1, `${targetLanguage} ${JSON.stringify(line)}: counted as done`);
+    }
+  }
+
+  // Not already in the target language: an echo is still a miss.
+  const stillMissingWithTarget = {
+    "zh-CN": [
+      "Bonjour tout le monde ici",                               // Latin prose
+      "Welcome to our office today",
+      "Click here",
+      "こんにちは世界",                                            // kana: Japanese, not Chinese
+      "お問い合わせ",
+      "안녕하세요 世界",                                           // Hangul: Korean
+      "Привет, мир!",                                            // another script entirely
+      "Visit our 北京 office today for a free demo",              // a Latin run of six words: prose
+      "请阅读 Terms of Service apply here",                       // ... five words
+      "错误信息：Cannot read properties of undefined",             // an English fragment after a full-width colon
+    ],
+    "zh-TW": ["こんにちは世界", "Welcome to our office today"],
+    "ja": [
+      "欢迎来到产品页面，请仔细阅读使用说明。",                        // kanji only and long: Chinese, not Japanese
+      "안녕하세요",
+      "Привет, мир!",
+      "Welcome to our office today",
+    ],
+  };
+  for (const [targetLanguage, lines] of Object.entries(stillMissingWithTarget)) {
+    for (const line of lines) {
+      const lt = echoOf(line, { targetLanguage });
+      assert.equal(lt.missing, 1, `${targetLanguage} ${JSON.stringify(line)}: not in the target language, so an echo is still a missing line`);
+      assert.equal(lt.translated, 0, `${targetLanguage} ${JSON.stringify(line)}: not counted as done`);
+    }
+  }
+
+  // No target, a Latin-script target, an unknown one or a malformed one: the
+  // behaviour is exactly what it was before the target existed.
+  const noRecognisedTarget = [
+    undefined, {}, { targetLanguage: undefined }, { targetLanguage: null }, { targetLanguage: "" },
+    { targetLanguage: "en" }, { targetLanguage: "fr" }, { targetLanguage: "es" }, { targetLanguage: "de" },
+    { targetLanguage: "xx" }, { targetLanguage: "zh-CN\n[1] x" }, { targetLanguage: "zh CN" },
+    { targetLanguage: "z" }, { targetLanguage: 42 }, { targetLanguage: {} }, { targetLanguage: ["zh-CN"] },
+    { targetLanguage: `zh-${"x".repeat(100)}` },
+  ];
+  for (const options of noRecognisedTarget) {
+    const label = JSON.stringify(options) ?? "no options";
+    assert.equal(echoOf("你好世界", options).missing, 1, `${label}: a Chinese echo is a missing line without a recognised script target`);
+    assert.equal(echoOf("こんにちは世界", options).missing, 1, `${label}: ... and so is a Japanese one`);
+    assert.equal(echoOf("GitHub", options).missing, 0, `${label}: a name still stays as it is`);
+    assert.equal(echoOf("Hello world", options).missing, 1, `${label}: a sentence still counts as missing`);
+  }
+  // null as the whole options argument is as good as none.
+  assert.equal(echoOf("你好世界", null).missing, 1, "null options: a Chinese echo is a missing line");
+
+  // A whole bilingual page into Chinese: the model translates the English lines
+  // and leaves the Chinese ones alone. With the target nothing is missing; without
+  // it the two Chinese lines are (the old behaviour, now only the default).
+  const bilingual = prepareLineTranslation(
+    ["Welcome to the product page.", "欢迎来到产品页面。", "Please read the manual carefully.", "请仔细阅读使用说明。", "Contact us for support."].join("\n"),
+  );
+  const reply = bilingual.lines
+    .map((l, i) => (l.translatable ? `[${i + 1}] ${/\p{Script=Han}/u.test(l.safe) ? l.safe : `（译）${l.safe}`}` : null))
+    .filter(Boolean)
+    .join("\n");
+  for (const [options, expectedMissing] of [[{ targetLanguage: "zh-CN" }, 0], [{ targetLanguage: "en" }, 2], [undefined, 2]]) {
+    let out = "";
+    const lt = new LineTranslator(bilingual, (d) => { out += d; }, options);
+    lt.push(reply);
+    lt.finish();
+    assert.equal(lt.expected, 5);
+    assert.equal(lt.missing, expectedMissing, `${JSON.stringify(options)}: bilingual page, missing lines`);
+    assert.equal(lt.translated, 5 - expectedMissing);
+    assert.equal(
+      out,
+      ["（译）Welcome to the product page.", "欢迎来到产品页面。", "（译）Please read the manual carefully.", "请仔细阅读使用说明。", "（译）Contact us for support."].join("\n"),
+      `${JSON.stringify(options)}: the text written is the same whichever way the lines are counted`,
+    );
+  }
+}
+
 console.log("OK: translated paragraphs, trailing whitespace, and selection-source precedence are preserved.");
 
 // ---------- the length cap cuts between code points (round-10 P3) ----------

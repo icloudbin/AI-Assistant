@@ -129,5 +129,28 @@ with sync_playwright() as p:
     check("exception during prepare: draft text is restored", draft == "will this lock the panel?", repr(draft))
     check("exception during prepare: nothing half-sent", sent_failed == 0)
     check("panel still works afterwards", bool(a) and a[0]["question"].startswith("second try"), json.dumps(a)[:200])
+
+    # 5. A translation request names the language the text is translated INTO (the "Preferred
+    #    Translation Language"), so the worker can tell a line the model left alone because it
+    #    is already in that language from a line it skipped. Other requests name none.
+    def t7(page):
+        out = {}
+        for code in ["zh-CN", "zh-TW", "ja", "fr"]:
+            page.evaluate("(c)=>{ window.__store.preferredTranslationLanguage = c; }", code)
+            out[code] = quick(page, "#quickTranslateBtn")
+        page.evaluate("delete window.__store.preferredTranslationLanguage")
+        out["default"] = quick(page, "#quickTranslateBtn")
+        page.evaluate("(c)=>{ window.__store.preferredTranslationLanguage = c; }", "zh-CN")
+        out["ordinary"] = ask(page, "what is this?")
+        out["summarize"] = quick(page, "#quickSummarizeBtn")
+        return out
+    out, errs = run(p, t7)
+    for code in ["zh-CN", "zh-TW", "ja", "fr"]:
+        a = out[code]
+        check(f"Translate ({code} preferred): the request names the target", bool(a) and a[0].get("translateMode") is True and a[0].get("translateTarget") == code, json.dumps(a)[:200])
+    check("Translate (no preference): the target is English, the default", bool(out["default"]) and out["default"][0].get("translateTarget") == "en", json.dumps(out["default"])[:200])
+    check("an ordinary question names no target, whatever the preference", bool(out["ordinary"]) and out["ordinary"][0].get("translateTarget") is None, json.dumps(out["ordinary"])[:200])
+    check("Summarize names no target either", bool(out["summarize"]) and out["summarize"][0].get("translateTarget") is None, json.dumps(out["summarize"])[:200])
+    check("no page errors (translate target)", not errs, str(errs))
 srv.shutdown()
 sys.exit(1 if fails else 0)

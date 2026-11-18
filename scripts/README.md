@@ -10,7 +10,7 @@ None of these are loaded by the extension (they are not referenced from `manifes
 | `node scripts/test-research-trigger.mjs` | Web-research trigger: instructions to search the web vs. refusals ("Don't search the web") and look-alike phrases ("web search engines", "联网搜索功能"), English and Chinese; questions the page already answers stay local; linear cost on 1 MB inputs |
 | `node scripts/test-request-keep-alive.mjs` | ARCH-01: immediate heartbeat, shared reference holds, serialized calls, retry after failure, and idempotent release |
 | `node scripts/test-stop-streaming.mjs` | B-02: STOP aborts an already-started stream (`fetchWithHeadersTimeout` + `readSse`), and timeout paths that must not change |
-| `node scripts/test-translate-replay.mjs` | B-03: replayed single-batch translation keeps trailing static lines |
+| `node scripts/test-translate-replay.mjs` | B-03: replayed single-batch translation keeps trailing static lines; a translation request carries no conversation history; a line the model leaves alone because it is already in the target language (Chinese into Chinese, kanji into Japanese) is a finished line - no replay, no "lines were not translated" notice |
 | `node scripts/test-markdown-heading.mjs` | B-05: heading parser matches the old regex over adversarial short strings and passes performance checks |
 | `node scripts/test-markdown-render.mjs` | Markdown rendering and sanitization regression cases |
 | `node scripts/test-pii-name-perf.mjs` | B-06: PII name rule remains linear and behavior-compatible |
@@ -26,12 +26,12 @@ None of these are loaded by the extension (they are not referenced from `manifes
 | `node scripts/test-history-manager.mjs` | History serialization, migration and quota handling |
 | `node scripts/test-attachment-budget.mjs` | Attachment size and count budgets |
 | `node scripts/test-content-visibility.mjs` | Page content extraction visibility rules |
-| `node scripts/test-translation-paragraphs.mjs` | Translation paragraph and formatting preservation |
+| `node scripts/test-translation-paragraphs.mjs` | Translation paragraph and formatting preservation; which echoed lines count as untranslated (names and commands stay as they are, sentences do not, and a line in the target language's own script is accepted when the target is Chinese or Japanese) |
 | `node scripts/test-providers-messages.mjs` | Provider message construction and untrusted boundaries |
 | `node scripts/test-models.mjs` | Model catalog and model selection behavior |
 | `node scripts/test-openai-compatible.mjs` | OpenAI-compatible SSE parsing, timeouts, cancellation and response limits |
 | `node scripts/test-url-safety.mjs` | Remote image URL and SSRF destination policy |
-| `python scripts/test-sidepanel-context.py` | Side-panel "Read current page" checkbox against stubbed `chrome.*` APIs: checked by default, unchecking is remembered, quick actions still send the page, and a failure while preparing a request does not lock the composer |
+| `python scripts/test-sidepanel-context.py` | Side-panel "Read current page" checkbox against stubbed `chrome.*` APIs: checked by default, unchecking is remembered, quick actions still send the page, a failure while preparing a request does not lock the composer, and a translation request names the Preferred Translation Language as its target |
 
 ## Playwright browser tests (need `playwright` with Chromium; the chat-flow test also needs `openssl`)
 
@@ -39,7 +39,7 @@ They load this folder as an unpacked extension in headless Chromium.
 
 | Command | Covers |
 | --- | --- |
-| `node scripts/e2e-chat-flow.mjs` | B-02 against a real HTTPS server (Stop closes the provider connection), a normal send/receive round trip, and the context-menu translate action (E-04) |
+| `node scripts/e2e-chat-flow.mjs` | B-02 against a real HTTPS server (Stop closes the provider connection), a normal send/receive round trip, and the context-menu translate action (E-04), and a line already in the preferred translation language is not reported as "not translated" |
 | `node scripts/e2e-restore-history.mjs` | B-01: Settings > Restore shows the success message (and the quota notices) instead of "Restore failed"; B-04: a restore keeps message ids and times, and gives old backups deterministic ids |
 | `node scripts/e2e-two-windows.mjs [folder]` | B-04: two side panels continue the same conversation at the same time - both turns are saved, each question stays with its answer, identical messages are not folded (fails on the original package) |
 | `node scripts/e2e-drop-image.mjs` | R-06: dropping a page image attaches it without also inserting its URL as text; S-08: the first dropped image asks first, and declining attaches nothing and pastes nothing |

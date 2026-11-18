@@ -495,7 +495,7 @@ chrome.runtime.onConnect.addListener((port) => {
       // settled promise.
       await restoreSettingsFromBackupOnce();
       if (abortController.signal.aborted) return;
-      let { question, pageContext, includePageContext, history, attachments = [], images = [], modelId, factCheck, noWebResearch = false, forceWebResearch = false, translateMode = false, translateSource = null, translateSourceTruncated = false } = msg.payload;
+      let { question, pageContext, includePageContext, history, attachments = [], images = [], modelId, factCheck, noWebResearch = false, forceWebResearch = false, translateMode = false, translateSource = null, translateSourceTruncated = false, translateTarget = null } = msg.payload;
       requestWasTranslation = translateMode === true;
       const lang = await getStoredLanguage();
       if (abortController.signal.aborted) return;
@@ -639,6 +639,13 @@ chrome.runtime.onConnect.addListener((port) => {
       // original text is echoed back and no provider request is made at all.
       let translationIdentity = false;
       let identityText = "";
+      // The language the text is translated INTO, as the side panel sends it
+      // ("zh-CN", "ja", ...). It is used only here, on the worker's side: it lets
+      // LineTranslator tell a line the model left alone because it was already in
+      // that language from a line it skipped. It is not part of any provider
+      // request, and it is not redacted: translate-lines.js accepts a value only if
+      // it has the shape of a language code (a message field is not trusted).
+      const lineTranslatorOptions = { targetLanguage: translateTarget };
       // Format-preserving translation: the layout (lines, blank lines,
       // indentation, list markers) is kept in code; the model only translates
       // numbered lines. See translate-lines.js.
@@ -657,7 +664,7 @@ chrome.runtime.onConnect.addListener((port) => {
           translateUsingSelection = usingSelection;
           translationBatches = numberedBatches(prepared);
           translationPrepared = prepared;
-          ctx.lineTranslator = new LineTranslator(prepared, (delta) => ctx.sendChunk(delta));
+          ctx.lineTranslator = new LineTranslator(prepared, (delta) => ctx.sendChunk(delta), lineTranslatorOptions);
           if (typeof translateSource === "string" && translateSource.trim()) {
             effectiveQuestion = `${question}\n\n${prepared.numbered}`;
           } else {
@@ -769,7 +776,7 @@ chrome.runtime.onConnect.addListener((port) => {
         if (ctx.lineTranslator.missing > 0 && !abortController.signal.aborted) {
           const firstAttempt = ctx.lineTranslator;
           let replayText = "";
-          const replay = new LineTranslator(translationPrepared, (delta) => { replayText += delta; });
+          const replay = new LineTranslator(translationPrepared, (delta) => { replayText += delta; }, lineTranslatorOptions);
           ctx.lineTranslator = replay;
           try {
             await runProvider(effectiveQuestion, requestPageContextFinal);

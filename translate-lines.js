@@ -98,31 +98,111 @@ const collapseWs = (s) => s.replace(/\s+/g, " ").trim();
 // So a SHORT echo that does not read like a sentence is accepted. A sentence
 // echoed back - 4+ words, sentence case ("Hello world"), or a closing full stop /
 // question mark - is still a miss: that is how a lazy or confused reply looks,
-// and the replay / notice is the right response to it. Only Latin-script text is
-// waved through: a line in another script may simply be in a language other than
-// the target, so an echo of it keeps counting as untranslated.
+// and the replay / notice is the right response to it. Text in another script is
+// waved through only when it is in the TARGET language's own script (see
+// inTargetLanguage below): without that, a line in another script may simply be
+// in a language other than the target, so an echo of it keeps counting as
+// untranslated.
 const SHORT_ECHO_MAX_WORDS = 3;
 const PROTECTED_TOKEN_RE = /\{\{\s*U\d+\s*\}\}/g;
 const LATIN_TEXT_RE = /^[\s\p{Script=Latin}\p{M}\p{N}\p{P}\p{S}\p{Z}]+$/u;
 const bareWord = (w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
 
-// `safeText` is the line as the model saw it ({{Un}} in place of every protected
-// span, which the model can neither translate nor change).
-function mayStayUntranslated(safeText) {
-  const rest = safeText.replace(PROTECTED_TOKEN_RE, " ").trim();
-  if (!HAS_LETTER_RE.test(rest)) return true; // only protected spans, digits, symbols
-  if (!LATIN_TEXT_RE.test(rest)) return false;
-  const words = rest.split(/\s+/).filter((w) => HAS_LETTER_RE.test(w));
+// Whether a piece of Latin-script text reads like a name, a term or a command
+// rather than a sentence.
+function shortLatinEcho(text) {
+  const words = text.split(/\s+/).filter((w) => HAS_LETTER_RE.test(w));
   if (words.length > SHORT_ECHO_MAX_WORDS) return false;
   if (words.length > 1) {
     const [first, ...others] = words.map(bareWord);
     // "Hello world": a capitalized word followed by ordinary lowercase words is
     // a sentence. "Visual Studio Code", "NEW RELEASE" and "npm install" are not.
     const sentenceCase = /^\p{Lu}\p{Ll}+$/u.test(first) && others.some((w) => /^\p{Ll}[\p{Ll}'’-]*$/u.test(w));
-    const sentenceEnd = /[.!?…]["'”’)\]]*$/.test(rest);
+    const sentenceEnd = /[.!?…]["'”’)\]]*$/.test(text);
     if (sentenceCase || sentenceEnd) return false;
   }
   return true;
+}
+
+// ---- echoes in the target language ---------------------------------------------
+// A line that is ALREADY in the language being translated into comes back
+// unchanged from a correct model: a Chinese line on a page translated into
+// Chinese, a kanji heading in a translation into Japanese. Only Latin-script
+// echoes were accepted, so each of these counted as untranslated - on a bilingual
+// page the single-batch replay (a second request, whose echo was judged missing
+// again) and a "N lines were not translated" notice for a translation that was in
+// fact complete.
+//
+// The side panel sends the target language with the request ("zh-CN", "ja", ...)
+// and LineTranslator accepts an echo that is written in that language's script.
+// Only languages whose script sets them apart can be recognised from the text:
+// English, French and Spanish are all Latin script, so an English sentence echoed
+// into an English translation still counts as a miss, and so does a Traditional
+// Chinese line echoed into a Simplified Chinese one. Without a target, or with
+// one that is not listed here, nothing changes.
+//
+//   zh - Han (and Bopomofo). Kana or Hangul in the line means it is Japanese or
+//        Korean, which is not the target, so it is not accepted.
+//   ja - Han, Hiragana and Katakana. Han alone is also how Chinese is written,
+//        and Japanese sentences carry kana, so a LONG kanji-only line is taken
+//        for Chinese; a short one is a name or a label ("東京", "会社概要").
+//
+// What is not in the target script must be Latin and short ("使用 React 构建",
+// "Visual Studio Code をインストール"): a Latin phrase of four words or more inside
+// the line is prose that should have been translated, so it is not accepted.
+const JA_KANJI_ONLY_MAX = 8;
+const KANA_RE = /[\p{Script=Hiragana}\p{Script=Katakana}]/u;
+const HAN_G_RE = /\p{Script=Han}/gu;
+// Boundaries for the Latin-phrase check: runs of target-script letters and of CJK
+// punctuation (、，。：「」（） and the other full-width marks), so that a list of
+// names - "Visual Studio Code、GitHub Copilot、Docker Desktop" - is judged one
+// name at a time, not as one long phrase.
+const CJK_SCRIPT_RUN_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Bopomofo}\u{3000}-\u{303f}\u{ff01}-\u{ff0f}\u{ff1a}-\u{ff20}\u{ff3b}-\u{ff40}\u{ff5b}-\u{ff65}]+/u;
+// A letter that belongs to neither the listed scripts nor to Latin / Common /
+// Inherited (the neutral scripts: digits, symbols, the katakana long-vowel mark).
+const foreignLetterRe = (scripts) =>
+  new RegExp(`(?![${scripts.map((s) => `\\p{Script=${s}}`).join("")}\\p{Script=Latin}\\p{Script=Common}\\p{Script=Inherited}])\\p{L}`, "u");
+const TARGET_SCRIPTS = {
+  zh: {
+    own: /[\p{Script=Han}\p{Script=Bopomofo}]/u,
+    foreign: foreignLetterRe(["Han", "Bopomofo"]),
+    kanjiOnlyMax: Infinity,
+  },
+  ja: {
+    own: /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u,
+    foreign: foreignLetterRe(["Han", "Hiragana", "Katakana"]),
+    kanjiOnlyMax: JA_KANJI_ONLY_MAX,
+  },
+};
+const LANGUAGE_CODE_RE = /^([A-Za-z]{2,3})(?:[-_][A-Za-z0-9]{1,8}){0,3}$/;
+
+// The script profile for a language code, or null when the text cannot tell the
+// language apart (Latin-script languages), the code is not listed, or it is not a
+// language code at all (the value comes from a message, so it is not trusted).
+function targetProfile(code) {
+  if (typeof code !== "string" || code.length > 35) return null;
+  const m = LANGUAGE_CODE_RE.exec(code);
+  return (m && TARGET_SCRIPTS[m[1].toLowerCase()]) || null;
+}
+
+function inTargetLanguage(rest, target) {
+  if (!target || !target.own.test(rest) || target.foreign.test(rest)) return false;
+  if (!KANA_RE.test(rest) && target.kanjiOnlyMax !== Infinity && (rest.match(HAN_G_RE) || []).length > target.kanjiOnlyMax) return false;
+  return rest.split(CJK_SCRIPT_RUN_RE).every((piece) => {
+    const words = piece.split(/\s+/).filter((w) => HAS_LETTER_RE.test(w));
+    return words.length <= SHORT_ECHO_MAX_WORDS;
+  });
+}
+
+// `safeText` is the line as the model saw it ({{Un}} in place of every protected
+// span, which the model can neither translate nor change). `target` is a profile
+// from targetProfile(), or null.
+function mayStayUntranslated(safeText, target = null) {
+  const rest = safeText.replace(PROTECTED_TOKEN_RE, " ").trim();
+  if (!HAS_LETTER_RE.test(rest)) return true; // only protected spans, digits, symbols
+  if (inTargetLanguage(rest, target)) return true;
+  if (!LATIN_TEXT_RE.test(rest)) return false;
+  return shortLatinEcho(rest);
 }
 // "[3] text" from the model - optionally markdown-escaped as "\[3\] text",
 // exactly like PLACEHOLDER_RE tolerates escaped brackets in pii-filter.js.
@@ -249,9 +329,12 @@ export function numberedBatches(prepared, maxChars = 8000) {
 }
 
 export class LineTranslator {
-  constructor(prepared, emit) {
+  // options.targetLanguage: the language code the text is translated INTO
+  // ("zh-CN", "ja", ...). Optional; see "echoes in the target language" above.
+  constructor(prepared, emit, options = {}) {
     this.lines = prepared.lines;
     this.emit = emit;
+    this.target = targetProfile(options?.targetLanguage);
     this.buf = "";
     this.next = 0;          // next source line index to output
     this.heldId = -1;       // index of the model line currently being collected
@@ -293,9 +376,10 @@ export class LineTranslator {
     // visible text would lose the URL / inline code / link target. Both fall
     // back to the original line and leave the line counted as missing - except
     // an echo of a line that plausibly needed no translation (a name, an
-    // acronym, a command, a bare URL; see mayStayUntranslated), which is the
-    // correct output: it is written as the source had it and counts as done.
-    const usable = !!restored && tokensOk && (!echo || mayStayUntranslated(l.safe));
+    // acronym, a command, a bare URL; see mayStayUntranslated), or of a line that
+    // is already in the target language, which is the correct output: it is
+    // written as the source had it and counts as done.
+    const usable = !!restored && tokensOk && (!echo || mayStayUntranslated(l.safe, this.target));
     const translatedText = usable ? (echo ? l.body : restored) : "";
     if (translatedText) this.translated++;
     this.write(`${l.prefix}${translatedText || l.body}${l.trailingWhitespace}`);

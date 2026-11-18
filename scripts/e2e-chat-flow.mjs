@@ -270,6 +270,45 @@ try {
     assert.ok(!historyTitles.some((ttl) => ttl.includes("highlighted text")), `no option carries the instruction prefix: ${JSON.stringify(historyTitles)}`);
   });
 
+  // #5: a line the model leaves alone because it is already in the language
+  // being translated INTO is a finished line. Before the side panel sent the
+  // target, only Latin-script echoes were accepted: a Chinese line on a page
+  // translated into Chinese counted as "not translated", the whole request was
+  // replayed, and the panel showed a "lines were not translated" notice.
+  const translateSelection = (text) => worker.evaluate((t) => chrome.runtime.sendMessage({
+    type: "CONTEXT_ACTION",
+    pending: { action: "translate", text: t, format: "text", truncated: false, createdAt: Date.now() },
+  }), text);
+  const noticeBubbles = () => page.evaluate(() => [...document.querySelectorAll(".bubble.notice .bubble-text")].map((b) => b.textContent.trim()));
+  const BILINGUAL_SELECTION = "Welcome to the product page.\n欢迎来到产品页面。";
+  const BILINGUAL_REPLY = "[1] 欢迎访问产品页面。\n[2] 欢迎来到产品页面。\n";
+
+  await test("a Chinese line left alone in a translation into the preferred language Chinese is not 'not translated' (#5)", async () => {
+    await page.click("#clearBtn");
+    await worker.evaluate(() => chrome.storage.local.set({ preferredTranslationLanguage: "zh-CN" }));
+    Object.assign(provider, { chunks: 8, intervalMs: 20, prefix: "x", reply: BILINGUAL_REPLY, requests: [] });
+    await translateSelection(BILINGUAL_SELECTION);
+    await waitFor(async () => (await lastReply()).includes("欢迎访问"), "the translation to render");
+    await waitFor(sendEnabled, "the composer to unlock");
+    await sleep(300); // an off-screen replay or a late notice would show up now
+    assert.equal(provider.requests.length, 1, "nothing is missing, so there is no second (replay) request");
+    assert.deepEqual(await noticeBubbles(), [], "no 'lines were not translated' notice");
+    assert.deepEqual(await errorBubbles(), []);
+    assert.equal((await lastReply()).replace(/\s+/g, " "), "欢迎访问产品页面。 欢迎来到产品页面。");
+  });
+
+  await test("control: the same reply with English as the preferred language IS reported (the check above is not vacuous)", async () => {
+    await page.click("#clearBtn");
+    await worker.evaluate(() => chrome.storage.local.remove("preferredTranslationLanguage")); // default: English
+    Object.assign(provider, { chunks: 8, intervalMs: 20, prefix: "x", reply: BILINGUAL_REPLY, requests: [] });
+    await translateSelection(BILINGUAL_SELECTION);
+    await waitFor(async () => (await lastReply()).includes("欢迎访问"), "the translation to render");
+    await waitFor(sendEnabled, "the composer to unlock");
+    await sleep(300);
+    assert.equal(provider.requests.length, 2, "an echoed Chinese line is a missing line when the target is English: replayed once");
+    assert.equal((await noticeBubbles()).length, 1, "and the notice is shown");
+  });
+
   assert.deepEqual(pageErrors, [], `uncaught errors in the panel: ${pageErrors.join(" | ")}`);
 } finally {
   await context.close();

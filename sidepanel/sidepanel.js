@@ -3309,7 +3309,7 @@ function gatePageSend(kind, forcedIncludePageContext) {
   return kind !== "ordinary" || pageReadingEnabled;
 }
 
-async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "", noWebResearch = false, includePageImages = false, forceWebResearch = false, translateMode = false, translateSource = null, translateSourceFormat = "text", translateSourceTruncated = false) {
+async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext = null, forcedDisplayQuestion = null, factCheck = false, factCheckSelectedText = "", noWebResearch = false, includePageImages = false, forceWebResearch = false, translateMode = false, translateSource = null, translateSourceFormat = "text", translateSourceTruncated = false, translateTarget = null) {
   e?.preventDefault?.();
   const question = forcedQuestion !== null ? String(forcedQuestion).trim() : questionInput.value.trim();
   // Cap the TYPED question for the request (forced questions from quick
@@ -3673,6 +3673,11 @@ async function handleSubmit(e, forcedQuestion = null, forcedIncludePageContext =
         translateSource: translateMode === true && typeof translateSource === "string" ? translateSource : null,
         // The selection was already cut by the extractor (see content.js).
         translateSourceTruncated: translateMode === true && translateSourceTruncated === true,
+        // The language code the text is translated INTO (the "Preferred
+        // Translation Language", e.g. "zh-CN"). The worker uses it to tell a line
+        // the model left alone because it was already in that language from one it
+        // skipped; it is never sent to the provider.
+        translateTarget: translateMode === true && typeof translateTarget === "string" ? translateTarget : null,
       },
     };
     try {
@@ -3769,7 +3774,7 @@ async function processContextAction(pending) {
   // Arguments after the display text: no fact-check, no selected claim, web
   // research off (translation never needs it), no page images, no forced web
   // research, translateMode on with the selection itself as the source.
-  await handleSubmit(null, prompt, false, displayQuestion, false, "", true, false, false, true, pending.text, pending.format === "markdown" ? "markdown" : "text", pending.truncated === true);
+  await handleSubmit(null, prompt, false, displayQuestion, false, "", true, false, false, true, pending.text, pending.format === "markdown" ? "markdown" : "text", pending.truncated === true, target.code);
 }
 
 // The createdAt timestamp of the context-menu action most recently claimed by
@@ -3923,7 +3928,8 @@ async function runQuickPageAction(apiPromptKey, displayPromptKey, factCheck = fa
   const lang = currentLang || await getStoredLanguage();
   // The Translate button targets the "Preferred Translation Language" setting;
   // the API prompt names the language in English, the visible bubble in the UI language.
-  const vars = translateMode ? await getPreferredTranslationLanguage().then((l) => ({ api: { language: t("en", l.nameKey) }, display: { language: t(lang, l.nameKey) } })) : {};
+  const target = translateMode ? await getPreferredTranslationLanguage() : null;
+  const vars = target ? { api: { language: t("en", target.nameKey) }, display: { language: t(lang, target.nameKey) } } : {};
   const apiPrompt = t("en", apiPromptKey, vars.api);
   const displayPrompt = t(lang, displayPromptKey, vars.display);
   // Fact Check keeps its dedicated Tavily path. Explain performs Tavily
@@ -3934,7 +3940,7 @@ async function runQuickPageAction(apiPromptKey, displayPromptKey, factCheck = fa
   // other field and restores only [NAME#n] in its Tavily query. An empty
   // selection still sends "" - background then falls back to page claims.
   const factCheckSelectedText = factCheck ? await getActivePageSelection() : "";
-  await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck, factCheckSelectedText, !factCheck && !forceWebResearch, true, forceWebResearch, translateMode);
+  await handleSubmit(null, apiPrompt, true, displayPrompt, factCheck, factCheckSelectedText, !factCheck && !forceWebResearch, true, forceWebResearch, translateMode, null, "text", false, target?.code ?? null);
 }
 
 quickSummarizeBtn?.addEventListener("click", () => {

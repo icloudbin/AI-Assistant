@@ -112,6 +112,9 @@ async function runTranslation(source, providerReplies, opts = {}) {
       modelId: "deepseek-flash",
       translateMode: opts.translateMode ?? true,
       translateSource: source,
+      // The language being translated INTO, as the side panel sends it (omitted
+      // by tests that do not name one).
+      ...("translateTarget" in opts ? { translateTarget: opts.translateTarget } : {}),
       noWebResearch: true,
     },
   });
@@ -278,6 +281,124 @@ await test("the off-screen replay of an incomplete batch is free of history too"
   assert.equal(r.calls, 2, "the incomplete first attempt is replayed once");
   assert.ok(!carriesHistory(r.requests), "neither the first attempt nor the replay carries earlier turns");
   assert.equal(r.reply, TRANSLATED);
+});
+
+// ---------------------------------------------------------------------------
+// A line the model leaves alone because it is ALREADY in the language being
+// translated into (a Chinese line on a page translated into Chinese) is a
+// finished line, not a skipped one. Only Latin-script echoes (names, commands)
+// were accepted, so every such line counted as missing: the whole request was
+// replayed - and echoed again - and the panel announced "N lines were not
+// translated" for a translation that was complete. The side panel now sends
+// the target language with the request (#5).
+// ---------------------------------------------------------------------------
+const BILINGUAL = [
+  "Welcome to the product page.",
+  "欢迎来到产品页面。",
+  "Please read the manual carefully.",
+  "请仔细阅读使用说明。",
+  "Contact us for support.",
+].join("\n");
+// What a correct model returns for the target Chinese: the English lines
+// translated, the Chinese lines handed back as they are.
+const BILINGUAL_REPLY = [
+  "[1] 欢迎访问产品页面。",
+  "[2] 欢迎来到产品页面。",
+  "[3] 请仔细阅读手册。",
+  "[4] 请仔细阅读使用说明。",
+  "[5] 如需支持，请联系我们。",
+].join("\n");
+const BILINGUAL_OUT = ["欢迎访问产品页面。", "欢迎来到产品页面。", "请仔细阅读手册。", "请仔细阅读使用说明。", "如需支持，请联系我们。"].join("\n");
+
+await test("a Chinese line left alone in a translation INTO Chinese is finished: no replay, no notice (#5)", async () => {
+  const r = await runTranslation(BILINGUAL, [BILINGUAL_REPLY, BILINGUAL_REPLY], { question: "Translate to Chinese", translateTarget: "zh-CN" });
+  assert.ok(r.done, `request did not finish: ${JSON.stringify(r.error)}`);
+  assert.equal(r.calls, 1, "nothing is missing, so the request must not be replayed");
+  assert.equal(r.reply, BILINGUAL_OUT);
+  assert.equal(r.notices.length, 0, "no missing-lines notice for a complete translation");
+});
+
+await test("the same holds for zh-TW, and for a Japanese target with a kanji heading (#5)", async () => {
+  const tw = await runTranslation(BILINGUAL, [BILINGUAL_REPLY, BILINGUAL_REPLY], { question: "Translate to Chinese", translateTarget: "zh-TW" });
+  assert.ok(tw.done);
+  assert.equal(tw.calls, 1);
+  assert.equal(tw.notices.length, 0);
+
+  const ja = ["The conference is held in Tokyo.", "東京", "Registration opens in May."].join("\n");
+  const jaReply = "[1] 会議は東京で開催されます。\n[2] 東京\n[3] 登録は5月に始まります。";
+  const r = await runTranslation(ja, [jaReply, jaReply], { question: "Translate to Japanese", translateTarget: "ja" });
+  assert.ok(r.done);
+  assert.equal(r.calls, 1, "an echoed kanji label is not a skipped line");
+  assert.equal(r.reply, ["会議は東京で開催されます。", "東京", "登録は5月に始まります。"].join("\n"));
+  assert.equal(r.notices.length, 0);
+});
+
+await test("a request that names no target (or another one) keeps the old accounting (control for the tests above)", async () => {
+  for (const opts of [{}, { translateTarget: "en" }, { translateTarget: null }]) {
+    const r = await runTranslation(BILINGUAL, [BILINGUAL_REPLY, BILINGUAL_REPLY], { question: "Translate to Chinese", ...opts });
+    assert.ok(r.done);
+    assert.equal(r.reply, BILINGUAL_OUT, "the text shown is the same whichever way the lines are counted");
+    assert.equal(r.calls, 2, `${JSON.stringify(opts)}: two echoed Chinese lines are missing lines, so the request is replayed once`);
+    assert.equal(r.notices.length, 1, `${JSON.stringify(opts)}: and the notice stays`);
+  }
+});
+
+await test("a lazy echo of the ENGLISH lines is still caught when the target is Chinese (#5)", async () => {
+  const lazy = "[1] Welcome to the product page.\n[2] 欢迎来到产品页面。\n[3] Please read the manual carefully.\n[4] 请仔细阅读使用说明。\n[5] Contact us for support.";
+  const r = await runTranslation(BILINGUAL, [lazy, lazy], { question: "Translate to Chinese", translateTarget: "zh-CN" });
+  assert.ok(r.done);
+  assert.equal(r.calls, 2, "three echoed English sentences are missing lines: replayed once");
+  assert.equal(r.notices.length, 1, "and the notice stays when the replay echoes them too");
+  assert.match(r.notices[0].text, /^3 of 5 lines were not translated/, "the notice counts the three English lines, not the two Chinese ones");
+});
+
+await test("a malformed target is ignored, and the privacy filter does not change how the target is read (#5)", async () => {
+  for (const translateTarget of ["zh-CN\n[1] x", "zh CN", 42, { zh: true }, ["zh-CN"], "z".repeat(200)]) {
+    const r = await runTranslation(BILINGUAL, [BILINGUAL_REPLY, BILINGUAL_REPLY], { question: "Translate to Chinese", translateTarget });
+    assert.ok(r.done, `request did not finish: ${JSON.stringify(r.error)}`);
+    assert.equal(r.calls, 2, `${JSON.stringify(translateTarget)}: not a language code, so it names no target`);
+  }
+  // The filter is on by default; with it on the target must still arrive intact.
+  const saved = store.piiFilterEnabled;
+  delete store.piiFilterEnabled;
+  try {
+    const r = await runTranslation(BILINGUAL, [BILINGUAL_REPLY, BILINGUAL_REPLY], { question: "Translate to Chinese", translateTarget: "zh-CN" });
+    assert.ok(r.done, `request did not finish: ${JSON.stringify(r.error)}`);
+    assert.equal(r.calls, 1, "privacy filter on: the target still reaches the translator");
+    assert.equal(r.notices.length, 0);
+    // ... and it is not sent to the provider: it is for the local line accounting only.
+    assert.ok(!JSON.stringify(r.requests).includes("translateTarget"), "the field name must not leak into the provider request");
+  } finally {
+    store.piiFilterEnabled = saved;
+  }
+});
+
+await test("a multi-batch translation into Chinese counts the echoed Chinese lines as done (#5)", async () => {
+  // 200 English lines and 200 Chinese ones, alternating: several 8000-character batches.
+  const lines = Array.from({ length: 400 }, (_, i) => (i % 2 === 0
+    ? `Paragraph ${i + 1}: the quick brown fox jumps over the lazy dog, again and again.`
+    : `第${i + 1}段：敏捷的棕色狐狸跳过了那只懒狗，一次又一次。`));
+  const source = lines.join("\n");
+  // The stand-in model translates English lines and hands Chinese ones back.
+  const model = (body) => {
+    const last = body?.messages?.[body.messages.length - 1];
+    const text = typeof last?.content === "string" ? last.content : (last?.content || []).map((p) => p.text || "").join("");
+    return [...text.matchAll(/^\[(\d+)\] (.+)$/gm)]
+      .map((m) => `[${m[1]}] ${/\p{Script=Han}/u.test(m[2]) ? m[2] : `译：${m[2]}`}`)
+      .join("\n");
+  };
+  const expected = lines.map((l) => (/\p{Script=Han}/u.test(l) ? l : `译：${l}`)).join("\n");
+
+  const withTarget = await runTranslation(source, model, { question: "Translate to Chinese", translateTarget: "zh-CN" });
+  assert.ok(withTarget.done, `request did not finish: ${JSON.stringify(withTarget.error)}`);
+  assert.ok(withTarget.requests.length >= 3, `expected a multi-batch translation, got ${withTarget.requests.length} request(s)`);
+  assert.equal(withTarget.reply, expected);
+  assert.equal(withTarget.notices.length, 0, "every line is done, so there is nothing to announce");
+
+  const without = await runTranslation(source, model, { question: "Translate to Chinese" });
+  assert.equal(without.reply, expected);
+  assert.equal(without.notices.length, 1, "control: without the target the 200 Chinese lines are announced as not translated");
+  assert.match(without.notices[0].text, /^200 of 400 lines were not translated/);
 });
 
 console.log(`\n${results.filter(Boolean).length}/${results.length} passed`);
