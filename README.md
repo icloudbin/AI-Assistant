@@ -86,6 +86,7 @@ AI-Assistant/
     ├── test-openai-compatible.mjs
     ├── test-options-backup.mjs
     ├── test-outbound-pii.mjs
+    ├── test-pii-cn-address.mjs
     ├── test-pii-filter.mjs
     ├── test-pii-name-perf.mjs
     ├── test-pii-restore.mjs

@@ -325,7 +325,34 @@ const US_ADDRESS_RE = new RegExp(
   String.raw`(?:,\s*${CITY_WORDS},\s*[A-Z]{2}(?:\s+\d{5}(?:-\d{4})?)?)?`,
   "g"
 );
-const CN_ADDRESS_RE = /(?:[一-龥]{2,9}(?:省|自治区|特别行政区|市|区|县|镇|乡)){1,4}[一-龥\d]{0,12}?(?:路|街|大道|巷|弄|胡同)\d{1,5}(?:号|號)?(?:[一-龥\d-]{0,12}?(?:栋|幢|号楼|单元|室|楼|层|座))*/g;
+// Chinese street addresses: region words, then a street and a number, e.g.
+// 北京市朝阳区建国路88号3号楼502室.
+//
+// A region group is a name of 2-9 characters plus a region word, and up to four
+// groups follow one another. A run of Han characters can be cut into groups in
+// many ways; written as plain nested quantifiers the engine tried all of them at
+// every start position whenever no street followed (16,000 区 took 2.5 s, 60,000
+// about 10 s, and a page is read up to 120,000 characters). So each group is
+// matched inside a lookahead and consumed through a back-reference, which makes
+// it atomic: once a group is taken it is not cut again. Two cuts are offered for
+// every group, the longest span first and then the shortest. The longest alone
+// is not enough when region words stand next to each other: in 济南市市中区 it
+// ends the first group at the second 市, and 中区 can no longer be a group, so
+// the match would start a few characters late and leave the first characters of
+// the address in the clear. The matches are the old pattern's (see
+// scripts/test-pii-cn-address.mjs), apart from rare chains of three or more
+// groups, where a match can start a few characters later and still ends in the
+// same place.
+const CN_REGION_WORD = "(?:省|自治区|特别行政区|市|区|县|镇|乡)";
+const CN_REGION_GROUP = String.raw`(?:(?=([一-龥]{2,9}${CN_REGION_WORD}))\1|(?=([一-龥]{2,9}?${CN_REGION_WORD}))\2)`;
+const CN_ADDRESS_RE = new RegExp(
+  String.raw`${CN_REGION_GROUP}{1,4}[一-龥\d]{0,12}?(?:路|街|大道|巷|弄|胡同)\d{1,5}(?:号|號)?(?:[一-龥\d-]{0,12}?(?:栋|幢|号楼|单元|室|楼|层|座))*`,
+  "g"
+);
+// Cheap test run before the rule: it needs a street word directly followed by a
+// digit. A bare street character is no use - 道 and 同 are in almost every
+// Chinese text ("知道", "同意").
+const CN_ADDRESS_GUARD_RE = /[路街道巷弄同]\d/;
 
 // Each rule: [regex, replacement | function]. Order matters (specific first).
 const RULES = [
@@ -548,10 +575,7 @@ const RULES = [
 
   // --- street addresses ---
   [US_ADDRESS_RE, "[ADDRESS]"],
-  [CN_ADDRESS_RE, "[ADDRESS]", (s) => /[路街道巷弄同]/.test(s)],
-  // prefilter: the rule requires one of these suffix characters; without
-  // them the greedy region-grouping backtracks catastrophically on runs of
-  // 区/市/县 (16k 区 = 4.3s).
+  [CN_ADDRESS_RE, "[ADDRESS]", (s) => CN_ADDRESS_GUARD_RE.test(s)],
   // UK postcodes (SW1A 2AA, M1 1AE, EC1A1BB).
   [/(?<![A-Za-z0-9])[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}(?![A-Za-z0-9])/g, "[POSTAL_CODE]"],
 

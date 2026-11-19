@@ -14,6 +14,7 @@ None of these are loaded by the extension (they are not referenced from `manifes
 | `node scripts/test-markdown-heading.mjs` | B-05: heading parser matches the old regex over adversarial short strings and passes performance checks |
 | `node scripts/test-markdown-render.mjs` | Markdown rendering and sanitization regression cases |
 | `node scripts/test-pii-name-perf.mjs` | B-06: PII name rule remains linear and behavior-compatible |
+| `node scripts/test-pii-cn-address.mjs` | Chinese street-address rule of the PII filter: behaviour, the same matches as the old pattern (composed addresses, every short token sequence, random and deep region-word chains, through the real filter), and linear cost on 60,000-character runs of region words (the old pattern needed up to 10 s) |
 | `node scripts/test-untrusted-boundary.mjs` | S-01 / S-02 / S-04: request boundary ids, structured attachments, and privacy-safe Explain research |
 | `node scripts/test-pii-restore.mjs` | S-03: PII placeholders are restored in text only, never in link targets or image URLs |
 | `node scripts/test-pii-filter.mjs` | PII redaction rules and edge cases |
