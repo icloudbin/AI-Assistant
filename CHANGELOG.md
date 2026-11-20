@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## Six fixes from a code-analysis round (v1.10.180)
 
-Six fixes from a code-analysis round, in the order they were made. Each one has its own regression tests, written red-first (they fail on the previous commit). The build number is not bumped.
+Six fixes from a code-analysis round, in the order they were made. Each one has its own regression tests, written red-first (they fail on the previous commit).
 
 - **Translation requests no longer re-send the conversation history with every batch** (background.js). A translation is self-contained, but every batch - and the off-screen replay of an incomplete one - carried the whole chat history, so a 15-batch page after one earlier page translation sent that translation 15 times. `translateMode` now sends no history, as fact-check already did. Ordinary follow-up questions keep theirs (scripts/test-translate-replay.mjs).
 - **Stream limits: the byte cap is a backstop, and reasoning gets its own limit** (providers/openai-compatible.js, i18n.js). The 4 MiB cap counted SSE framing and dropped reasoning text, so with the providers' per-token envelopes it held only ~13-17k tokens in total, while the catalog asks Groq's GPT-OSS models for up to 65,536 output tokens; 7 of 11 modelled replies (up to 33,000 tokens) were rejected. `STREAM_MAX_BYTES` is now a 64 MiB backstop, reasoning has `STREAM_MAX_REASONING_CHARS` (1,000,000) with a message that does not promise a partial reply (six languages), and the buffer for a JSON-labelled 200 body is bounded to 1 MiB (scripts/test-openai-compatible.mjs).
@@ -11,6 +11,8 @@ Six fixes from a code-analysis round, in the order they were made. Each one has 
 - **Translation: an echoed line that is already in the target language is done** (background.js, sidepanel/sidepanel.js, translate-lines.js). With Chinese or Japanese as the target, a Chinese line handed back unchanged counted as skipped: a needless replay request and a false "N of M lines were not translated" notice. The panel now sends `translateTarget` and `LineTranslator` accepts an echo written in that language's script; Latin-script targets are judged exactly as before.
 - **PII filter: the Chinese address rule no longer takes seconds on a run of region words** (privacy/pii-filter.js). 16,000 区 took 2.5 s and 60,000 about 10 s in the service worker (the page cap is 120,000 characters); the guard in front of the rule passed any text containing 道 or 同. Region groups are now atomic (longest span, then shortest) and the guard asks for a street character followed by a digit: 16,000 区 now take about 22 ms and 60,000 about 80 ms, ordinary text is unchanged. The matches are the old pattern's, apart from rare chains of three or more groups where a match can start a few characters later and still ends in the same place (scripts/test-pii-cn-address.mjs).
 - Tests: 30 Node suites + check-package, the nine Playwright e2e suites and `scripts/test-sidepanel-context.py` green. (`test-extension-e2e.mjs` and `test-chrome-browser.mjs` need a real Chrome and were not run.)
+- Tests (release verification, 2026-11-20, on e617f96): all 33 Node suites (now including real-Chrome `test-extension-e2e.mjs` and `test-chrome-browser.mjs`) + check-package green; the nine Playwright e2e suites green; the live real-key provider/vision checks (DeepSeek, Groq 65,536-token cap proof, OpenRouter, Tavily, PII round-trip, two vision models) green; the real-Chrome deep-test suite 33/33 with zero console errors (the reported auto-research over-trigger no longer fires).
+- Build bumped to 1.10.180.
 
 ## Developer-review follow-ups to the DATA-03/04/05/06 round (v1.10.179)
 
